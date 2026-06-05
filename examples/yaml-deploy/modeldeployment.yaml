@@ -1,0 +1,7 @@
+apiVersion: inference.inferops.dev/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: yaml-qwen
+spec:
+  model: Qwen/Qwen2.5-0.5B-Instruct
+  runtimeRef: nano-vllm

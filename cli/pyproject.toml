@@ -1,0 +1,13 @@
+[project]
+name = "inferops-cli"
+version = "0.0.0"
+description = "CLI for deploying nano-vLLM models to Kubernetes."
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+inferops = "inferops_cli.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

@@ -1,0 +1,21 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: modeldeployments.inference.inferops.dev
+spec:
+  group: inference.inferops.dev
+  names:
+    kind: ModelDeployment
+    plural: modeldeployments
+    singular: modeldeployment
+    shortNames:
+      - mdeploy
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true
