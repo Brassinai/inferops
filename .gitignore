@@ -12,6 +12,7 @@ __pycache__/
 *.py[cod]
 *.pyo
 .pytest_cache/
+.verify/
 .mypy_cache/
 .ruff_cache/
 .tox/

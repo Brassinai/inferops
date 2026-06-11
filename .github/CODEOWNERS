@@ -1,4 +1,5 @@
 # MVP shared contracts require review from all three lane owners.
+/.github/workflows/ @emmanuelalo52 @opeyemibami @steveoni
 /docs/architecture.md @emmanuelalo52 @opeyemibami @steveoni
 /docs/crds.md @emmanuelalo52 @opeyemibami @steveoni
 /docs/routing.md @emmanuelalo52 @opeyemibami @steveoni

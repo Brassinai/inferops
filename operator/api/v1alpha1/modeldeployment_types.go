@@ -23,16 +23,16 @@ type ModelDeploymentSpec struct {
 
 // ModelDeploymentStatus reports observed deployment state.
 type ModelDeploymentStatus struct {
-	ObservedGeneration int64                  `json:"observedGeneration,omitempty"`
-	Phase              ModelDeploymentPhase   `json:"phase,omitempty"`
-	Endpoint           string                 `json:"endpoint,omitempty"`
-	ServiceName        string                 `json:"serviceName,omitempty"`
-	AssignedNode       string                 `json:"assignedNode,omitempty"`
-	AssignedGPUs       []string               `json:"assignedGPUs,omitempty"`
-	Cache              ModelCacheSummary      `json:"cache,omitempty"`
-	Replicas           ReplicaStatus          `json:"replicas,omitempty"`
-	Model              ModelStatus            `json:"model,omitempty"`
-	Conditions         []Condition            `json:"conditions,omitempty"`
+	ObservedGeneration int64                `json:"observedGeneration,omitempty"`
+	Phase              ModelDeploymentPhase `json:"phase,omitempty"`
+	Endpoint           string               `json:"endpoint,omitempty"`
+	ServiceName        string               `json:"serviceName,omitempty"`
+	AssignedNode       string               `json:"assignedNode,omitempty"`
+	AssignedGPUs       []string             `json:"assignedGPUs,omitempty"`
+	Cache              ModelCacheSummary    `json:"cache,omitempty"`
+	Replicas           ReplicaStatus        `json:"replicas,omitempty"`
+	Model              ModelStatus          `json:"model,omitempty"`
+	Conditions         []Condition          `json:"conditions,omitempty"`
 }
 
 // ModelDeploymentPhase is the observed lifecycle phase of a model deployment.
@@ -70,8 +70,8 @@ type RuntimeSpec struct {
 
 // ResourceRequirements captures compute requirements for inference workloads.
 type ResourceRequirements struct {
-	CPU    string              `json:"cpu,omitempty"`
-	Memory string              `json:"memory,omitempty"`
+	CPU    string             `json:"cpu,omitempty"`
+	Memory string             `json:"memory,omitempty"`
 	GPU    GPUResourceRequest `json:"gpu,omitempty"`
 }
 
@@ -108,7 +108,7 @@ const (
 	ActivationWhenFullReplaceLowestPriority ActivationWhenFull = "ReplaceLowestPriority"
 )
 
-// ScalingSpec defines month-one replica bounds. Advanced autoscaling is not part of MVP-001.
+// ScalingSpec defines explicit replica bounds for a deployment.
 type ScalingSpec struct {
 	MinReplicas int32 `json:"minReplicas,omitempty"`
 	MaxReplicas int32 `json:"maxReplicas,omitempty"`

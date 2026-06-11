@@ -86,13 +86,27 @@ kubectl apply -f modeldeployment.yaml
 
 ## Development
 
-Useful commands:
+Install the required tool versions described in
+[docs/development.md](docs/development.md), then run the same required
+verification used by CI:
+
+```bash
+make verify
+```
+
+Useful focused commands:
 
 ```bash
 make fmt
+make fmt-check
 make test
 make vet
-make helm-lint
 make python-check
-make verify
+make python-test
+make helm-lint
+make helm-template
+make yaml-check
+make schema-check
 ```
+
+Verification requires no GPU or live Kubernetes cluster.

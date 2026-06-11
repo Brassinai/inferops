@@ -4,7 +4,11 @@ Guidance for AI coding agents working on this repository.
 
 ## Project Context
 
-This project is a self-hosted, Kubernetes-native deployment platform for inference runtimes, with initial nano-vLLM support. It lets users deploy OpenAI-compatible model endpoints into their own Kubernetes clusters without relying on Modal, Ray, KServe, or a hosted InferOps control plane.
+This project is a self-hosted, Kubernetes-native deployment platform for
+inference runtimes. It targets nano-vLLM, vLLM, and SGLang, with nano-vLLM as
+the default and first packaged runtime. It lets users deploy OpenAI-compatible
+model endpoints into their own Kubernetes clusters without relying on Modal,
+Ray, KServe, or a hosted InferOps control plane.
 
 The platform should prioritize:
 
@@ -20,9 +24,9 @@ The intended high-level flow is:
 Python SDK / CLI / YAML
         -> Kubernetes API
         -> ModelDeployment CRD
-        -> nano-vLLM Operator
+        -> InferOps Operator
         -> Kubernetes resources
-        -> nano-vLLM runtime pods
+        -> selected inference runtime pods
         -> OpenAI-compatible API endpoint
 ```
 
@@ -109,26 +113,31 @@ When editing Helm charts or Kubernetes manifests:
 - Ensure namespace-scoped and cluster-scoped resources are clearly separated.
 - Run Helm rendering/linting when charts exist.
 
-Expected commands once the repo is scaffolded:
+Required chart verification commands:
 
 ```bash
-helm lint ./deploy/helm/inferops-operator
-helm template inferops ./deploy/helm/inferops-operator
+make helm-lint
+make helm-template
+make schema-check
 ```
 
 ## Testing And Verification
 
-Use the strongest practical verification for the change:
+Run `make verify` before completing a change. It is the same required command
+used by CI and includes:
 
-- Go formatting: `go fmt ./...`
-- Go tests: `go test ./...`
-- Go vetting when useful: `go vet ./...`
-- Linting if configured: `golangci-lint run`
-- CRD generation if Kubebuilder/controller-gen is configured.
-- Helm lint/template checks for chart changes.
-- YAML validation for manifest changes.
+- Go formatting check: `make fmt-check`
+- Go tests: `make test`
+- Go vet: `make vet`
+- Python syntax and tests: `make python-check python-test`
+- Helm lint and rendering: `make helm-lint helm-template`
+- YAML and Kubernetes schema validation: `make yaml-check schema-check`
 
-If a command is not available because the repo has not been scaffolded yet, say that clearly in the final response instead of inventing results.
+Use `make fmt` to write Go formatting changes. Tool versions and installation
+instructions are documented in `docs/development.md`.
+
+If a required tool is unavailable, say that clearly in the final response
+instead of inventing results.
 
 ## Repository Hygiene
 
@@ -139,6 +148,13 @@ If a command is not available because the repo has not been scaffolded yet, say 
 - Keep documentation aligned with behavior.
 - Prefer clear file and package names over vague abstractions.
 - Add comments only where they explain non-obvious infrastructure behavior or operational tradeoffs.
+- Keep code comments timeless and implementation-focused. Do not add roadmap,
+  release-train, or planning labels such as `month-one`, `MVP-001`,
+  `phase 1`, `initial implementation`, or similar language to source code
+  comments.
+- If a code comment is needed, describe the behavior or constraint directly.
+  Put release scope, roadmap notes, and temporary project framing in docs or
+  planning files, not in code comments.
 
 ## Security And Operations
 
