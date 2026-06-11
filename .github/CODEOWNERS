@@ -1,0 +1,11 @@
+# MVP shared contracts require review from all three lane owners.
+/.github/workflows/ @emmanuelalo52 @opeyemibami @steveoni
+/docs/architecture.md @emmanuelalo52 @opeyemibami @steveoni
+/docs/crds.md @emmanuelalo52 @opeyemibami @steveoni
+/docs/routing.md @emmanuelalo52 @opeyemibami @steveoni
+/operator/api/ @emmanuelalo52 @opeyemibami @steveoni
+/operator/internal/templates/ @emmanuelalo52 @opeyemibami @steveoni
+/deploy/manifests/crds/ @emmanuelalo52 @opeyemibami @steveoni
+/deploy/manifests/examples/contracts/ @emmanuelalo52 @opeyemibami @steveoni
+/deploy/helm/inferops-runtime/ @emmanuelalo52 @opeyemibami @steveoni
+/sdk/python/inferops/deploy.py @emmanuelalo52 @opeyemibami @steveoni

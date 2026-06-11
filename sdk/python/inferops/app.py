@@ -19,7 +19,7 @@ class App:
         self,
         *,
         name: str,
-        engine: str,
+        engine: str = "nano-vllm",
         model: str,
         gpu: str | int | None = None,
         cpu: str | None = None,

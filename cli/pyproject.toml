@@ -1,7 +1,7 @@
 [project]
 name = "inferops-cli"
 version = "0.0.0"
-description = "CLI for deploying nano-vLLM models to Kubernetes."
+description = "CLI for deploying inference runtimes to Kubernetes."
 requires-python = ">=3.10"
 dependencies = []
 

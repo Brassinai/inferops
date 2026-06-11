@@ -1,0 +1,28 @@
+apiVersion: inference.inferops.dev/v1alpha1
+kind: ModelCache
+metadata:
+  name: qwen-chat-cache
+spec:
+  modelRepo: Qwen/Qwen2.5-7B-Instruct
+  revision: main
+  storage:
+    type: nodeLocal
+    size: 100Gi
+    nodeName: gpu-node-1
+    path: /var/lib/inferops/models/qwen-chat
+status:
+  observedGeneration: 1
+  phase: Ready
+  revision: main
+  checksum: sha256:fixture
+  nodeName: gpu-node-1
+  path: /var/lib/inferops/models/qwen-chat
+  size: 15Gi
+  lastUsedTime: "2026-06-11T09:00:00Z"
+  conditions:
+    - type: Ready
+      status: "True"
+      observedGeneration: 1
+      lastTransitionTime: "2026-06-11T09:00:00Z"
+      reason: CacheVerified
+      message: Model cache is ready.

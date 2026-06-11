@@ -1,5 +1,17 @@
 # SDK
 
-The Python SDK will provide a developer-friendly path for declaring and deploying nano-vLLM model endpoints.
+The Python SDK provides a developer-friendly path for declaring model
+endpoints backed by nano-vLLM, vLLM, SGLang, or another registered
+`ModelRuntime`. The default engine is `nano-vllm`.
 
-The SDK should compile user intent into Kubernetes-native resources instead of relying on a hosted control plane.
+The SDK compiles each declared model into one
+`inference.inferops.dev/v1alpha1` `ModelDeployment`. Its output follows the
+contract in [crds.md](crds.md), defaults to an inactive deployment, and uses
+the stable `/models/<deployment-name>` gateway route. An app containing
+multiple models produces multiple `ModelDeployment` objects.
+
+The decorator's `engine` value becomes `spec.runtime.ref`; it is not limited to
+the default runtime. Omitting `engine` selects `nano-vllm`.
+
+The SDK talks to the user's Kubernetes API through the CLI or Kubernetes
+client. It does not rely on a hosted InferOps control plane.

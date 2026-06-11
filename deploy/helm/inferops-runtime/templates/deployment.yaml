@@ -22,10 +22,39 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
-            - name: MODEL
-              value: {{ .Values.model | quote }}
+            - name: MODEL_REPO
+              value: {{ .Values.model.repo | quote }}
+            - name: MODEL_REVISION
+              value: {{ .Values.model.revision | quote }}
+            - name: MODEL_PATH
+              value: {{ .Values.model.path | quote }}
+            - name: MAX_MODEL_LEN
+              value: {{ .Values.runtime.maxModelLen | quote }}
+            - name: TENSOR_PARALLEL_SIZE
+              value: {{ .Values.runtime.tensorParallelSize | quote }}
+            - name: GPU_MEMORY_UTILIZATION
+              value: {{ .Values.runtime.gpuMemoryUtilization | quote }}
+            - name: PORT
+              value: "8000"
+            - name: INFEROPS_DRAIN_TIMEOUT
+              value: {{ .Values.runtime.drainTimeout | quote }}
           ports:
             - name: http
               containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            failureThreshold: 60
+            periodSeconds: 10
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+      terminationGracePeriodSeconds: {{ .Values.runtime.terminationGracePeriodSeconds }}

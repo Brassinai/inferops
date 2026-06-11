@@ -1,0 +1,21 @@
+apiVersion: inference.inferops.dev/v1alpha1
+kind: ModelRuntime
+metadata:
+  name: vllm
+spec:
+  engine: vllm
+  protocol: openai
+  defaultImage: ghcr.io/inferops/vllm:latest
+  port: 8000
+  healthPath: /health
+  metricsPath: /metrics
+status:
+  observedGeneration: 1
+  phase: Ready
+  conditions:
+    - type: Ready
+      status: "True"
+      observedGeneration: 1
+      lastTransitionTime: "2026-06-11T09:00:00Z"
+      reason: RuntimeValid
+      message: Runtime definition satisfies the shared contract.

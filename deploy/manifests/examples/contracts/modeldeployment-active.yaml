@@ -1,0 +1,69 @@
+apiVersion: inference.inferops.dev/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: qwen-active
+spec:
+  model:
+    name: qwen-active
+    source: huggingface
+    repo: Qwen/Qwen2.5-7B-Instruct
+    revision: main
+  runtime:
+    ref: nano-vllm
+    maxModelLen: 4096
+    tensorParallelSize: 1
+    gpuMemoryUtilization: 0.85
+  resources:
+    cpu: "8"
+    memory: 32Gi
+    gpu:
+      count: 1
+      vendor: nvidia
+  activation:
+    desiredState: Active
+    whenFull: Queue
+    priority: 50
+    drainTimeout: 5m
+  scaling:
+    minReplicas: 0
+    maxReplicas: 1
+  routing:
+    enabled: true
+    path: /models/qwen-active
+    openAICompatible: true
+  cache:
+    enabled: true
+    type: nodeLocal
+    size: 100Gi
+    path: /var/lib/inferops/models
+status:
+  observedGeneration: 1
+  phase: Active
+  endpoint: /models/qwen-active/v1
+  serviceName: qwen-active-runtime
+  assignedNode: gpu-node-1
+  assignedGPUs:
+    - GPU-fixture
+  cache:
+    state: Ready
+    nodeName: gpu-node-1
+    path: /var/lib/inferops/models/qwen-active
+  replicas:
+    desired: 1
+    ready: 1
+  model:
+    loaded: true
+    repo: Qwen/Qwen2.5-7B-Instruct
+  conditions:
+    - type: Ready
+      status: "True"
+      observedGeneration: 1
+      lastTransitionTime: "2026-06-11T09:10:00Z"
+      reason: RuntimeReady
+      message: Runtime is accepting traffic.
+    - type: RoutingReady
+      status: "True"
+      observedGeneration: 1
+      lastTransitionTime: "2026-06-11T09:10:00Z"
+      reason: RouteEnabled
+      message: Gateway route is enabled.
