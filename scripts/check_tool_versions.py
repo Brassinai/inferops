@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import subprocess
 import sys
 
@@ -33,7 +34,11 @@ def kubeconform_version(go_command: str, kubeconform_command: str) -> str:
     if VERSION_PATTERN.search(reported):
         return reported
 
-    metadata = output(go_command, "version", "-m", kubeconform_command)
+    kubeconform_path = shutil.which(kubeconform_command)
+    if not kubeconform_path:
+        raise ValueError(f"could not locate kubeconform executable {kubeconform_command!r}")
+
+    metadata = output(go_command, "version", "-m", kubeconform_path)
     module_line = next(
         (line for line in metadata.splitlines() if "github.com/yannh/kubeconform" in line and "\tmod\t" in line),
         "",
