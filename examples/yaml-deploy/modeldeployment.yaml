@@ -3,5 +3,36 @@ kind: ModelDeployment
 metadata:
   name: yaml-qwen
 spec:
-  model: Qwen/Qwen2.5-0.5B-Instruct
-  runtimeRef: nano-vllm
+  model:
+    name: yaml-qwen
+    source: huggingface
+    repo: Qwen/Qwen2.5-0.5B-Instruct
+    revision: main
+  runtime:
+    ref: nano-vllm
+    maxModelLen: 4096
+    tensorParallelSize: 1
+    gpuMemoryUtilization: 0.85
+  resources:
+    cpu: "4"
+    memory: 16Gi
+    gpu:
+      count: 1
+      vendor: nvidia
+  activation:
+    desiredState: Inactive
+    whenFull: Queue
+    priority: 50
+    drainTimeout: 5m
+  scaling:
+    minReplicas: 0
+    maxReplicas: 1
+  routing:
+    enabled: true
+    path: /models/yaml-qwen
+    openAICompatible: true
+  cache:
+    enabled: true
+    type: nodeLocal
+    size: 50Gi
+    path: /var/lib/inferops/models

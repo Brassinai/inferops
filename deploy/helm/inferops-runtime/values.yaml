@@ -3,6 +3,24 @@ image:
   tag: "0.0.0"
   pullPolicy: IfNotPresent
 
-model: ""
+model:
+  repo: ""
+  revision: main
+  path: /models/model
 
-resources: {}
+runtime:
+  maxModelLen: 4096
+  tensorParallelSize: 1
+  gpuMemoryUtilization: 0.85
+  drainTimeout: 5m
+  terminationGracePeriodSeconds: 330
+
+resources:
+  requests:
+    cpu: "4"
+    memory: 16Gi
+    nvidia.com/gpu: "1"
+  limits:
+    cpu: "4"
+    memory: 16Gi
+    nvidia.com/gpu: "1"

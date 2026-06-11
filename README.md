@@ -1,6 +1,8 @@
-# inferops
+# InferOps
 
-Easy deployment and management of inference engines in your Kubernetes cluster.
+Kubernetes-native deployment and management for OpenAI-compatible inference
+runtimes. InferOps is designed to support nano-vLLM, vLLM, and SGLang;
+`nano-vllm` is the default runtime and the first packaged integration.
 
 ## Entry Points
 
@@ -10,7 +12,8 @@ InferOps supports multiple ways to deploy and manage inference workloads.
 
 Declare an app in Python and deploy it through the CLI:
 
-The `engine` field selects a managed runtime, such as `nano-vllm`, `vllm`, or `sglang`.
+The optional `engine` field selects a `ModelRuntime`, such as `nano-vllm`,
+`vllm`, or `sglang`. Omitting it in the Python SDK defaults to `nano-vllm`.
 
 ```python
 import inferops
@@ -65,8 +68,16 @@ kind: ModelDeployment
 metadata:
   name: support-bot
 spec:
-  model: Qwen/Qwen2.5-0.5B-Instruct
-  runtimeRef: nano-vllm
+  model:
+    name: support-bot
+    source: huggingface
+    repo: Qwen/Qwen2.5-0.5B-Instruct
+    revision: main
+  runtime:
+    ref: nano-vllm
+  activation:
+    desiredState: Inactive
+    whenFull: Queue
 ```
 
 ```bash

@@ -21,6 +21,6 @@ func run(ctx context.Context) error {
 	}
 
 	_ = scheduler.NewPlanner()
-	fmt.Println("nano-vLLM operator bootstrap")
+	fmt.Println("InferOps operator bootstrap")
 	return nil
 }
