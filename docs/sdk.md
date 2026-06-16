@@ -13,5 +13,10 @@ multiple models produces multiple `ModelDeployment` objects.
 The decorator's `engine` value becomes `spec.runtime.ref`; it is not limited to
 the default runtime. Omitting `engine` selects `nano-vllm`.
 
+The decorator defaults to one NVIDIA GPU for compatibility. Setting `gpu=None`
+produces a CPU-only deployment. Supplying a positive integer requests that many
+NVIDIA GPUs; supplying a non-empty string requests one NVIDIA GPU of that type.
+The selected runtime image must support the requested compute mode.
+
 The SDK talks to the user's Kubernetes API through the CLI or Kubernetes
 client. It does not rely on a hosted InferOps control plane.

@@ -76,10 +76,20 @@ spec:
 Required month-one fields are `spec.model.repo` and `spec.runtime.ref`.
 Defaults are `model.source=huggingface`, `model.revision=main`,
 `activation.desiredState=Inactive`, `activation.whenFull=Queue`,
-`activation.drainTimeout=5m`, `resources.gpu.count=1`,
-`resources.gpu.vendor=nvidia`, `scaling.minReplicas=0`,
+`activation.drainTimeout=5m`, `scaling.minReplicas=0`,
 `scaling.maxReplicas=1`, `routing.enabled=true`, and
 `routing.openAICompatible=true`.
+
+`resources.cpu` and `resources.memory` describe ordinary Kubernetes compute
+requirements. `resources.gpu` is optional; omitting it creates a CPU-only
+runtime workload with no GPU extended-resource request. CPU-only deployments
+must specify both `resources.cpu` and `resources.memory`, and must omit
+`runtime.tensorParallelSize` and `runtime.gpuMemoryUtilization`. When present,
+`resources.gpu.count` is required and must be at least one, and
+`resources.gpu.vendor` defaults to `nvidia`. Runtime compatibility with CPU or
+the requested GPU vendor is determined by the selected `ModelRuntime`.
+Existing GPU manifests should include the GPU block explicitly rather than
+relying on admission defaults.
 
 `spec.runtime.ref` references a `ModelRuntime`; it is not restricted to one
 engine. The standard runtime names are `nano-vllm`, `vllm`, and `sglang`.
@@ -99,6 +109,7 @@ Observed phases:
 | `Pending` | Accepted but not yet reconciled |
 | `Downloading` | Model cache is being prepared |
 | `Cached` | Cache is ready and desired state is inactive |
+| `WaitingForCapacity` | Active is desired but compatible non-GPU compute capacity is unavailable |
 | `WaitingForGPU` | Active is desired but compatible capacity is unavailable |
 | `Activating` | Runtime is starting or loading |
 | `Active` | Runtime is ready and gateway routing is enabled |
@@ -106,8 +117,8 @@ Observed phases:
 | `Deactivating` | Runtime is stopping and releasing capacity |
 | `Failed` | Reconciliation cannot currently make progress |
 
-Standard condition types are `Ready`, `CacheReady`, `GPUAssigned`,
-`RuntimeReady`, `RoutingReady`, and `Degraded`.
+Standard condition types are `Ready`, `CacheReady`, `RuntimeReady`,
+`RoutingReady`, and `Degraded`. GPU deployments also report `GPUAssigned`.
 
 Status also reports `endpoint`, `serviceName`, `assignedNode`,
 `assignedGPUs`, cache summary, desired/ready replicas, and loaded model state.

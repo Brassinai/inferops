@@ -44,6 +44,13 @@ spec:
               required:
                 - model
                 - runtime
+              x-kubernetes-validations:
+                - rule: "has(self.resources) && (has(self.resources.gpu) || (has(self.resources.cpu) && has(self.resources.memory)))"
+                  message: CPU-only deployments must specify resources.cpu and resources.memory
+                - rule: "(has(self.resources) && has(self.resources.gpu)) || (!has(self.runtime.tensorParallelSize) && !has(self.runtime.gpuMemoryUtilization))"
+                  message: tensorParallelSize and gpuMemoryUtilization require resources.gpu
+                - rule: "!has(self.runtime.tensorParallelSize) || (has(self.resources) && has(self.resources.gpu) && self.runtime.tensorParallelSize <= self.resources.gpu.count)"
+                  message: tensorParallelSize must not exceed resources.gpu.count
               properties:
                 model:
                   type: object
@@ -95,13 +102,13 @@ spec:
                       type: string
                     gpu:
                       type: object
-                      default: {}
+                      required:
+                        - count
                       properties:
                         count:
                           type: integer
                           format: int32
                           minimum: 1
-                          default: 1
                         vendor:
                           type: string
                           default: nvidia
@@ -183,7 +190,7 @@ spec:
                   format: int64
                 phase:
                   type: string
-                  enum: [Pending, Downloading, Cached, WaitingForGPU, Activating, Active, Draining, Deactivating, Failed]
+                  enum: [Pending, Downloading, Cached, WaitingForCapacity, WaitingForGPU, Activating, Active, Draining, Deactivating, Failed]
                 endpoint:
                   type: string
                 serviceName:

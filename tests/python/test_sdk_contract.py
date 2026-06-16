@@ -21,6 +21,46 @@ class SDKContractTest(unittest.TestCase):
         self.assertEqual(manifest["spec"]["runtime"]["ref"], "nano-vllm")
         self.assertEqual(manifest["spec"]["routing"]["path"], "/models/qwen-chat")
         self.assertEqual(manifest["spec"]["activation"]["desiredState"], "Inactive")
+        self.assertEqual(manifest["spec"]["resources"]["gpu"]["count"], 1)
+        self.assertEqual(manifest["spec"]["runtime"]["gpuMemoryUtilization"], 0.85)
+
+    def test_registered_model_without_gpu_key_keeps_gpu_default(self) -> None:
+        app = App("support")
+        app.register({"name": "qwen-chat", "engine": "vllm", "model": "Qwen/Qwen2.5-7B-Instruct"})
+
+        manifest = build_manifest(app)
+
+        self.assertEqual(manifest["spec"]["resources"]["gpu"]["count"], 1)
+
+    def test_cpu_only_deployment_omits_gpu_settings(self) -> None:
+        app = App("support")
+
+        @app.model(name="qwen-chat", engine="vllm", model="Qwen/Qwen2.5-7B-Instruct", gpu=None)
+        class QwenChat:
+            pass
+
+        manifest = build_manifest(app)
+
+        self.assertNotIn("gpu", manifest["spec"]["resources"])
+        self.assertEqual(manifest["spec"]["resources"], {"cpu": "4", "memory": "16Gi"})
+        self.assertNotIn("tensorParallelSize", manifest["spec"]["runtime"])
+        self.assertNotIn("gpuMemoryUtilization", manifest["spec"]["runtime"])
+        self.assertEqual(manifest["spec"]["activation"]["desiredState"], "Inactive")
+        self.assertEqual(manifest["spec"]["scaling"], {"minReplicas": 0, "maxReplicas": 1})
+        self.assertTrue(manifest["spec"]["routing"]["enabled"])
+        self.assertTrue(manifest["spec"]["cache"]["enabled"])
+
+    def test_gpu_request_is_explicit(self) -> None:
+        app = App("support")
+
+        @app.model(name="qwen-chat", model="Qwen/Qwen2.5-7B-Instruct", gpu="L4")
+        class QwenChat:
+            pass
+
+        manifest = build_manifest(app)
+
+        self.assertEqual(manifest["spec"]["resources"]["gpu"], {"count": 1, "vendor": "nvidia", "type": "L4"})
+        self.assertEqual(manifest["spec"]["runtime"]["gpuMemoryUtilization"], 0.85)
 
     def test_registered_runtime_is_preserved(self) -> None:
         app = App("support")
@@ -33,6 +73,17 @@ class SDKContractTest(unittest.TestCase):
 
         self.assertEqual(manifest["spec"]["runtime"]["ref"], "vllm")
         self.assertEqual(manifest["spec"]["resources"]["gpu"]["count"], 2)
+        self.assertEqual(manifest["spec"]["runtime"]["tensorParallelSize"], 2)
+
+    def test_invalid_gpu_count_is_rejected(self) -> None:
+        app = App("support")
+
+        @app.model(name="qwen-chat", model="Qwen/Qwen2.5-7B-Instruct", gpu=0)
+        class QwenChat:
+            pass
+
+        with self.assertRaisesRegex(ValueError, "at least 1"):
+            build_manifest(app)
 
     def test_multiple_models_produce_multiple_deployments(self) -> None:
         app = App("support")

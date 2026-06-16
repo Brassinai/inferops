@@ -14,6 +14,8 @@ Declare an app in Python and deploy it through the CLI:
 
 The optional `engine` field selects a `ModelRuntime`, such as `nano-vllm`,
 `vllm`, or `sglang`. Omitting it in the Python SDK defaults to `nano-vllm`.
+The `gpu` field defaults to one GPU for compatibility; set `gpu=None` for a
+CPU-only deployment.
 
 ```python
 import inferops
@@ -74,7 +76,10 @@ spec:
     repo: Qwen/Qwen2.5-0.5B-Instruct
     revision: main
   runtime:
-    ref: nano-vllm
+    ref: vllm
+  resources:
+    cpu: "8"
+    memory: 32Gi
   activation:
     desiredState: Inactive
     whenFull: Queue

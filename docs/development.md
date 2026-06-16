@@ -15,23 +15,25 @@ Install these tools before running verification:
 | Helm | 3.15.4 | 3.15.4 |
 | kubeconform | 0.6.7 | 0.6.7 |
 
-Install the Python verification dependency:
+After Go, Python, and Helm are installed, set up the pinned local verification
+dependencies and run verification:
 
 ```bash
-python3 -m pip install --requirement requirements-dev.txt
+make setup
+make verify
 ```
 
-Install kubeconform with Go:
-
-```bash
-go install github.com/yannh/kubeconform/cmd/kubeconform@v0.6.7
-```
-
-Ensure `$(go env GOPATH)/bin` is on `PATH`.
+`make setup` creates an ignored virtual environment under `.verify/venv`,
+installs the Python verification dependencies there, and installs the pinned
+kubeconform binary under `.verify/bin`. The Makefile automatically uses those
+local tools, so no virtual-environment activation or `PATH` export is required.
+Set `SYSTEM_PYTHON`, `PYTHON`, `GO`, `VENV`, `TOOLS_BIN`, or `KUBECONFORM` to
+override these defaults.
 
 ## Verification Commands
 
 ```bash
+make setup          # install pinned local verification dependencies
 make fmt            # write Go formatting changes
 make fmt-check      # check Go formatting without modifying files
 make test           # run Go tests
@@ -52,6 +54,8 @@ generated locally and ignored by Git.
 `yaml-check` verifies that each required CRD has a served OpenAPI schema.
 `schema-check` then strictly validates Kubernetes resources known to
 kubeconform and skips custom-resource schemas that are not available locally.
+`helm-template` renders both the default GPU runtime chart and its CPU-only
+profile, and fails if the CPU profile contains GPU resources or settings.
 
 ## Required Pull Request Check
 
