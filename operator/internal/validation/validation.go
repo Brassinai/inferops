@@ -17,8 +17,26 @@ func ValidateModelDeployment(deployment v1alpha1.ModelDeployment) error {
 	if deployment.Spec.Runtime.Ref == "" {
 		return fmt.Errorf("spec.runtime.ref is required")
 	}
-	if deployment.Spec.Resources.GPU.Count < 1 {
-		return fmt.Errorf("spec.resources.gpu.count must be at least 1")
+	if deployment.Spec.Resources.GPU == nil {
+		if deployment.Spec.Resources.CPU == "" {
+			return fmt.Errorf("spec.resources.cpu is required for CPU-only deployments")
+		}
+		if deployment.Spec.Resources.Memory == "" {
+			return fmt.Errorf("spec.resources.memory is required for CPU-only deployments")
+		}
+		if deployment.Spec.Runtime.TensorParallelSize != 0 {
+			return fmt.Errorf("spec.runtime.tensorParallelSize requires spec.resources.gpu")
+		}
+		if deployment.Spec.Runtime.GPUMemoryUtilization != 0 {
+			return fmt.Errorf("spec.runtime.gpuMemoryUtilization requires spec.resources.gpu")
+		}
+	} else {
+		if deployment.Spec.Resources.GPU.Count < 1 {
+			return fmt.Errorf("spec.resources.gpu.count must be at least 1")
+		}
+		if deployment.Spec.Runtime.TensorParallelSize > deployment.Spec.Resources.GPU.Count {
+			return fmt.Errorf("spec.runtime.tensorParallelSize must not exceed spec.resources.gpu.count")
+		}
 	}
 	switch deployment.Spec.Activation.DesiredState {
 	case "", v1alpha1.ActivationDesiredStateInactive, v1alpha1.ActivationDesiredStateActive:

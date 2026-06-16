@@ -35,12 +35,21 @@ Deployment and activation are separate:
 
 ```txt
 deploy     = declare model + prepare cache + create stable Service identity
-activate   = acquire whole GPU(s) + start runtime + wait for readiness + route
-deactivate = stop routing + drain + stop runtime + release GPU(s) + keep cache
+activate   = acquire compute + start runtime + wait for readiness + route
+deactivate = stop routing + drain + stop runtime + release compute + keep cache
 ```
 
 Creating a `ModelDeployment` defaults to `Inactive` and must never evict an
 active model. Replacement policies are explicit opt-ins.
+
+CPU-only workloads omit `spec.resources.gpu` and run without a GPU
+extended-resource request. GPU workloads explicitly include
+`spec.resources.gpu`. The selected `ModelRuntime` is responsible for providing
+an image and arguments compatible with the requested compute. CPU-only is a
+compute selection, not a reduced feature tier: caching, activation,
+deactivation, scaling, routing, health checks, metrics, draining, and stable
+endpoint behavior remain the same. GPU scheduling, GPU assignment status, and
+GPU-specific runtime settings apply only to GPU workloads.
 
 ## Stable Names And Routes
 
@@ -91,8 +100,8 @@ Required environment:
 | `MODEL_REVISION` | Immutable or named source revision |
 | `MODEL_PATH` | Prepared node-local model path |
 | `MAX_MODEL_LEN` | Maximum model context length |
-| `TENSOR_PARALLEL_SIZE` | Whole-GPU tensor parallel count |
-| `GPU_MEMORY_UTILIZATION` | Runtime GPU memory target |
+| `TENSOR_PARALLEL_SIZE` | Optional whole-GPU tensor parallel count; omitted for CPU-only workloads |
+| `GPU_MEMORY_UTILIZATION` | Optional runtime GPU memory target; omitted for CPU-only workloads |
 | `PORT` | HTTP listen port, always `8000` in month one |
 | `INFEROPS_DRAIN_TIMEOUT` | Maximum time allowed for in-flight requests |
 
@@ -108,12 +117,13 @@ longer than the configured drain timeout.
 
 ## Scheduling And Failure Rules
 
-- GPU requests are whole devices. Requests and limits must be equal.
+- GPU requests, when present, are whole devices. Requests and limits must be equal.
+- CPU-only workloads rely on ordinary Kubernetes CPU and memory scheduling.
 - `Queue` is the default full-capacity behavior. `ReplaceOldest` and
   `ReplaceLowestPriority` are explicit eviction permissions.
 - Kubernetes and the vendor device plugin choose physical devices. InferOps
   records observed assignments but does not promise GPU UUID selection.
-- A request for `Active` may remain `WaitingForGPU`.
+- A request for `Active` may remain `WaitingForCapacity` or `WaitingForGPU`.
 - A runtime is routed only after readiness succeeds.
 - Cache and activation failures are visible through phase and conditions.
 

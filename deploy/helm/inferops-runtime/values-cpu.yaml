@@ -1,0 +1,13 @@
+runtime:
+  tensorParallelSize: null
+  gpuMemoryUtilization: null
+
+resources:
+  requests:
+    cpu: "4"
+    memory: 16Gi
+    nvidia.com/gpu: null
+  limits:
+    cpu: "4"
+    memory: 16Gi
+    nvidia.com/gpu: null

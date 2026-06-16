@@ -30,10 +30,14 @@ spec:
               value: {{ .Values.model.path | quote }}
             - name: MAX_MODEL_LEN
               value: {{ .Values.runtime.maxModelLen | quote }}
+            {{- if .Values.runtime.tensorParallelSize }}
             - name: TENSOR_PARALLEL_SIZE
               value: {{ .Values.runtime.tensorParallelSize | quote }}
+            {{- end }}
+            {{- if .Values.runtime.gpuMemoryUtilization }}
             - name: GPU_MEMORY_UTILIZATION
               value: {{ .Values.runtime.gpuMemoryUtilization | quote }}
+            {{- end }}
             - name: PORT
               value: "8000"
             - name: INFEROPS_DRAIN_TIMEOUT

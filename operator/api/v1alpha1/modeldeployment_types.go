@@ -39,15 +39,16 @@ type ModelDeploymentStatus struct {
 type ModelDeploymentPhase string
 
 const (
-	ModelDeploymentPhasePending       ModelDeploymentPhase = "Pending"
-	ModelDeploymentPhaseDownloading   ModelDeploymentPhase = "Downloading"
-	ModelDeploymentPhaseCached        ModelDeploymentPhase = "Cached"
-	ModelDeploymentPhaseWaitingForGPU ModelDeploymentPhase = "WaitingForGPU"
-	ModelDeploymentPhaseActivating    ModelDeploymentPhase = "Activating"
-	ModelDeploymentPhaseActive        ModelDeploymentPhase = "Active"
-	ModelDeploymentPhaseDraining      ModelDeploymentPhase = "Draining"
-	ModelDeploymentPhaseDeactivating  ModelDeploymentPhase = "Deactivating"
-	ModelDeploymentPhaseFailed        ModelDeploymentPhase = "Failed"
+	ModelDeploymentPhasePending            ModelDeploymentPhase = "Pending"
+	ModelDeploymentPhaseDownloading        ModelDeploymentPhase = "Downloading"
+	ModelDeploymentPhaseCached             ModelDeploymentPhase = "Cached"
+	ModelDeploymentPhaseWaitingForCapacity ModelDeploymentPhase = "WaitingForCapacity"
+	ModelDeploymentPhaseWaitingForGPU      ModelDeploymentPhase = "WaitingForGPU"
+	ModelDeploymentPhaseActivating         ModelDeploymentPhase = "Activating"
+	ModelDeploymentPhaseActive             ModelDeploymentPhase = "Active"
+	ModelDeploymentPhaseDraining           ModelDeploymentPhase = "Draining"
+	ModelDeploymentPhaseDeactivating       ModelDeploymentPhase = "Deactivating"
+	ModelDeploymentPhaseFailed             ModelDeploymentPhase = "Failed"
 )
 
 // ModelSpec identifies the model artifact to cache and serve.
@@ -70,9 +71,9 @@ type RuntimeSpec struct {
 
 // ResourceRequirements captures compute requirements for inference workloads.
 type ResourceRequirements struct {
-	CPU    string             `json:"cpu,omitempty"`
-	Memory string             `json:"memory,omitempty"`
-	GPU    GPUResourceRequest `json:"gpu,omitempty"`
+	CPU    string              `json:"cpu,omitempty"`
+	Memory string              `json:"memory,omitempty"`
+	GPU    *GPUResourceRequest `json:"gpu,omitempty"`
 }
 
 // GPUResourceRequest requests whole GPU devices from a vendor resource.
@@ -82,7 +83,7 @@ type GPUResourceRequest struct {
 	Type   string `json:"type,omitempty"`
 }
 
-// ActivationSpec controls whether and how a deployment acquires GPU capacity.
+// ActivationSpec controls whether and how a deployment acquires compute capacity.
 type ActivationSpec struct {
 	DesiredState ActivationDesiredState `json:"desiredState,omitempty"`
 	WhenFull     ActivationWhenFull     `json:"whenFull,omitempty"`
@@ -98,7 +99,7 @@ const (
 	ActivationDesiredStateActive   ActivationDesiredState = "Active"
 )
 
-// ActivationWhenFull defines behavior when compatible GPU capacity is full.
+// ActivationWhenFull defines behavior when compatible compute capacity is full.
 type ActivationWhenFull string
 
 const (

@@ -21,7 +21,7 @@ class App:
         name: str,
         engine: str = "nano-vllm",
         model: str,
-        gpu: str | int | None = None,
+        gpu: str | int | None = 1,
         cpu: str | None = None,
         memory: str | None = None,
         min_replicas: int | None = None,

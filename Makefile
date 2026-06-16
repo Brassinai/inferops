@@ -1,23 +1,30 @@
 GO ?= go
 GOFMT ?= gofmt
-PYTHON ?= python3
 HELM ?= helm
-KUBECONFORM ?= kubeconform
 
 GO_VERSION ?= 1.22
 PYTHON_VERSION ?= 3.10
 HELM_VERSION ?= 3.15.4
 KUBECONFORM_VERSION ?= 0.6.7
 
+TOOLS_BIN ?= .verify/bin
+VENV ?= .verify/venv
+SYSTEM_PYTHON ?= python3
+LOCAL_KUBECONFORM := $(TOOLS_BIN)/kubeconform
+LOCAL_PYTHON := $(VENV)/bin/python
+KUBECONFORM ?= $(if $(wildcard $(LOCAL_KUBECONFORM)),$(LOCAL_KUBECONFORM),kubeconform)
+PYTHON ?= $(if $(wildcard $(LOCAL_PYTHON)),$(LOCAL_PYTHON),$(SYSTEM_PYTHON))
+
 GO_FILES := $(shell find . -type f -name '*.go' -not -path './vendor/*' -not -path './.git/*' | sort)
 CHARTS := $(sort $(dir $(wildcard deploy/helm/*/Chart.yaml)))
 
-.PHONY: help tools-check fmt fmt-check test vet python-check python-test \
+.PHONY: help setup tools-check fmt fmt-check test vet python-check python-test \
 	helm-lint helm-template yaml-check schema-check verify
 
 help:
 	@printf '%s\n' \
 		'Available targets:' \
+		'  setup          Install pinned local verification dependencies' \
 		'  tools-check    Verify required local tools are installed' \
 		'  fmt            Format Go source files' \
 		'  fmt-check      Fail when Go source files need formatting' \
@@ -31,13 +38,22 @@ help:
 		'  schema-check   Validate CRDs and manifests with kubeconform' \
 		'  verify         Run the same required checks as CI'
 
+setup:
+	@command -v $(GO) >/dev/null || { echo "error: Go $(GO_VERSION)+ is required"; exit 1; }
+	@command -v $(SYSTEM_PYTHON) >/dev/null || { echo "error: Python $(PYTHON_VERSION)+ is required"; exit 1; }
+	@mkdir -p $(TOOLS_BIN)
+	$(SYSTEM_PYTHON) -m venv $(VENV)
+	$(LOCAL_PYTHON) -m pip install --requirement requirements-dev.txt
+	GOBIN="$(abspath $(TOOLS_BIN))" $(GO) install github.com/yannh/kubeconform/cmd/kubeconform@v$(KUBECONFORM_VERSION)
+	@echo "Installed verification dependencies. Run: make verify"
+
 tools-check:
 	@command -v $(GO) >/dev/null || { echo "error: Go $(GO_VERSION)+ is required"; exit 1; }
 	@command -v $(GOFMT) >/dev/null || { echo "error: gofmt is required"; exit 1; }
 	@command -v $(PYTHON) >/dev/null || { echo "error: Python $(PYTHON_VERSION)+ is required"; exit 1; }
 	@command -v $(HELM) >/dev/null || { echo "error: Helm $(HELM_VERSION)+ is required"; exit 1; }
-	@command -v $(KUBECONFORM) >/dev/null || { echo "error: kubeconform $(KUBECONFORM_VERSION) is required"; exit 1; }
-	@$(PYTHON) -c "import yaml" >/dev/null 2>&1 || { echo "error: Python verification dependencies are missing; run: $(PYTHON) -m pip install --requirement requirements-dev.txt"; exit 1; }
+	@command -v $(KUBECONFORM) >/dev/null || { echo "error: kubeconform $(KUBECONFORM_VERSION) is required; run: make setup"; exit 1; }
+	@$(PYTHON) -c "import yaml" >/dev/null 2>&1 || { echo "error: Python verification dependencies are missing; run: make setup"; exit 1; }
 	@$(PYTHON) scripts/check_tool_versions.py \
 		--go-command "$(GO)" --minimum-go "$(GO_VERSION)" \
 		--python-command "$(PYTHON)" --minimum-python "$(PYTHON_VERSION)" \
@@ -72,6 +88,8 @@ helm-lint:
 	@for chart in $(CHARTS); do \
 		$(HELM) lint "$$chart"; \
 	done
+	@$(HELM) lint deploy/helm/inferops-runtime \
+		--values deploy/helm/inferops-runtime/values-cpu.yaml
 
 helm-template:
 	@rm -rf .verify/helm
@@ -80,6 +98,14 @@ helm-template:
 		name=$$(basename "$$chart"); \
 		$(HELM) template "$$name" "$$chart" > ".verify/helm/$$name.yaml"; \
 	done
+	@$(HELM) template inferops-runtime-cpu deploy/helm/inferops-runtime \
+		--values deploy/helm/inferops-runtime/values-cpu.yaml \
+		> .verify/helm/inferops-runtime-cpu.yaml
+	@! grep -Eq 'nvidia.com/gpu|TENSOR_PARALLEL_SIZE|GPU_MEMORY_UTILIZATION' \
+		.verify/helm/inferops-runtime-cpu.yaml || { \
+		echo "error: CPU runtime chart contains GPU-only settings"; \
+		exit 1; \
+	}
 
 yaml-check:
 	$(PYTHON) scripts/check_yaml.py

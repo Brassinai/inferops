@@ -1,0 +1,33 @@
+apiVersion: inference.inferops.dev/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: cpu-qwen
+spec:
+  model:
+    name: cpu-qwen
+    source: huggingface
+    repo: Qwen/Qwen2.5-0.5B-Instruct
+    revision: main
+  runtime:
+    ref: vllm
+    maxModelLen: 2048
+  resources:
+    cpu: "8"
+    memory: 32Gi
+  activation:
+    desiredState: Inactive
+    whenFull: Queue
+    priority: 50
+    drainTimeout: 5m
+  scaling:
+    minReplicas: 0
+    maxReplicas: 1
+  routing:
+    enabled: true
+    path: /models/cpu-qwen
+    openAICompatible: true
+  cache:
+    enabled: true
+    type: nodeLocal
+    size: 50Gi
+    path: /var/lib/inferops/models
