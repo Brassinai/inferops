@@ -1,5 +1,36 @@
 """Application declaration primitives."""
 
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+from .spec import (
+    DEFAULT_ACTIVATION_STATE,
+    DEFAULT_CACHE_ENABLED,
+    DEFAULT_CACHE_PATH,
+    DEFAULT_CACHE_SIZE,
+    DEFAULT_CACHE_TYPE,
+    DEFAULT_DRAIN_TIMEOUT,
+    DEFAULT_GPU_COUNT,
+    DEFAULT_GPU_VENDOR,
+    DEFAULT_MAX_MODEL_LEN,
+    DEFAULT_MAX_REPLICAS,
+    DEFAULT_MEMORY,
+    DEFAULT_MIN_REPLICAS,
+    DEFAULT_MODEL_REVISION,
+    DEFAULT_MODEL_SOURCE,
+    DEFAULT_OPENAI_COMPATIBLE,
+    DEFAULT_PRIORITY,
+    DEFAULT_ROUTE_ENABLED,
+    DEFAULT_RUNTIME,
+    DEFAULT_WHEN_FULL,
+    DEFAULT_CPU,
+    ModelConfig,
+    collect_endpoint_metadata,
+    normalize_model_config,
+)
+
 
 class App:
     """Represents a deployable inference application."""
@@ -8,49 +39,85 @@ class App:
         if not name:
             raise ValueError("app name is required")
         self.name = name
-        self.models = []
+        self.models: list[ModelConfig] = []
 
-    def register(self, model_config: dict) -> dict:
+    def register(self, model_config: Mapping[str, Any]) -> ModelConfig:
         """Register a model declaration with the app."""
-        self.models.append(model_config)
-        return model_config
+        normalized = normalize_model_config(model_config)
+        self.models.append(normalized)
+        return normalized
 
     def model(
         self,
         *,
         name: str,
-        engine: str = "nano-vllm",
+        engine: str = DEFAULT_RUNTIME,
         model: str,
-        gpu: str | int | None = 1,
-        cpu: str | None = None,
-        memory: str | None = None,
-        min_replicas: int | None = None,
-        max_replicas: int | None = None,
-        max_model_len: int | None = None,
+        gpu: str | int | None = DEFAULT_GPU_COUNT,
+        gpu_vendor: str = DEFAULT_GPU_VENDOR,
+        gpu_type: str | None = None,
+        cpu: str | None = DEFAULT_CPU,
+        memory: str | None = DEFAULT_MEMORY,
+        activation: str = DEFAULT_ACTIVATION_STATE,
+        when_full: str = DEFAULT_WHEN_FULL,
+        priority: int = DEFAULT_PRIORITY,
+        drain_timeout: str = DEFAULT_DRAIN_TIMEOUT,
+        min_replicas: int = DEFAULT_MIN_REPLICAS,
+        max_replicas: int = DEFAULT_MAX_REPLICAS,
+        max_model_len: int = DEFAULT_MAX_MODEL_LEN,
+        route_path: str | None = None,
+        route_enabled: bool = DEFAULT_ROUTE_ENABLED,
+        openai_compatible: bool = DEFAULT_OPENAI_COMPATIBLE,
+        cache_enabled: bool = DEFAULT_CACHE_ENABLED,
+        cache_type: str = DEFAULT_CACHE_TYPE,
+        cache_size: str = DEFAULT_CACHE_SIZE,
+        cache_path: str = DEFAULT_CACHE_PATH,
+        model_source: str = DEFAULT_MODEL_SOURCE,
+        model_revision: str = DEFAULT_MODEL_REVISION,
+        runtime_image: str | None = None,
+        dtype: str | None = None,
+        hugging_face_token_secret_name: str | None = None,
         **extra,
-    ):
+    ) -> Any:
         """Declare a class as a model deployment."""
-        if not name:
-            raise ValueError("model name is required")
-        if not engine:
-            raise ValueError("engine is required")
-        if not model:
-            raise ValueError("model is required")
+        if extra:
+            unexpected = ", ".join(sorted(extra))
+            raise ValueError(f"unsupported model options: {unexpected}")
 
-        def wrapper(cls):
-            config = {
-                "name": name,
-                "engine": engine,
-                "model": model,
-                "gpu": gpu,
-                "cpu": cpu,
-                "memory": memory,
-                "min_replicas": min_replicas,
-                "max_replicas": max_replicas,
-                "max_model_len": max_model_len,
-                "class": cls,
-                "extra": extra,
-            }
+        def wrapper(cls: type[Any]) -> type[Any]:
+            config = normalize_model_config(
+                {
+                    "name": name,
+                    "engine": engine,
+                    "model": model,
+                    "gpu": gpu,
+                    "gpu_vendor": gpu_vendor,
+                    "gpu_type": gpu_type,
+                    "cpu": cpu,
+                    "memory": memory,
+                    "activation": activation,
+                    "when_full": when_full,
+                    "priority": priority,
+                    "drain_timeout": drain_timeout,
+                    "min_replicas": min_replicas,
+                    "max_replicas": max_replicas,
+                    "max_model_len": max_model_len,
+                    "route_path": route_path,
+                    "route_enabled": route_enabled,
+                    "openai_compatible": openai_compatible,
+                    "cache_enabled": cache_enabled,
+                    "cache_type": cache_type,
+                    "cache_size": cache_size,
+                    "cache_path": cache_path,
+                    "model_source": model_source,
+                    "model_revision": model_revision,
+                    "runtime_image": runtime_image,
+                    "dtype": dtype,
+                    "hugging_face_token_secret_name": hugging_face_token_secret_name,
+                },
+                model_class=cls,
+                endpoints=collect_endpoint_metadata(cls),
+            )
             cls.__inferops_model__ = config
             self.models.append(config)
             return cls
