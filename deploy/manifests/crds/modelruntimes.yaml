@@ -62,6 +62,9 @@ spec:
                 healthPath:
                   type: string
                   pattern: ^/
+                readinessPath:
+                  type: string
+                  pattern: ^/
                 metricsPath:
                   type: string
                   pattern: ^/

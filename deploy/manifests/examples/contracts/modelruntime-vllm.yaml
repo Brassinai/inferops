@@ -8,6 +8,7 @@ spec:
   defaultImage: ghcr.io/inferops/vllm:latest
   port: 8000
   healthPath: /health
+  readinessPath: /health
   metricsPath: /metrics
 status:
   observedGeneration: 1

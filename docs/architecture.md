@@ -88,7 +88,8 @@ nano-vLLM container with:
 | --- | --- |
 | Container name | `runtime` |
 | HTTP port | `8000`, named `http` |
-| Readiness/liveness | `GET /health` |
+| Readiness | `GET /readiness` |
+| Liveness | `GET /health` |
 | Metrics | `GET /metrics` |
 | OpenAI API | `/v1/chat/completions`, `/v1/completions` |
 
@@ -108,12 +109,13 @@ Required environment:
 `HF_TOKEN` may be populated from the referenced Kubernetes Secret. It must
 never be written into a CRD status, ConfigMap, log, or checked-in example.
 
-`GET /health` returns success only after the model is loaded and while the
-runtime accepts new traffic. During deactivation or replacement, the operator
-first marks the deployment `Draining`; the gateway stops new requests; the
-runtime fails readiness, handles `SIGTERM`, waits for in-flight requests up to
-`activation.drainTimeout`, then exits. The pod termination grace period must be
-longer than the configured drain timeout.
+`GET /health` reports process liveness. `GET /readiness` returns success only
+after the model is loaded and while the runtime accepts new traffic. During
+deactivation or replacement, the operator first marks the deployment
+`Draining`; the gateway stops new requests; the runtime fails readiness,
+handles `SIGTERM`, waits for in-flight requests up to
+`activation.drainTimeout`, then exits. The pod termination grace period must
+be longer than the configured drain timeout.
 
 ## Scheduling And Failure Rules
 

@@ -140,12 +140,16 @@ spec:
   defaultImage: ghcr.io/inferops/nano-vllm:latest
   port: 8000
   healthPath: /health
+  readinessPath: /readiness
   metricsPath: /metrics
 ```
 
 Required fields are `engine`, `protocol`, `defaultImage`, `port`, and
-`healthPath`. Optional `command`, `args`, and non-secret `env` support custom
-runtimes. `engine` is intentionally open-ended. `protocol` describes the
+`healthPath`. Optional `readinessPath`, `metricsPath`, `command`, `args`, and
+non-secret `env` support custom runtimes. When `readinessPath` is omitted, the
+operator falls back to `healthPath` for compatibility. The packaged nano-vLLM
+runtime uses `/readiness` so draining can stop traffic without failing process
+liveness. `engine` is intentionally open-ended. `protocol` describes the
 gateway-facing protocol and is `openai` for nano-vLLM, vLLM, and SGLang.
 Secret values belong in referenced Secrets, never `spec.env`.
 

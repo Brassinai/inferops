@@ -9,11 +9,21 @@ model:
   path: /models/model
 
 runtime:
+  fakeMode: false
   maxModelLen: 4096
+  maxNumSeqs: 256
   tensorParallelSize: 1
   gpuMemoryUtilization: 0.85
+  enforceEager: false
+  dtype: float16
   drainTimeout: 5m
   terminationGracePeriodSeconds: 330
+
+cache:
+  hostPath: /var/lib/inferops/models/model
+
+metrics:
+  prometheusAnnotations: false
 
 resources:
   requests:

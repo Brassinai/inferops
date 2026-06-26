@@ -8,8 +8,10 @@ const (
 	RuntimeServiceSuffix = "-runtime"
 	// RuntimeHTTPPort is the default container and Service target port.
 	RuntimeHTTPPort int32 = 8000
-	// RuntimeHealthPath is used for readiness and liveness checks.
+	// RuntimeHealthPath is used for process liveness checks.
 	RuntimeHealthPath = "/health"
+	// RuntimeReadinessPath reports whether the runtime can accept new requests.
+	RuntimeReadinessPath = "/readiness"
 	// RuntimeMetricsPath exposes Prometheus metrics.
 	RuntimeMetricsPath = "/metrics"
 	// GatewayModelPathPrefix is the stable per-model route prefix.

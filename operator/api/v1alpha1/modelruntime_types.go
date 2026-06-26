@@ -11,15 +11,16 @@ type ModelRuntime struct {
 
 // ModelRuntimeSpec contains image and runtime-level configuration.
 type ModelRuntimeSpec struct {
-	Engine       string            `json:"engine,omitempty"`
-	Protocol     string            `json:"protocol,omitempty"`
-	DefaultImage string            `json:"defaultImage,omitempty"`
-	Port         int32             `json:"port,omitempty"`
-	HealthPath   string            `json:"healthPath,omitempty"`
-	MetricsPath  string            `json:"metricsPath,omitempty"`
-	Command      []string          `json:"command,omitempty"`
-	Args         []string          `json:"args,omitempty"`
-	Env          map[string]string `json:"env,omitempty"`
+	Engine        string            `json:"engine,omitempty"`
+	Protocol      string            `json:"protocol,omitempty"`
+	DefaultImage  string            `json:"defaultImage,omitempty"`
+	Port          int32             `json:"port,omitempty"`
+	HealthPath    string            `json:"healthPath,omitempty"`
+	ReadinessPath string            `json:"readinessPath,omitempty"`
+	MetricsPath   string            `json:"metricsPath,omitempty"`
+	Command       []string          `json:"command,omitempty"`
+	Args          []string          `json:"args,omitempty"`
+	Env           map[string]string `json:"env,omitempty"`
 }
 
 // ModelRuntimeStatus reports runtime availability.
