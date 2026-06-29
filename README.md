@@ -28,7 +28,6 @@ app = inferops.App("customer-support-llm")
 
 @app.model(
     name="qwen-chat",
-    engine="nano-vllm",
     model="Qwen/Qwen2.5-7B-Instruct",
     gpu="L4",
     min_replicas=0,
@@ -38,6 +37,41 @@ app = inferops.App("customer-support-llm")
 class QwenChat:
     pass
 ```
+
+Call the built-in inference API through the SDK client:
+
+```python
+client = inferops.Client(base_url="https://api.example.com", api_key="...")
+
+response = client.responses.create(
+    model="qwen-chat",
+    input="Explain Kubernetes Services simply.",
+)
+
+stream = client.chat.completions.create(
+    model="qwen-chat",
+    messages=[{"role": "user", "content": "Write a short poem."}],
+    stream=True,
+)
+```
+
+Add custom model-backed endpoints when you need preprocessing, tools, or SSE:
+
+```python
+@app.model(name="assistant", model="Qwen/Qwen2.5-7B-Instruct")
+class Assistant:
+    @inferops.web_endpoint(method="POST", path="/chat")
+    async def chat(self, request):
+        return await self.generate(request["prompt"])
+
+    @inferops.web_endpoint(method="POST", path="/chat/stream")
+    async def stream_chat(self, request):
+        async for chunk in self.generate_stream(request["prompt"]):
+            yield chunk
+```
+
+If a handler returns an async iterator instead of yielding directly, declare it
+with `streaming=True` so the endpoint contract stays explicit.
 
 ```bash
 inferops deploy app.py

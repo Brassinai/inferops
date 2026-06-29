@@ -1,31 +1,43 @@
 """CLI entrypoint."""
 
-import argparse
+from __future__ import annotations
 
-from . import delete, deploy, generate, init, logs, status
+from . import activate, cache, deactivate, delete, deploy, generate, gpu, init, install, logs, status
+from .errors import run_with_cli_errors
+from .parser import CLIArgumentParser
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser() -> CLIArgumentParser:
     """Build the CLI argument parser."""
-    parser = argparse.ArgumentParser(prog="inferops")
-    subcommands = parser.add_subparsers(dest="command")
+    parser = CLIArgumentParser(
+        prog="inferops",
+        description="Deploy and operate OpenAI-compatible inference runtimes on Kubernetes.",
+    )
+    subcommands = parser.add_subparsers(dest="command", parser_class=CLIArgumentParser)
+    subcommands.required = True
+    activate.register(subcommands)
+    cache.register(subcommands)
+    deactivate.register(subcommands)
     deploy.register(subcommands)
     generate.register(subcommands)
+    gpu.register(subcommands)
     init.register(subcommands)
+    install.register(subcommands)
     status.register(subcommands)
     logs.register(subcommands)
     delete.register(subcommands)
     return parser
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """Run the CLI."""
-    parser = build_parser()
-    args = parser.parse_args()
-    if not hasattr(args, "handler"):
-        parser.print_help()
-        return 1
-    return args.handler(args)
+
+    def action() -> int:
+        parser = build_parser()
+        args = parser.parse_args(argv)
+        return args.handler(args)
+
+    return run_with_cli_errors(action)
 
 
 if __name__ == "__main__":
