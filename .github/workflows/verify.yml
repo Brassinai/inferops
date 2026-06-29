@@ -46,28 +46,5 @@ jobs:
           echo "${RUNNER_TEMP}/bin" >> "${GITHUB_PATH}"
           GOBIN="${RUNNER_TEMP}/bin" go install github.com/yannh/kubeconform/cmd/kubeconform@v0.6.7
 
-      - name: Build and smoke test fake runtime image
-        run: |
-          docker build \
-            --target fake \
-            --file runtimes/nano_vllm/Dockerfile \
-            --tag inferops-runtime:test .
-          container_id=$(docker run --detach --publish 127.0.0.1:18000:8000 inferops-runtime:test)
-          trap 'docker rm --force "${container_id}"' EXIT
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:18000/readiness >/dev/null; then
-              break
-            fi
-            if [ "${attempt}" -eq 30 ]; then
-              docker logs "${container_id}"
-              exit 1
-            fi
-            sleep 1
-          done
-          curl --fail --silent --no-buffer \
-            --header 'content-type: application/json' \
-            --data '{"prompt":"ci","max_tokens":2,"stream":true}' \
-            http://127.0.0.1:18000/v1/completions | grep --fixed-strings 'data: [DONE]'
-
       - name: Run required verification
         run: make verify

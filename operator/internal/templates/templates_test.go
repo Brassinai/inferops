@@ -8,7 +8,7 @@ func TestStableRuntimeNamesAndRoutes(t *testing.T) {
 	if got, want := RuntimeContainerName, "runtime"; got != want {
 		t.Fatalf("RuntimeContainerName = %q, want %q", got, want)
 	}
-	if got, want := RuntimeReadinessPath, "/readiness"; got != want {
+	if got, want := RuntimeReadinessPath, "/health"; got != want {
 		t.Fatalf("RuntimeReadinessPath = %q, want %q", got, want)
 	}
 	if got, want := RuntimeServiceName("qwen-chat"), "qwen-chat-runtime"; got != want {

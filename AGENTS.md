@@ -5,10 +5,11 @@ Guidance for AI coding agents working on this repository.
 ## Project Context
 
 This project is a self-hosted, Kubernetes-native deployment platform for
-inference runtimes. It targets nano-vLLM, vLLM, and SGLang, with nano-vLLM as
-the default and first packaged runtime. It lets users deploy OpenAI-compatible
-model endpoints into their own Kubernetes clusters without relying on Modal,
-Ray, KServe, or a hosted InferOps control plane.
+inference runtimes. It targets nano-vLLM, vLLM, SGLang, and llama.cpp, with
+nano-vLLM as the default and first packaged runtime and llama.cpp as the
+portable CPU test path. It lets users deploy OpenAI-compatible model endpoints
+into their own Kubernetes clusters without relying on Modal, Ray, KServe, or a
+hosted InferOps control plane.
 
 The platform should prioritize:
 

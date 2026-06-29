@@ -10,8 +10,8 @@ const (
 	RuntimeHTTPPort int32 = 8000
 	// RuntimeHealthPath is used for process liveness checks.
 	RuntimeHealthPath = "/health"
-	// RuntimeReadinessPath reports whether the runtime can accept new requests.
-	RuntimeReadinessPath = "/readiness"
+	// RuntimeReadinessPath is the default readiness endpoint for packaged runtimes.
+	RuntimeReadinessPath = "/health"
 	// RuntimeMetricsPath exposes Prometheus metrics.
 	RuntimeMetricsPath = "/metrics"
 	// GatewayModelPathPrefix is the stable per-model route prefix.
@@ -19,10 +19,8 @@ const (
 	// OpenAIPathPrefix is the path exposed by OpenAI-compatible runtimes.
 	OpenAIPathPrefix = "/v1"
 
-	// EnvModelRepo identifies the source model repository.
+	// EnvModelRepo identifies the model name exposed by the runtime API.
 	EnvModelRepo = "MODEL_REPO"
-	// EnvModelRevision identifies the source model revision.
-	EnvModelRevision = "MODEL_REVISION"
 	// EnvModelPath identifies the prepared local model path.
 	EnvModelPath = "MODEL_PATH"
 	// EnvMaxModelLen configures the maximum model context length.
@@ -33,8 +31,6 @@ const (
 	EnvGPUMemoryUtilization = "GPU_MEMORY_UTILIZATION"
 	// EnvPort configures the runtime HTTP listen port.
 	EnvPort = "PORT"
-	// EnvDrainTimeout configures the maximum in-flight request drain time.
-	EnvDrainTimeout = "INFEROPS_DRAIN_TIMEOUT"
 )
 
 // RuntimeServiceName returns the stable runtime Service name for a ModelDeployment.

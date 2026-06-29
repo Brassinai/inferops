@@ -19,7 +19,7 @@ spec:
       {{- if .Values.metrics.prometheusAnnotations }}
       annotations:
         prometheus.io/scrape: "true"
-        prometheus.io/path: /metrics
+        prometheus.io/path: {{ .Values.runtime.metricsPath | quote }}
         prometheus.io/port: "8000"
       {{- end }}
     spec:
@@ -28,12 +28,8 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
-            - name: FAKE_MODE
-              value: {{ .Values.runtime.fakeMode | quote }}
             - name: MODEL_REPO
               value: {{ .Values.model.repo | quote }}
-            - name: MODEL_REVISION
-              value: {{ .Values.model.revision | quote }}
             - name: MODEL_PATH
               value: {{ .Values.model.path | quote }}
             - name: MAX_MODEL_LEN
@@ -54,22 +50,20 @@ spec:
             {{- end }}
             - name: PORT
               value: "8000"
-            - name: INFEROPS_DRAIN_TIMEOUT
-              value: {{ .Values.runtime.drainTimeout | quote }}
           ports:
             - name: http
               containerPort: 8000
           readinessProbe:
             httpGet:
-              path: /readiness
+              path: {{ .Values.runtime.readinessPath | quote }}
               port: http
           livenessProbe:
             httpGet:
-              path: /health
+              path: {{ .Values.runtime.healthPath | quote }}
               port: http
           startupProbe:
             httpGet:
-              path: /readiness
+              path: {{ .Values.runtime.readinessPath | quote }}
               port: http
             failureThreshold: 60
             periodSeconds: 10

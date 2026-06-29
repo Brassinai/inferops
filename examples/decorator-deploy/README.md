@@ -1,3 +1,5 @@
 # Decorator Deploy
 
-Example placeholder for deploying a Python SDK app with decorators.
+This example declares a `ModelDeployment` through the Python SDK. The
+decorated class is metadata only; the selected runtime image owns inference
+and exposes its OpenAI-compatible API.

@@ -2,9 +2,9 @@
 
 InferOps is a self-hosted, Kubernetes-native orchestration platform for
 OpenAI-compatible inference runtimes. The runtime abstraction targets
-nano-vLLM, vLLM, and SGLang. `nano-vllm` is the default runtime and first
-packaged integration, not a platform-wide restriction. Both the control plane
-and data plane remain inside the user's cluster.
+nano-vLLM, vLLM, SGLang, and llama.cpp. `nano-vllm` is the default runtime and
+first packaged integration, not a platform-wide restriction. Both the control
+plane and data plane remain inside the user's cluster.
 
 ```txt
 Python SDK / CLI / YAML
@@ -22,8 +22,8 @@ Python SDK / CLI / YAML
   operator owns its cache preparation, activation lifecycle, workload, stable
   Service, and status.
 - `ModelRuntime` is a reusable runtime definition. A deployment selects
-  `nano-vllm`, `vllm`, `sglang`, or another conforming runtime by reference.
-  InferOps defaults to `nano-vllm`.
+  `nano-vllm`, `vllm`, `sglang`, `llama-cpp`, or another conforming runtime by
+  reference. InferOps defaults to `nano-vllm`.
 - `ModelCache` records one persisted model revision and its node-local
   location. Deactivating a model does not delete its cache.
 - The gateway owns the stable client-facing endpoint and sends traffic only to
@@ -75,9 +75,17 @@ health path, metrics path, command, arguments, and non-secret environment.
 Runtime-specific adapters translate a `ModelDeployment` into that container
 contract.
 
-The first packaged adapter is nano-vLLM. vLLM and SGLang adapters must use the
-same stable Service, gateway route, readiness, drain, status, and lifecycle
-contracts while retaining engine-specific images, arguments, and environment.
+Packaged adapters use the same stable Service, gateway route, readiness,
+drain, status, and lifecycle contracts while retaining engine-specific images,
+arguments, model formats, and environment. The CPU llama.cpp adapter consumes
+GGUF files prepared by ModelCache.
+
+Runtime images are hardware-specific artifacts. The default vLLM and SGLang
+images are NVIDIA CUDA images. vLLM also publishes architecture-specific
+Linux CPU images, which the separate `runtimes/vllm/Dockerfile.cpu` adapter
+uses. llama.cpp provides the portable local CPU path. SGLang's CPU backend is
+Xeon AMX-specific and is not a portable CPU fallback for ARM64 machines.
+Selecting CPU resources does not make a GPU engine image CPU-compatible.
 
 ## Default Nano-vLLM Contract
 
@@ -88,7 +96,7 @@ nano-vLLM container with:
 | --- | --- |
 | Container name | `runtime` |
 | HTTP port | `8000`, named `http` |
-| Readiness | `GET /readiness` |
+| Readiness | `GET /health` |
 | Liveness | `GET /health` |
 | Metrics | `GET /metrics` |
 | OpenAI API | `/v1/chat/completions`, `/v1/completions` |
@@ -97,25 +105,24 @@ Required environment:
 
 | Variable | Meaning |
 | --- | --- |
-| `MODEL_REPO` | Source repository identifier |
-| `MODEL_REVISION` | Immutable or named source revision |
+| `MODEL_REPO` | Model name exposed by the OpenAI-compatible API |
 | `MODEL_PATH` | Prepared node-local model path |
 | `MAX_MODEL_LEN` | Maximum model context length |
 | `TENSOR_PARALLEL_SIZE` | Optional whole-GPU tensor parallel count; omitted for CPU-only workloads |
 | `GPU_MEMORY_UTILIZATION` | Optional runtime GPU memory target; omitted for CPU-only workloads |
 | `PORT` | HTTP listen port, always `8000` in month one |
-| `INFEROPS_DRAIN_TIMEOUT` | Maximum time allowed for in-flight requests |
 
-`HF_TOKEN` may be populated from the referenced Kubernetes Secret. It must
-never be written into a CRD status, ConfigMap, log, or checked-in example.
+Model source revisions and registry credentials belong to the `ModelCache`
+download workflow. Runtime pods receive the prepared local path and must not
+receive `HF_TOKEN` or download model weights themselves.
 
-`GET /health` reports process liveness. `GET /readiness` returns success only
-after the model is loaded and while the runtime accepts new traffic. During
-deactivation or replacement, the operator first marks the deployment
-`Draining`; the gateway stops new requests; the runtime fails readiness,
-handles `SIGTERM`, waits for in-flight requests up to
-`activation.drainTimeout`, then exits. The pod termination grace period must
-be longer than the configured drain timeout.
+The packaged engine owns its OpenAI API, health, metrics, and process
+lifecycle. InferOps does not wrap engine APIs or instantiate engine classes.
+During deactivation or replacement, the operator first marks the deployment
+`Draining`, the gateway stops new requests, and Kubernetes sends `SIGTERM` to
+the engine process. The pod termination grace period must be longer than the
+configured drain timeout. Runtime definitions may use stronger
+engine-specific readiness endpoints, such as SGLang's `/health_generate`.
 
 ## Scheduling And Failure Rules
 

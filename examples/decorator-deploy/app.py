@@ -13,10 +13,4 @@ app = inferops.App("customer-support-llm")
     max_model_len=4096,
 )
 class QwenChat:
-    def __init__(self):
-        from nanovllm import LLM
-        self.llm = LLM("/models/qwen", tensor_parallel_size=1)
-
-    @inferops.web_endpoint(method="POST", path="/chat")
-    def chat(self, request):
-        return self.llm.generate([request["prompt"]])
+    pass

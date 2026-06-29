@@ -1,8 +1,9 @@
 # InferOps
 
 Kubernetes-native deployment and management for OpenAI-compatible inference
-runtimes. InferOps is designed to support nano-vLLM, vLLM, and SGLang;
-`nano-vllm` is the default runtime and the first packaged integration.
+runtimes. InferOps is designed to support nano-vLLM, vLLM, SGLang, and
+llama.cpp; `nano-vllm` is the default runtime and the first packaged
+integration.
 
 ## Entry Points
 
@@ -10,10 +11,13 @@ InferOps supports multiple ways to deploy and manage inference workloads.
 
 ### Python SDK
 
-Declare an app in Python and deploy it through the CLI:
+Declare model metadata in Python and deploy it through the CLI. The decorated
+class is a declaration marker; InferOps does not execute it or instantiate an
+engine inside the runtime pod:
 
 The optional `engine` field selects a `ModelRuntime`, such as `nano-vllm`,
-`vllm`, or `sglang`. Omitting it in the Python SDK defaults to `nano-vllm`.
+`vllm`, `sglang`, or the CPU-friendly `llama-cpp`. Omitting it in the Python
+SDK defaults to `nano-vllm`.
 The `gpu` field defaults to one GPU for compatibility; set `gpu=None` for a
 CPU-only deployment.
 
@@ -32,13 +36,7 @@ app = inferops.App("customer-support-llm")
     max_model_len=4096,
 )
 class QwenChat:
-    def __init__(self):
-        from nanovllm import LLM
-        self.llm = LLM("/models/qwen", tensor_parallel_size=1)
-
-    @inferops.web_endpoint(method="POST", path="/chat")
-    def chat(self, request):
-        return self.llm.generate([request["prompt"]])
+    pass
 ```
 
 ```bash

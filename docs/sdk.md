@@ -13,6 +13,12 @@ multiple models produces multiple `ModelDeployment` objects.
 The decorator's `engine` value becomes `spec.runtime.ref`; it is not limited to
 the default runtime. Omitting `engine` selects `nano-vllm`.
 
+The decorated class is currently a declaration marker used while generating
+the Kubernetes resource. It is not instantiated inside the runtime container.
+Inference is served by the selected engine's own OpenAI-compatible server, so
+application code must not import or construct nano-vLLM, vLLM, or SGLang
+engine classes.
+
 The decorator defaults to one NVIDIA GPU for compatibility. Setting `gpu=None`
 produces a CPU-only deployment. Supplying a positive integer requests that many
 NVIDIA GPUs; supplying a non-empty string requests one NVIDIA GPU of that type.

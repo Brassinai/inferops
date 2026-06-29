@@ -1,11 +1,11 @@
 apiVersion: inference.inferops.dev/v1alpha1
 kind: ModelRuntime
 metadata:
-  name: nano-vllm
+  name: llama-cpp
 spec:
-  engine: nano-vllm
+  engine: llama-cpp
   protocol: openai
-  defaultImage: ghcr.io/inferops/nano-vllm:latest
+  defaultImage: ghcr.io/inferops/llama-cpp:latest
   port: 8000
   healthPath: /health
   readinessPath: /health
@@ -19,4 +19,4 @@ status:
       observedGeneration: 1
       lastTransitionTime: "2026-06-11T09:00:00Z"
       reason: RuntimeValid
-      message: Runtime definition is valid.
+      message: Runtime definition satisfies the shared contract.

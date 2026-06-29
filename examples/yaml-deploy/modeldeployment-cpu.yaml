@@ -1,19 +1,19 @@
 apiVersion: inference.inferops.dev/v1alpha1
 kind: ModelDeployment
 metadata:
-  name: cpu-qwen
+  name: cpu-smollm
 spec:
   model:
-    name: cpu-qwen
+    name: cpu-smollm
     source: huggingface
-    repo: Qwen/Qwen2.5-0.5B-Instruct
+    repo: jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF
     revision: main
   runtime:
-    ref: vllm
-    maxModelLen: 2048
+    ref: llama-cpp
+    maxModelLen: 512
   resources:
-    cpu: "8"
-    memory: 32Gi
+    cpu: "4"
+    memory: 2Gi
   activation:
     desiredState: Inactive
     whenFull: Queue
@@ -24,10 +24,10 @@ spec:
     maxReplicas: 1
   routing:
     enabled: true
-    path: /models/cpu-qwen
+    path: /models/cpu-smollm
     openAICompatible: true
   cache:
     enabled: true
     type: nodeLocal
-    size: 50Gi
+    size: 1Gi
     path: /var/lib/inferops/models
