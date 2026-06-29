@@ -16,11 +16,17 @@ def state_path(project_dir: Path | str = ".") -> Path:
 
 
 def load_state(project_dir: Path | str = ".") -> dict[str, Any]:
-    """Load local deployment state."""
+    """Load local deployment state.
+
+    Returns a fresh empty state if the file is missing or corrupted.
+    """
     path = state_path(project_dir)
     if not path.exists():
         return {"version": 1, "deployments": {}}
-    return json.loads(path.read_text())
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {"version": 1, "deployments": {}}
 
 
 def save_state(state: dict[str, Any], project_dir: Path | str = ".") -> None:

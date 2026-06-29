@@ -124,4 +124,11 @@ def resolve_client(args: Any, client: KubernetesClient | None = None) -> Kuberne
     client_factory = getattr(args, "_client_factory", None)
     if client_factory is not None:
         return client_factory(build_cluster_target(args))
-    raise CLIError("real Kubernetes client not implemented yet")
+    try:
+        from .k8s_client import LiveKubernetesClient
+
+        return LiveKubernetesClient(build_cluster_target(args))
+    except ImportError as exc:
+        raise CLIError(
+            f"live Kubernetes client not available ({exc}); install with: pip install kubernetes"
+        )

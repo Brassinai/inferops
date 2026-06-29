@@ -173,7 +173,7 @@ class CLICommandHandlerTest(unittest.TestCase):
         self.assertTrue(json.loads(delete_stdout)["deleted"])
         self.assertEqual(json.loads(init_stdout)["mode"], "placeholder")
 
-    def test_runtime_command_fails_without_real_kubernetes_client(self) -> None:
+    def test_runtime_command_fails_without_live_kubernetes_client(self) -> None:
         source = textwrap.dedent(
             """
             import inferops
@@ -197,7 +197,7 @@ class CLICommandHandlerTest(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
         self.assertEqual(stdout.getvalue(), "")
-        self.assertIn("real Kubernetes client not implemented yet", stderr.getvalue())
+        self.assertIn("live Kubernetes client not available", stderr.getvalue())
 
     def test_not_found_errors_use_stable_exit_code(self) -> None:
         fake_client = FakeKubernetesClient()

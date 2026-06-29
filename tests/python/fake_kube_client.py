@@ -37,6 +37,7 @@ class FakeKubernetesClient:
                 "phase": "Active" if request.activate else manifest["spec"]["activation"]["desiredState"],
                 "runtime": manifest["spec"]["runtime"]["ref"],
                 "model": manifest["spec"]["model"]["repo"],
+                "action": "created" if key not in self._deployments else "replaced",
             }
             self._deployments[key] = deployment
 
