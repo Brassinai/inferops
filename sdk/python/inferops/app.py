@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from .runtime import attach_runtime_methods
 from .spec import (
     DEFAULT_ACTIVATION_STATE,
     DEFAULT_CACHE_ENABLED,
@@ -85,6 +86,7 @@ class App:
             raise ValueError(f"unsupported model options: {unexpected}")
 
         def wrapper(cls: type[Any]) -> type[Any]:
+            attach_runtime_methods(cls)
             config = normalize_model_config(
                 {
                     "name": name,

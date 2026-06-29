@@ -188,6 +188,17 @@ class SDKContractTest(unittest.TestCase):
                 def duplicate(self, request):
                     return request
 
+    def test_conflicting_streaming_endpoint_contract_is_rejected_early(self) -> None:
+        app = App("support")
+
+        with self.assertRaisesRegex(ValueError, "cannot declare streaming=False while yielding"):
+
+            @app.model(name="qwen-chat", model="Qwen/Qwen2.5-7B-Instruct")
+            class QwenChat:
+                @web_endpoint(method="POST", path="/chat", streaming=False)
+                async def stream_chat(self, request):
+                    yield request
+
     def test_build_manifest_rejects_multiple_models(self) -> None:
         app = App("support")
         app.register({"name": "chat", "engine": "nano-vllm", "model": "repo/chat"})

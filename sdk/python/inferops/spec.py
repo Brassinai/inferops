@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+import inspect
 import re
 from typing import Any
 
@@ -92,6 +93,7 @@ class EndpointSpec:
 
     method: str
     path: str
+    streaming: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +103,7 @@ class EndpointMetadata:
     name: str
     method: str
     path: str
+    streaming: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +141,7 @@ class ModelConfig:
     model_class: type[Any] | None = None
 
 
-def validate_endpoint_metadata(*, method: str, path: str) -> EndpointSpec:
+def validate_endpoint_metadata(*, method: str, path: str, streaming: bool | None = None) -> EndpointSpec:
     """Validate one endpoint metadata declaration."""
     if not isinstance(method, str) or not method.strip():
         raise ValueError("endpoint method is required")
@@ -151,7 +154,9 @@ def validate_endpoint_metadata(*, method: str, path: str) -> EndpointSpec:
     normalized_path = path.strip()
     if not normalized_path.startswith("/"):
         raise ValueError("endpoint path must start with '/'")
-    return EndpointSpec(method=normalized_method, path=normalized_path)
+    if streaming is not None and not isinstance(streaming, bool):
+        raise ValueError("endpoint streaming must be a boolean when provided")
+    return EndpointSpec(method=normalized_method, path=normalized_path, streaming=streaming)
 
 
 def collect_endpoint_metadata(model_class: type[Any]) -> tuple[EndpointMetadata, ...]:
@@ -163,13 +168,25 @@ def collect_endpoint_metadata(model_class: type[Any]) -> tuple[EndpointMetadata,
         endpoint = getattr(attr, "__inferops_endpoint__", None)
         if endpoint is None:
             continue
+        inferred_streaming = inspect.isasyncgenfunction(attr) or inspect.isgeneratorfunction(attr)
+        if endpoint.streaming is False and inferred_streaming:
+            raise ValueError(
+                f"endpoint {endpoint.method} {endpoint.path} on model {model_class.__name__} cannot declare streaming=False while yielding"
+            )
         dedupe_key = (endpoint.method, endpoint.path)
         if dedupe_key in seen:
             raise ValueError(
                 f"duplicate endpoint declaration for {endpoint.method} {endpoint.path} on model {model_class.__name__}"
             )
         seen.add(dedupe_key)
-        endpoints.append(EndpointMetadata(name=attr_name, method=endpoint.method, path=endpoint.path))
+        endpoints.append(
+            EndpointMetadata(
+                name=attr_name,
+                method=endpoint.method,
+                path=endpoint.path,
+                streaming=inferred_streaming if endpoint.streaming is None else endpoint.streaming,
+            )
+        )
     return tuple(endpoints)
 
 
