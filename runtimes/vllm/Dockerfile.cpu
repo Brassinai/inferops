@@ -1,0 +1,18 @@
+# syntax=docker/dockerfile:1.7
+
+# vLLM publishes architecture-specific CPU images rather than one multi-arch
+# tag. This default is the Linux ARM64 image used by Docker on Apple Silicon.
+ARG VLLM_CPU_IMAGE=vllm/vllm-openai-cpu:v0.23.0-arm64@sha256:3732dc3183478eb6e215f8d0aae863c79ce8eead4f601d185bd6983dc2e31392
+FROM ${VLLM_CPU_IMAGE}
+
+ENV HOST=0.0.0.0 \
+    PORT=8000 \
+    MODEL_PATH=/models/model \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    PYTHONUNBUFFERED=1
+
+COPY --chmod=755 runtimes/vllm/entrypoint.sh /opt/inferops/entrypoint.sh
+
+EXPOSE 8000
+ENTRYPOINT ["/opt/inferops/entrypoint.sh"]

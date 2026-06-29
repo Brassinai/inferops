@@ -45,3 +45,5 @@ kubeconfig
 *.log
 tmp/
 temp/
+
+phase.md

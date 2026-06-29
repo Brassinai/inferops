@@ -1,4 +1,6 @@
 runtime:
+  maxModelLen: 512
+  maxNumSeqs: 4
   tensorParallelSize: null
   gpuMemoryUtilization: null
 

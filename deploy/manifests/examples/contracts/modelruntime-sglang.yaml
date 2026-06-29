@@ -8,6 +8,7 @@ spec:
   defaultImage: ghcr.io/inferops/sglang:latest
   port: 8000
   healthPath: /health
+  readinessPath: /health_generate
   metricsPath: /metrics
 status:
   observedGeneration: 1

@@ -40,7 +40,7 @@ spec:
     revision: main
   runtime:
     ref: nano-vllm
-    image: ghcr.io/inferops/nano-vllm:latest
+    image: ghcr.io/your-org/inferops-runtime:nano-vllm
     dtype: bfloat16
     maxModelLen: 4096
     tensorParallelSize: 1
@@ -92,9 +92,9 @@ Existing GPU manifests should include the GPU block explicitly rather than
 relying on admission defaults.
 
 `spec.runtime.ref` references a `ModelRuntime`; it is not restricted to one
-engine. The standard runtime names are `nano-vllm`, `vllm`, and `sglang`.
-The Python SDK defaults the reference to `nano-vllm`; direct YAML keeps it
-explicit.
+engine. The standard runtime names are `nano-vllm`, `vllm`, `sglang`, and
+`llama-cpp`. The Python SDK defaults the reference to `nano-vllm`; direct YAML
+keeps it explicit.
 
 `activation.desiredState` is `Inactive` or `Active`.
 `activation.whenFull` is `Queue`, `Reject`, `ReplaceOldest`, or
@@ -126,8 +126,8 @@ Status also reports `endpoint`, `serviceName`, `assignedNode`,
 ## ModelRuntime
 
 `ModelRuntime` freezes a reusable runtime protocol and container defaults.
-InferOps is designed for nano-vLLM, vLLM, and SGLang, and permits additional
-conforming runtimes. The default runtime object is:
+InferOps is designed for nano-vLLM, vLLM, SGLang, and llama.cpp, and permits
+additional conforming runtimes. The default runtime object is:
 
 ```yaml
 apiVersion: inference.inferops.dev/v1alpha1
@@ -137,24 +137,34 @@ metadata:
 spec:
   engine: nano-vllm
   protocol: openai
-  defaultImage: ghcr.io/inferops/nano-vllm:latest
+  defaultImage: ghcr.io/your-org/inferops-runtime:nano-vllm
   port: 8000
   healthPath: /health
+  readinessPath: /health
   metricsPath: /metrics
 ```
 
 Required fields are `engine`, `protocol`, `defaultImage`, `port`, and
-`healthPath`. Optional `command`, `args`, and non-secret `env` support custom
-runtimes. `engine` is intentionally open-ended. `protocol` describes the
-gateway-facing protocol and is `openai` for nano-vLLM, vLLM, and SGLang.
+`healthPath`. Optional `readinessPath`, `metricsPath`, `command`, `args`, and
+non-secret `env` support custom runtimes. When `readinessPath` is omitted, the
+operator falls back to `healthPath` for compatibility. The packaged nano-vLLM
+and vLLM runtimes use `/health`; SGLang uses `/health_generate` for readiness.
+`defaultImage` identifies a released runtime image that already contains the
+engine server plus any thin InferOps CLI adapter; the operator does not build
+engine images.
+Drain state remains owned by the operator and gateway rather than an
+InferOps-managed engine server. `engine` is intentionally open-ended.
+`protocol` describes the gateway-facing protocol and is `openai` for
+nano-vLLM, vLLM, SGLang, and llama.cpp.
 Secret values belong in referenced Secrets, never `spec.env`.
 
 Observed phases are `Pending`, `Ready`, `Unavailable`, and `Failed`. Standard
 condition types are `Ready` and `Valid`.
 
-The checked-in contract fixtures include `nano-vllm`, `vllm`, and `sglang`
-runtime objects. A `Ready` fixture proves shape compatibility for lane tests;
-runtime conformance and image release validation remain implementation work.
+The checked-in contract fixtures include `nano-vllm`, `vllm`, `sglang`, and
+`llama-cpp` runtime objects. A `Ready` fixture proves shape compatibility for
+lane tests; runtime conformance and image release validation remain
+implementation work.
 
 ## ModelCache
 

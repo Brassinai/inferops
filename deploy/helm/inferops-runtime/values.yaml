@@ -5,15 +5,25 @@ image:
 
 model:
   repo: ""
-  revision: main
   path: /models/model
 
 runtime:
+  healthPath: /health
+  readinessPath: /health
+  metricsPath: /metrics
   maxModelLen: 4096
+  maxNumSeqs: 256
   tensorParallelSize: 1
   gpuMemoryUtilization: 0.85
-  drainTimeout: 5m
+  enforceEager: false
+  dtype: float16
   terminationGracePeriodSeconds: 330
+
+cache:
+  hostPath: /var/lib/inferops/models/model
+
+metrics:
+  prometheusAnnotations: false
 
 resources:
   requests:

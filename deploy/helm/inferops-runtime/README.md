@@ -11,6 +11,27 @@ helm template inferops-runtime-cpu . \
   --set image.tag=latest
 ```
 
-The CPU profile retains the Service, probes, resource requests and limits,
-drain timeout, and runtime lifecycle settings. It removes the GPU extended
-resource and GPU-only environment variables.
+The CPU profile retains the Service, probes, resource requests and limits, and
+runtime lifecycle settings. It removes the GPU extended resource and GPU-only
+environment variables. The selected runtime image must support CPU inference.
+The packaged `llama-cpp` adapter is the simplest CPU runtime for local
+contract testing and consumes a GGUF file from the mounted model directory.
+The vLLM CPU adapter is also available, but its upstream images are
+architecture-specific and substantially larger. The regular vLLM and SGLang
+images remain GPU images; SGLang's documented CPU backend requires supported
+Intel Xeon AMX hardware.
+
+The standalone chart mounts the prepared node-local cache from
+`cache.hostPath` at `model.path`. The directory must already exist on the node,
+and callers are responsible for constraining the pod to that node. The
+operator will own that cache-placement decision when reconciliation is
+implemented.
+
+The generic chart defaults startup, readiness, and liveness to `/health`.
+Set `runtime.readinessPath=/health_generate` for SGLang's stronger readiness
+check. Set
+`metrics.prometheusAnnotations=true` to annotate the pod for scraping
+`runtime.metricsPath` on port `8000`.
+
+`runtime.terminationGracePeriodSeconds` bounds the engine's native graceful
+shutdown after the operator and gateway have stopped routing new requests.

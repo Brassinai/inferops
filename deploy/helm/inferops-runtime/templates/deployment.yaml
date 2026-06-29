@@ -16,6 +16,12 @@ spec:
       labels:
         app.kubernetes.io/name: {{ .Chart.Name }}
         app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- if .Values.metrics.prometheusAnnotations }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: {{ .Values.runtime.metricsPath | quote }}
+        prometheus.io/port: "8000"
+      {{- end }}
     spec:
       containers:
         - name: runtime
@@ -24,12 +30,16 @@ spec:
           env:
             - name: MODEL_REPO
               value: {{ .Values.model.repo | quote }}
-            - name: MODEL_REVISION
-              value: {{ .Values.model.revision | quote }}
             - name: MODEL_PATH
               value: {{ .Values.model.path | quote }}
             - name: MAX_MODEL_LEN
               value: {{ .Values.runtime.maxModelLen | quote }}
+            - name: MAX_NUM_SEQS
+              value: {{ .Values.runtime.maxNumSeqs | quote }}
+            - name: ENFORCE_EAGER
+              value: {{ .Values.runtime.enforceEager | quote }}
+            - name: MODEL_DTYPE
+              value: {{ .Values.runtime.dtype | quote }}
             {{- if .Values.runtime.tensorParallelSize }}
             - name: TENSOR_PARALLEL_SIZE
               value: {{ .Values.runtime.tensorParallelSize | quote }}
@@ -40,25 +50,32 @@ spec:
             {{- end }}
             - name: PORT
               value: "8000"
-            - name: INFEROPS_DRAIN_TIMEOUT
-              value: {{ .Values.runtime.drainTimeout | quote }}
           ports:
             - name: http
               containerPort: 8000
           readinessProbe:
             httpGet:
-              path: /health
+              path: {{ .Values.runtime.readinessPath | quote }}
               port: http
           livenessProbe:
             httpGet:
-              path: /health
+              path: {{ .Values.runtime.healthPath | quote }}
               port: http
           startupProbe:
             httpGet:
-              path: /health
+              path: {{ .Values.runtime.readinessPath | quote }}
               port: http
             failureThreshold: 60
             periodSeconds: 10
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: model-cache
+              mountPath: {{ .Values.model.path | quote }}
+              readOnly: true
+      volumes:
+        - name: model-cache
+          hostPath:
+            path: {{ .Values.cache.hostPath | quote }}
+            type: Directory
       terminationGracePeriodSeconds: {{ .Values.runtime.terminationGracePeriodSeconds }}

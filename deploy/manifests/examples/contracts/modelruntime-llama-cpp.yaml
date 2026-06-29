@@ -1,11 +1,11 @@
 apiVersion: inference.inferops.dev/v1alpha1
 kind: ModelRuntime
 metadata:
-  name: vllm
+  name: llama-cpp
 spec:
-  engine: vllm
+  engine: llama-cpp
   protocol: openai
-  defaultImage: ghcr.io/inferops/vllm:latest
+  defaultImage: ghcr.io/inferops/llama-cpp:latest
   port: 8000
   healthPath: /health
   readinessPath: /health
