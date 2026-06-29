@@ -1,66 +1,72 @@
-# SDK
+# SDK Reference
 
-The Python SDK provides a developer-friendly path for declaring model
-deployments and model-backed application endpoints. Each declared model
-compiles into one `inference.inferops.dev/v1alpha1` `ModelDeployment`. The
-output follows the contract in [crds.md](crds.md), defaults to an inactive
-deployment, and uses the stable `/models/<deployment-name>` gateway route. An
-app containing multiple models produces multiple `ModelDeployment` objects,
-sorted by deployment name for deterministic GitOps-friendly YAML output.
+The Python SDK compiles decorated classes into `ModelDeployment` manifests. The decorated class is metadata only; the runtime image owns inference.
 
-## Two SDK Lanes
+## Install
 
-### Model lane
+```bash
+pip install -e sdk/python
+```
 
-The model lane is the built-in inference API. InferOps manages routing,
-rollout, scaling, auth, and streaming passthrough.
+## Model lane
+
+Built-in inference API managed by InferOps.
 
 ```python
 import inferops
 
-app = inferops.App("customer-support")
+app = inferops.App("my-app")
 
 @app.model(name="qwen-chat", model="Qwen/Qwen2.5-7B-Instruct")
 class QwenChat:
     pass
 ```
 
-Users can call the built-in inference API through the Python client:
+Generate or deploy:
+
+```bash
+inferops generate app.py > manifests.yaml
+inferops deploy app.py
+inferops deploy app.py --activate
+```
+
+### Call the model
+
+Via the Python client:
 
 ```python
 client = inferops.Client(base_url="https://api.example.com", api_key="...")
 
-response = client.responses.create(
+# Non-streaming
+resp = client.chat.completions.create(
     model="qwen-chat",
-    input="Explain Kubernetes Services simply.",
+    messages=[{"role": "user", "content": "Hello"}],
 )
 
-stream = client.responses.stream(
+# Streaming
+stream = client.chat.completions.create(
     model="qwen-chat",
-    input="Write a short poem.",
-)
-```
-
-OpenAI-compatible chat completions are available through the same client and
-the stable HTTP API. Streaming is enabled with `stream=True`.
-
-```python
-events = client.chat.completions.create(
-    model="qwen-chat",
-    messages=[{"role": "user", "content": "Say hello."}],
+    messages=[{"role": "user", "content": "Hello"}],
     stream=True,
 )
+for event in stream:
+    print(event)
 ```
 
-### Custom endpoint lane
+Or use any OpenAI-compatible HTTP client against:
 
-The custom endpoint lane is for app logic around a model such as
-preprocessing, RAG, tools, guardrails, custom JSON routes, and SSE.
+```
+/models/qwen-chat/v1/chat/completions
+```
+
+## Custom endpoint lane
+
+Add app logic (preprocessing, RAG, guardrails) around the model.
 
 ```python
 import inferops
 
-app = inferops.App("customer-support")
+app = inferops.App("my-app")
 
 @app.model(name="qwen-chat", model="Qwen/Qwen2.5-7B-Instruct")
 class QwenChat:
@@ -74,40 +80,54 @@ class QwenChat:
             yield chunk
 ```
 
-Custom endpoint semantics are:
+Endpoint semantics:
 
-- `return ...` means a normal JSON or HTTP response.
-- `yield ...` means a streaming response.
-- Returning an async iterator is also supported for streaming, but declare the
-  endpoint with `streaming=True` so the route contract is explicit.
-- `self.generate(...)` delegates through the selected runtime abstraction.
-- `self.generate_stream(...)` yields runtime-agnostic token or event chunks.
+- `return` → JSON response
+- `yield` or async iterator → streaming response
+- `self.generate(...)` → runtime-agnostic inference call
+- `self.generate_stream(...)` → runtime-agnostic stream
 
-## Validation And Manifest Generation
+## Decorator options
 
-The decorator's `engine` value becomes `spec.runtime.ref`; it is not limited to
-the default runtime. Omitting `engine` selects `nano-vllm`.
+```python
+@app.model(
+    name="qwen-chat",
+    engine="nano-vllm",          # ModelRuntime ref; default: nano-vllm
+    model="Qwen/Qwen2.5-7B-Instruct",
+    gpu=1,                        # int = count; str = type; None = CPU-only
+    gpu_vendor="nvidia",
+    cpu="8",
+    memory="32Gi",
+    activation="Inactive",        # Inactive | Active
+    when_full="Queue",            # Queue | Reject | ReplaceOldest | ReplaceLowestPriority
+    priority=50,
+    drain_timeout="5m",
+    min_replicas=0,
+    max_replicas=1,
+    max_model_len=4096,
+    route_path="/models/qwen-chat",
+    openai_compatible=True,
+    cache_enabled=True,
+    cache_type="nodeLocal",
+    cache_size="100Gi",
+    cache_path="/var/lib/inferops/models",
+    hugging_face_token_secret_name="hf-token",
+)
+class QwenChat:
+    pass
+```
 
-The decorated class is currently a declaration marker used while generating
-the Kubernetes resource. It is not instantiated inside the runtime container.
-Inference is served by the selected engine's own OpenAI-compatible server, so
-application code must not import or construct nano-vLLM, vLLM, or SGLang
-engine classes.
+## Validation
 
-The decorator defaults to one NVIDIA GPU for compatibility. Setting `gpu=None`
-produces a CPU-only deployment. Supplying a positive integer requests that many
-NVIDIA GPUs; supplying a non-empty string requests one NVIDIA GPU of that type.
-The selected runtime image must support the requested compute mode.
+Invalid inputs fail before YAML is generated:
 
-The SDK validates decorator inputs eagerly so invalid model names, activation
-policies, scaling bounds, route paths, cache settings, and GPU requests fail
-before YAML is generated. Supported high-level deployment options include:
+```python
+@app.model(name="", model="Qwen/Qwen2.5-7B-Instruct")
+class Bad:
+    pass
+# ValueError: name is required
+```
 
-- `activation` and `when_full` for activation policy.
-- `min_replicas` and `max_replicas` for explicit scaling bounds.
-- `route_path`, `route_enabled`, and `openai_compatible` for gateway routing.
-- `cache_enabled`, `cache_type`, `cache_size`, and `cache_path` for model cache settings.
-- `runtime_image`, `dtype`, and `hugging_face_token_secret_name` for runtime overrides and source credentials.
+## Deterministic output
 
-The SDK talks to the user's Kubernetes API through the CLI or Kubernetes
-client. It does not rely on a hosted InferOps control plane.
+`inferops generate` sorts manifests by name and renders stable YAML for GitOps diffs.
