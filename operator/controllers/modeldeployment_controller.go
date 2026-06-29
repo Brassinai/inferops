@@ -15,7 +15,7 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, deployment v1
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if deployment.Metadata.Name == "" {
+	if deployment.Name == "" {
 		return fmt.Errorf("modeldeployment name is required")
 	}
 	return nil

@@ -15,7 +15,7 @@ func (r *ModelCacheReconciler) Reconcile(ctx context.Context, cache v1alpha1.Mod
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if cache.Metadata.Name == "" {
+	if cache.Name == "" {
 		return fmt.Errorf("modelcache name is required")
 	}
 	return nil

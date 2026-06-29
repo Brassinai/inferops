@@ -10,7 +10,6 @@ func TestValidateModelDeployment(t *testing.T) {
 	t.Parallel()
 
 	valid := v1alpha1.ModelDeployment{
-		Metadata: v1alpha1.ObjectMeta{Name: "qwen-chat"},
 		Spec: v1alpha1.ModelDeploymentSpec{
 			Model:      v1alpha1.ModelSpec{Repo: "Qwen/Qwen2.5-7B-Instruct"},
 			Runtime:    v1alpha1.RuntimeSpec{Ref: "nano-vllm"},
@@ -19,6 +18,7 @@ func TestValidateModelDeployment(t *testing.T) {
 			Scaling:    v1alpha1.ScalingSpec{MinReplicas: 0, MaxReplicas: 1},
 		},
 	}
+	valid.Name = "qwen-chat"
 
 	tests := []struct {
 		name    string
@@ -65,6 +65,91 @@ func TestValidateModelDeployment(t *testing.T) {
 			}
 			if err := ValidateModelDeployment(deployment); (err != nil) != tt.wantErr {
 				t.Fatalf("ValidateModelDeployment() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateModelRuntime(t *testing.T) {
+	t.Parallel()
+
+	valid := v1alpha1.ModelRuntime{
+		Spec: v1alpha1.ModelRuntimeSpec{
+			Engine:       "nano-vllm",
+			Protocol:     "openai",
+			DefaultImage: "ghcr.io/inferops/nano-vllm:latest",
+			Port:         8000,
+			HealthPath:   "/health",
+		},
+	}
+	valid.Name = "nano-vllm"
+
+	tests := []struct {
+		name    string
+		mutate  func(*v1alpha1.ModelRuntime)
+		wantErr bool
+	}{
+		{name: "valid"},
+		{name: "missing name", mutate: func(r *v1alpha1.ModelRuntime) { r.Name = "" }, wantErr: true},
+		{name: "missing engine", mutate: func(r *v1alpha1.ModelRuntime) { r.Spec.Engine = "" }, wantErr: true},
+		{name: "missing protocol", mutate: func(r *v1alpha1.ModelRuntime) { r.Spec.Protocol = "" }, wantErr: true},
+		{name: "missing defaultImage", mutate: func(r *v1alpha1.ModelRuntime) { r.Spec.DefaultImage = "" }, wantErr: true},
+		{name: "invalid port zero", mutate: func(r *v1alpha1.ModelRuntime) { r.Spec.Port = 0 }, wantErr: true},
+		{name: "invalid port too high", mutate: func(r *v1alpha1.ModelRuntime) { r.Spec.Port = 70000 }, wantErr: true},
+		{name: "missing healthPath", mutate: func(r *v1alpha1.ModelRuntime) { r.Spec.HealthPath = "" }, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			runtime := valid
+			if tt.mutate != nil {
+				tt.mutate(&runtime)
+			}
+			if err := ValidateModelRuntime(runtime); (err != nil) != tt.wantErr {
+				t.Fatalf("ValidateModelRuntime() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateModelCache(t *testing.T) {
+	t.Parallel()
+
+	valid := v1alpha1.ModelCache{
+		Spec: v1alpha1.ModelCacheSpec{
+			ModelRepo: "Qwen/Qwen2.5-7B-Instruct",
+			Storage: v1alpha1.ModelCacheStorage{
+				Type: "nodeLocal",
+				Size: "100Gi",
+				Path: "/var/lib/inferops/models/qwen-chat",
+			},
+		},
+	}
+	valid.Name = "qwen-chat-cache"
+
+	tests := []struct {
+		name    string
+		mutate  func(*v1alpha1.ModelCache)
+		wantErr bool
+	}{
+		{name: "valid"},
+		{name: "missing name", mutate: func(c *v1alpha1.ModelCache) { c.Name = "" }, wantErr: true},
+		{name: "missing modelRepo", mutate: func(c *v1alpha1.ModelCache) { c.Spec.ModelRepo = "" }, wantErr: true},
+		{name: "missing storage type", mutate: func(c *v1alpha1.ModelCache) { c.Spec.Storage.Type = "" }, wantErr: true},
+		{name: "missing storage size", mutate: func(c *v1alpha1.ModelCache) { c.Spec.Storage.Size = "" }, wantErr: true},
+		{name: "missing storage path", mutate: func(c *v1alpha1.ModelCache) { c.Spec.Storage.Path = "" }, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			cache := valid
+			if tt.mutate != nil {
+				tt.mutate(&cache)
+			}
+			if err := ValidateModelCache(cache); (err != nil) != tt.wantErr {
+				t.Fatalf("ValidateModelCache() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
