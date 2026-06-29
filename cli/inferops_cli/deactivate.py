@@ -1,4 +1,4 @@
-"""Delete command."""
+"""Deactivate command."""
 
 from __future__ import annotations
 
@@ -9,11 +9,11 @@ from .output import CommandResult, emit_result
 
 
 def register(subcommands) -> None:
-    """Register the delete command."""
+    """Register the deactivate command."""
     parser = subcommands.add_parser(
-        "delete",
-        help="Delete a deployment.",
-        description="Delete a deployment through the Kubernetes workflow placeholder.",
+        "deactivate",
+        help="Request deactivation for a deployed model.",
+        description="Mark a deployment as inactive through the Kubernetes workflow.",
     )
     parser.add_argument("name", help="Deployment name.")
     add_cluster_options(parser)
@@ -21,16 +21,16 @@ def register(subcommands) -> None:
 
 
 def run(args, client=None) -> int:
-    """Run the delete command."""
+    """Run the deactivate command."""
 
     def action() -> int:
         cluster = build_cluster_target(args)
-        response = resolve_client(args, client).delete(NamedRequest(cluster=cluster, name=args.name))
+        response = resolve_client(args, client).deactivate(NamedRequest(cluster=cluster, name=args.name))
         deployment = response["deployment"]
         emit_result(
             args.output,
             CommandResult(
-                summary=f"Delete placeholder recorded for {deployment['name']} in namespace {deployment['namespace']}.",
+                summary=f"Deactivation placeholder recorded for {deployment['name']} in namespace {deployment['namespace']}.",
                 payload=response,
             ),
         )

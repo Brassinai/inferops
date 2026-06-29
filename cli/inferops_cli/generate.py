@@ -1,5 +1,14 @@
 """Generate command."""
 
+from __future__ import annotations
+
+import sys
+
+from inferops import render_yaml
+
+from .app_loader import load_app
+from .errors import ExitCode, run_with_cli_errors
+
 
 def register(subcommands):
     """Register the generate command."""
@@ -10,5 +19,10 @@ def register(subcommands):
 
 def run(args) -> int:
     """Run the generate command."""
-    print(f"generate is not implemented yet: {args.app}")
-    return 0
+
+    def action() -> int:
+        app = load_app(args.app)
+        sys.stdout.write(render_yaml(app))
+        return ExitCode.SUCCESS
+
+    return run_with_cli_errors(action)
