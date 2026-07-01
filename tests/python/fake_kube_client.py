@@ -5,8 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from inferops_cli.errors import NotFoundError
-from inferops_cli.kube import CacheDeleteRequest, ClusterTarget, DeployRequest, InstallRequest, LogsRequest, NamedRequest
+from inferops_cli.errors import CLIError, NotFoundError
+from inferops_cli.kube import (
+    CacheDeleteRequest,
+    ClusterTarget,
+    DeployRequest,
+    DoctorRequest,
+    InstallRequest,
+    LogsRequest,
+    NamedRequest,
+)
 
 
 @dataclass(frozen=True)
@@ -25,6 +33,9 @@ class FakeKubernetesClient:
         self._deployments: dict[_ResourceKey, dict[str, Any]] = {}
         self._caches: dict[_ResourceKey, dict[str, Any]] = {}
         self._installs: list[dict[str, Any]] = []
+        self._gpus: list[dict[str, Any]] = []
+        self._doctor_checks: list[dict[str, Any]] = []
+        self._cache_deletable: bool = True
 
     def deploy(self, request: DeployRequest) -> dict[str, Any]:
         deployments = []
@@ -34,7 +45,9 @@ class FakeKubernetesClient:
             deployment = {
                 "name": name,
                 "namespace": request.cluster.namespace,
-                "phase": "Active" if request.activate else manifest["spec"]["activation"]["desiredState"],
+                "phase": "Active"
+                if request.activate
+                else manifest["spec"]["activation"]["desiredState"],
                 "runtime": manifest["spec"]["runtime"]["ref"],
                 "model": manifest["spec"]["model"]["repo"],
                 "action": "created" if key not in self._deployments else "replaced",
@@ -45,9 +58,16 @@ class FakeKubernetesClient:
             self._caches[key] = {
                 "name": name,
                 "namespace": request.cluster.namespace,
-                "status": "Prepared" if cache_spec["enabled"] else "Disabled",
+                "phase": "Prepared" if cache_spec["enabled"] else "Disabled",
+                "repository": manifest["spec"]["model"]["repo"],
+                "revision": manifest["spec"]["model"].get("revision", "main"),
+                "node": "",
                 "path": cache_spec["path"],
                 "size": cache_spec["size"],
+                "lastUsed": "",
+                "referencedBy": [name],
+                "referencesKnown": True,
+                "issues": [],
             }
             deployments.append(deployment)
 
@@ -91,7 +111,9 @@ class FakeKubernetesClient:
         }
 
     def logs(self, request: LogsRequest) -> dict[str, Any]:
-        deployment = self._require_deployment(NamedRequest(cluster=request.cluster, name=request.name))
+        deployment = self._require_deployment(
+            NamedRequest(cluster=request.cluster, name=request.name)
+        )
         lines = [
             f"{deployment['name']}: placeholder log stream from fake Kubernetes client",
             f"{deployment['name']}: phase={deployment['phase']} namespace={deployment['namespace']}",
@@ -109,8 +131,8 @@ class FakeKubernetesClient:
         return {
             "mode": "fake",
             "cluster": cluster.to_safe_dict(),
-            "gpus": [],
-            "message": "GPU inventory is not implemented yet; fake client returned placeholder data.",
+            "gpus": list(self._gpus),
+            "message": "GPU inventory from fake Kubernetes client.",
         }
 
     def cache_list(self, cluster: ClusterTarget) -> dict[str, Any]:
@@ -123,21 +145,31 @@ class FakeKubernetesClient:
             "mode": "fake",
             "cluster": cluster.to_safe_dict(),
             "caches": sorted(caches, key=lambda item: item["name"]),
-            "message": "Placeholder cache inventory fetched from the fake Kubernetes client.",
+            "message": "Cache inventory from fake Kubernetes client.",
         }
 
     def cache_delete(self, request: CacheDeleteRequest) -> dict[str, Any]:
         key = self._resource_key(request.cluster, request.name)
-        cache = self._caches.pop(key, None)
+        cache = self._caches.get(key)
         if cache is None:
             raise NotFoundError(f"cache not found: {request.name}")
+        refs = cache.get("referencedBy", [])
+        if refs and not request.force:
+            raise CLIError(
+                f"cache '{request.name}' is referenced by deployments: {', '.join(refs)}. "
+                "Use --force only after confirming the deployment can lose the cache registration."
+            )
+        if request.force and refs:
+            cache["deleteAnnotated"] = True
+        self._caches.pop(key, None)
         return {
             "mode": "fake",
             "cluster": request.cluster.to_safe_dict(),
             "cache": cache,
             "force": request.force,
+            "annotated": request.force and bool(refs),
             "deleted": True,
-            "message": "Placeholder cache delete executed against the fake Kubernetes client.",
+            "nodeFilesModified": False,
         }
 
     def install(self, request: InstallRequest) -> dict[str, Any]:
@@ -164,13 +196,23 @@ class FakeKubernetesClient:
         deployment = self._require_deployment(request).copy()
         key = self._resource_key(request.cluster, request.name)
         self._deployments.pop(key, None)
-        self._caches.pop(key, None)
         return {
             "mode": "fake",
             "cluster": request.cluster.to_safe_dict(),
             "deployment": deployment,
             "deleted": True,
             "message": "Placeholder delete executed against the fake Kubernetes client.",
+        }
+
+    def doctor(self, request: DoctorRequest) -> dict[str, Any]:
+        checks = [c.copy() for c in self._doctor_checks]
+        if request.checks:
+            checks = [c for c in checks if c["id"] in request.checks]
+        return {
+            "mode": "fake",
+            "cluster": request.cluster.to_safe_dict(),
+            "checks": checks,
+            "message": "Placeholder doctor executed against the fake Kubernetes client.",
         }
 
     def _require_deployment(self, request: NamedRequest) -> dict[str, Any]:
@@ -181,4 +223,6 @@ class FakeKubernetesClient:
         return deployment
 
     def _resource_key(self, cluster: ClusterTarget, name: str) -> _ResourceKey:
-        return _ResourceKey(namespace=cluster.namespace, context=cluster.context, name=name)
+        return _ResourceKey(
+            namespace=cluster.namespace, context=cluster.context, name=name
+        )

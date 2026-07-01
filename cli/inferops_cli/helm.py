@@ -54,7 +54,9 @@ class HelmInstaller:
             try:
                 completed = self._runner(command)
             except FileNotFoundError as exc:
-                raise CLIError("helm executable not found; install Helm 3.15 or newer") from exc
+                raise CLIError(
+                    "helm executable not found; install Helm 3.15 or newer"
+                ) from exc
             except subprocess.CalledProcessError as exc:
                 detail = (exc.stderr or exc.stdout or "unknown Helm error").strip()
                 raise CLIError(f"Helm install failed: {detail}") from exc
@@ -125,7 +127,14 @@ def _build_upgrade_command(
         command.extend(("--values", str(profile_values)))
 
     if release_name == "inferops-operator":
-        command.extend(("--set-string", f"cache.root={_escape_helm_string(cache_root)}"))
+        command.extend(
+            (
+                "--set-string",
+                f"cache.root={_escape_helm_string(cache_root)}",
+                "--set-string",
+                f"profile={request.profile}",
+            )
+        )
     elif request.tailscale_hostname:
         command.extend(
             (
@@ -157,7 +166,10 @@ def _resolve_charts_dir(explicit_path: str | None) -> Path:
 
     for candidate in candidates:
         resolved = candidate.expanduser().resolve()
-        if all((resolved / release / "Chart.yaml").is_file() for release in DEFAULT_RELEASES):
+        if all(
+            (resolved / release / "Chart.yaml").is_file()
+            for release in DEFAULT_RELEASES
+        ):
             return resolved
 
     searched = ", ".join(str(path) for path in candidates)
@@ -184,7 +196,9 @@ def _require_charts_dir(path: Path, source: str) -> Path:
 
 def _validate_cache_root(cache_root: str) -> None:
     if len(cache_root) > 4096 or any(ord(character) < 32 for character in cache_root):
-        raise CLIError("cache path must not contain control characters and must be at most 4096 characters")
+        raise CLIError(
+            "cache path must not contain control characters and must be at most 4096 characters"
+        )
     path = PurePosixPath(cache_root)
     if not path.is_absolute():
         raise CLIError(f"cache path must be absolute: {cache_root}")

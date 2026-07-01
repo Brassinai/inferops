@@ -18,7 +18,9 @@ class HelmInstallerTest(unittest.TestCase):
 
         def run(command):
             commands.append(list(command))
-            return subprocess.CompletedProcess(command, 0, stdout="Release upgraded\n", stderr="")
+            return subprocess.CompletedProcess(
+                command, 0, stdout="Release upgraded\n", stderr=""
+            )
 
         with tempfile.TemporaryDirectory() as directory:
             charts_dir = self._make_charts(Path(directory), include_homelab_values=True)
@@ -48,6 +50,7 @@ class HelmInstallerTest(unittest.TestCase):
 
         operator_command, gateway_command = commands
         self.assertIn("cache.root=/mnt/nvme/models", operator_command)
+        self.assertIn("profile=homelab", operator_command)
         self.assertIn("tailscale.enabled=true", gateway_command)
         self.assertIn("tailscale.hostname=inferops", gateway_command)
         self.assertEqual(response["install"]["cachePath"], "/mnt/nvme/models")
@@ -72,6 +75,7 @@ class HelmInstallerTest(unittest.TestCase):
             )
 
         self.assertEqual(response["install"]["cachePath"], "/var/lib/inferops/models")
+        self.assertIn("profile=default", commands[0])
         self.assertNotIn("tailscale.enabled=true", commands[1])
 
     def test_rejects_unsafe_cache_roots_before_running_helm(self) -> None:
@@ -83,7 +87,9 @@ class HelmInstallerTest(unittest.TestCase):
             "/var/lib/models\ninjected",
         ):
             with self.subTest(path=path), self.assertRaises(CLIError):
-                HelmInstaller(runner=lambda command: self.fail("Helm should not run")).install(
+                HelmInstaller(
+                    runner=lambda command: self.fail("Helm should not run")
+                ).install(
                     InstallRequest(
                         cluster=ClusterTarget(namespace="inferops-system"),
                         profile="homelab",
@@ -95,7 +101,9 @@ class HelmInstallerTest(unittest.TestCase):
     def test_explicit_charts_directory_is_authoritative(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(CLIError, "--charts-dir does not contain"):
-                HelmInstaller(runner=lambda command: self.fail("Helm should not run")).install(
+                HelmInstaller(
+                    runner=lambda command: self.fail("Helm should not run")
+                ).install(
                     InstallRequest(
                         cluster=ClusterTarget(namespace="inferops-system"),
                         profile="default",
@@ -105,8 +113,13 @@ class HelmInstallerTest(unittest.TestCase):
 
     def test_rejects_invalid_tailscale_hostname_before_running_helm(self) -> None:
         for hostname in ("Not_A_Host", "1inferops", "inferops1", "inferops.example"):
-            with self.subTest(hostname=hostname), self.assertRaisesRegex(CLIError, "start and end"):
-                HelmInstaller(runner=lambda command: self.fail("Helm should not run")).install(
+            with (
+                self.subTest(hostname=hostname),
+                self.assertRaisesRegex(CLIError, "start and end"),
+            ):
+                HelmInstaller(
+                    runner=lambda command: self.fail("Helm should not run")
+                ).install(
                     InstallRequest(
                         cluster=ClusterTarget(namespace="inferops-system"),
                         profile="homelab",
@@ -117,7 +130,9 @@ class HelmInstallerTest(unittest.TestCase):
 
     def test_reports_helm_stderr_without_exposing_command_arguments(self) -> None:
         def fail(command):
-            raise subprocess.CalledProcessError(1, command, stderr="cluster unreachable")
+            raise subprocess.CalledProcessError(
+                1, command, stderr="cluster unreachable"
+            )
 
         with tempfile.TemporaryDirectory() as directory:
             charts_dir = self._make_charts(Path(directory))
@@ -135,7 +150,9 @@ class HelmInstallerTest(unittest.TestCase):
         for chart in ("inferops-operator", "inferops-gateway"):
             chart_dir = root / chart
             chart_dir.mkdir()
-            (chart_dir / "Chart.yaml").write_text("apiVersion: v2\nname: test\nversion: 0.0.0\n")
+            (chart_dir / "Chart.yaml").write_text(
+                "apiVersion: v2\nname: test\nversion: 0.0.0\n"
+            )
             if include_homelab_values:
                 (chart_dir / "values-homelab.yaml").write_text("{}\n")
         return root

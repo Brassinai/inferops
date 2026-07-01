@@ -1,0 +1,18 @@
+{{- $probeImage := required "diagnostics.cacheProbeImage is required" .Values.diagnostics.cacheProbeImage }}
+{{- if not (regexMatch "@sha256:[a-f0-9]{64}$" $probeImage) }}
+{{- fail "diagnostics.cacheProbeImage must be pinned by sha256 digest" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "inferops-operator.fullname" . }}-diagnostics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    inferops.dev/component: diagnostics
+    {{- include "inferops-operator.labels" . | nindent 4 }}
+data:
+  profile: {{ .Values.profile | default "default" | quote }}
+  cache.root: {{ .Values.cache.root | quote }}
+  cache.probeImage: {{ $probeImage | quote }}
+  gpu.required: {{ .Values.gpu.required | quote }}
+  diagnostics.schemaVersion: "1"

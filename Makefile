@@ -57,6 +57,7 @@ tools-check:
 	@$(PYTHON) -c "import yaml" >/dev/null 2>&1 || { echo "error: Python verification dependencies are missing; run: make setup"; exit 1; }
 	@$(PYTHON) -c "import build" >/dev/null 2>&1 || { echo "error: Python build dependency is missing; run: make setup"; exit 1; }
 	@$(PYTHON) -c "import hatchling" >/dev/null 2>&1 || { echo "error: Python build backend is missing; run: make setup"; exit 1; }
+	@$(PYTHON) -c "import kubernetes" >/dev/null 2>&1 || { echo "error: Kubernetes Python client is missing; run: make setup"; exit 1; }
 	@$(PYTHON) scripts/check_tool_versions.py \
 		--go-command "$(GO)" --minimum-go "$(GO_VERSION)" \
 		--python-command "$(PYTHON)" --minimum-python "$(PYTHON_VERSION)" \
@@ -121,6 +122,11 @@ helm-lint:
 		echo "error: operator chart accepted an unsafe cache root"; \
 		exit 1; \
 	fi
+	@if $(HELM) template invalid deploy/helm/inferops-operator \
+		--set-string diagnostics.cacheProbeImage=busybox:latest >/dev/null 2>&1; then \
+		echo "error: operator chart accepted an unpinned diagnostics image"; \
+		exit 1; \
+	fi
 
 helm-template:
 	@rm -rf .verify/helm
@@ -153,6 +159,9 @@ helm-template:
 		exit 1; \
 	}
 	@grep -q 'pathType: Prefix' .verify/helm/inferops-gateway-homelab.yaml
+	@grep -q 'profile: "homelab"' .verify/helm/inferops-operator-homelab.yaml
+	@grep -q 'gpu.required: "true"' .verify/helm/inferops-operator-homelab.yaml
+	@grep -q 'gpu.required: "false"' .verify/helm/inferops-operator.yaml
 	@! grep -q 'tailscale.com/hostname' .verify/helm/inferops-gateway-homelab.yaml || { \
 		echo "error: Tailscale Ingress hostname must be configured through spec.tls.hosts"; \
 		exit 1; \

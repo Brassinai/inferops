@@ -12,7 +12,7 @@ def register(subcommands) -> None:
     """Register the gpu command group."""
     parser = subcommands.add_parser(
         "gpu",
-        help="Inspect GPU availability and placeholder inventory.",
+        help="Inspect GPU availability and occupancy.",
         description="GPU-related cluster inspection commands.",
     )
     gpu_commands = parser.add_subparsers(dest="gpu_command", metavar="command")
@@ -20,8 +20,8 @@ def register(subcommands) -> None:
 
     list_parser = gpu_commands.add_parser(
         "list",
-        help="List GPU inventory.",
-        description="List placeholder GPU inventory through the Kubernetes client boundary.",
+        help="List GPU inventory per node.",
+        description="List GPU capacity, occupancy, and availability through the Kubernetes client boundary.",
     )
     add_cluster_options(list_parser)
     list_parser.set_defaults(handler=run_list)
@@ -34,15 +34,24 @@ def run_list(args, client=None) -> int:
         cluster = build_cluster_target(args)
         response = resolve_client(args, client).gpu_list(cluster)
         gpus = response["gpus"]
-        details = tuple(
-            f"{gpu['name']} {gpu['vendor']} {gpu['product']} {gpu['status']}" for gpu in gpus
-        )
+        details = []
+        for gpu in gpus:
+            occupied = gpu["occupied"] if gpu["occupied"] is not None else "unknown"
+            available = gpu["available"] if gpu["available"] is not None else "unknown"
+            line = (
+                f"{gpu['node']}  {gpu['resourceName']}  "
+                f"capacity={gpu['capacity']}  allocatable={gpu['allocatable']}  "
+                f"occupied={occupied}  available={available}"
+            )
+            if gpu.get("product"):
+                line += f"  product={gpu['product']}"
+            details.append(line)
         emit_result(
             args.output,
             CommandResult(
-                summary="GPU inventory placeholder returned from the fake Kubernetes client.",
+                summary=f"GPU inventory: {len(gpus)} node-resource entries.",
                 payload=response,
-                details=details or ("no gpu inventory available in placeholder mode",),
+                details=tuple(details) or ("no GPU-capable nodes found",),
             ),
         )
         return ExitCode.SUCCESS

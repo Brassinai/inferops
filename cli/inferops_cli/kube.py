@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .errors import CLIError
@@ -76,6 +76,14 @@ class CacheDeleteRequest:
     force: bool = False
 
 
+@dataclass(frozen=True)
+class DoctorRequest:
+    """Inputs for a doctor request."""
+
+    cluster: ClusterTarget
+    checks: list[str] = field(default_factory=list)
+
+
 class KubernetesClient(Protocol):
     """Small boundary that can be replaced by a real or fake client."""
 
@@ -109,6 +117,9 @@ class KubernetesClient(Protocol):
     def delete(self, request: NamedRequest) -> dict[str, Any]:
         """Delete one deployment."""
 
+    def doctor(self, request: DoctorRequest) -> dict[str, Any]:
+        """Run diagnostic checks."""
+
 
 def build_cluster_target(args: Any) -> ClusterTarget:
     """Build a cluster target from argparse arguments."""
@@ -119,7 +130,9 @@ def build_cluster_target(args: Any) -> ClusterTarget:
     )
 
 
-def resolve_client(args: Any, client: KubernetesClient | None = None) -> KubernetesClient:
+def resolve_client(
+    args: Any, client: KubernetesClient | None = None
+) -> KubernetesClient:
     """Resolve the client for one handler invocation."""
     if client is not None:
         return client

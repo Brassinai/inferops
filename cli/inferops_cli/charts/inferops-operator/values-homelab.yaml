@@ -1,3 +1,8 @@
+profile: homelab
+
+gpu:
+  required: true
+
 cache:
   root: /var/lib/inferops/models
 

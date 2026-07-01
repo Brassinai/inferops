@@ -158,17 +158,61 @@ inferops delete qwen-chat
 
 Cache is not deleted. Use `cache delete` to remove cache.
 
+### doctor
+
+Run cluster health diagnostics.
+
+```bash
+inferops doctor
+inferops doctor --check kubernetes-api --check gateway
+```
+
+Checks:
+
+| Check | What it validates |
+| --- | --- |
+| `kubernetes-api` | API connectivity and namespace existence |
+| `device-plugin` | GPU extended resources and device plugin DaemonSet readiness |
+| `gpu-capacity` | Total, allocatable, occupied, and available GPU slots |
+| `cache` | Installation ConfigMap and read-only node cache path probes |
+| `runtime-class` | Required RuntimeClass definitions |
+| `gateway` | Deployment readiness and `/readyz` response |
+| `tailscale` | Ingress and hostname status when configured |
+
+Doctor exits `0` when all checks pass or warn, and exits `1` when any check
+fails. Each check includes independent remediation guidance.
+
+The cache check creates short-lived, node-pinned Jobs in the selected namespace.
+Each Job mounts the configured cache root read-only, reports filesystem totals
+and free bytes, and is deleted before the check returns. Jobs also have an
+active deadline and TTL so Kubernetes cleans them up if the CLI is interrupted.
+The command never creates a missing host directory or changes host files. The
+caller therefore needs permission to create and delete Jobs and to list, read,
+and log their Pods in that namespace.
+
+The operator chart exposes these diagnostic values:
+
+| Value | Default | Purpose |
+| --- | --- | --- |
+| `gpu.required` | `false` | Makes missing GPU resources a doctor failure instead of a warning |
+| `diagnostics.cacheProbeImage` | Digest-pinned BusyBox image | Image used by read-only cache probe Jobs; overrides must be pinned by SHA-256 |
+
 ### gpu list
 
-Show allocatable and used GPU slots.
+Show GPU capacity, occupancy, and availability per node and resource.
 
 ```bash
 inferops gpu list
 ```
 
+InferOps counts all scheduled, non-terminal Pod requests across namespaces,
+including non-InferOps workloads. If cluster-wide Pod listing is forbidden,
+occupied capacity is reported as unknown rather than presenting false
+availability.
+
 ### cache list
 
-Show prepared caches.
+Show prepared caches with observed status and referencing deployments.
 
 ```bash
 inferops cache list
@@ -176,14 +220,20 @@ inferops cache list
 
 ### cache delete
 
-Remove a model cache.
+Delete a `ModelCache` Kubernetes object. The command refuses when the cache is
+referenced by a deployment, or when references cannot be determined safely,
+unless `--force` is used. Forced deletion records the intent before deleting
+the object.
 
 ```bash
 inferops cache delete qwen-chat
 inferops cache delete qwen-chat --force
 ```
 
-`--force` is required when the cache is still referenced by a deployment.
+This command does not delete node-local files. Host filesystem cleanup belongs
+to the cache controller and is not performed by the CLI. Forced deletion can
+leave a deployment without its registered cache, so it should be used only
+after deactivation or deletion of the referencing deployment.
 
 ## Exit codes
 
@@ -192,4 +242,4 @@ inferops cache delete qwen-chat --force
 | `0` | Success |
 | `1` | General error |
 | `2` | Invalid input / validation failed |
-| `3` | Kubernetes API error |
+| `3` | Requested Kubernetes resource not found |

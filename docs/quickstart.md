@@ -39,7 +39,14 @@ Verify:
 ```bash
 kubectl get pods
 kubectl get modelruntime
+inferops doctor
+inferops gpu list
 ```
+
+`inferops doctor` may create temporary read-only cache probe Jobs. It removes
+them after collecting disk-space results; active deadlines and TTL cleanup
+cover interrupted runs. Probe Jobs never create or modify the host cache
+directory.
 
 ## Deploy a model
 

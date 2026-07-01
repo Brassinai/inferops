@@ -11,7 +11,21 @@ import tempfile
 import textwrap
 import unittest
 
-from inferops_cli import activate, cache, deactivate, delete, deploy, gpu, init, install, logs, main, status
+from inferops_cli import (
+    activate,
+    cache,
+    deactivate,
+    delete,
+    deploy,
+    doctor,
+    gpu,
+    init,
+    install,
+    logs,
+    main,
+    status,
+)
+from inferops_cli.kube import ClusterTarget
 from inferops_cli.output import CommandResult, emit_result
 from tests.python.fake_kube_client import FakeKubernetesClient
 
@@ -31,6 +45,7 @@ def make_args(**overrides) -> argparse.Namespace:
         "cache_path": None,
         "tailscale_hostname": None,
         "charts_dir": None,
+        "checks": None,
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -41,7 +56,17 @@ class CLICommandParserTest(unittest.TestCase):
         parser = main.build_parser()
         help_text = parser.format_help()
 
-        for command in ("activate", "cache", "deactivate", "deploy", "gpu", "install", "logs", "status"):
+        for command in (
+            "activate",
+            "cache",
+            "deactivate",
+            "deploy",
+            "doctor",
+            "gpu",
+            "install",
+            "logs",
+            "status",
+        ):
             self.assertIn(command, help_text)
 
     def test_deploy_help_includes_shared_cluster_options(self) -> None:
@@ -53,14 +78,21 @@ class CLICommandParserTest(unittest.TestCase):
     def test_group_commands_have_help_text(self) -> None:
         gpu_help = self._parse_help(["gpu", "list", "--help"])
         cache_help = self._parse_help(["cache", "delete", "--help"])
+        doctor_help = self._parse_help(["doctor", "--help"])
 
-        self.assertIn("List placeholder GPU inventory", gpu_help)
-        self.assertIn("Delete one placeholder cache entry", cache_help)
+        self.assertIn("List GPU capacity, occupancy, and availability", gpu_help)
+        self.assertIn("Delete one ModelCache", cache_help)
+        self.assertIn("Check Kubernetes API, GPUs, cache, gateway", doctor_help)
 
     def test_install_help_documents_profile_configuration(self) -> None:
         install_help = self._parse_help(["install", "--help"])
 
-        for option in ("--profile", "--cache-path", "--tailscale-hostname", "--charts-dir"):
+        for option in (
+            "--profile",
+            "--cache-path",
+            "--tailscale-hostname",
+            "--charts-dir",
+        ):
             self.assertIn(option, install_help)
 
     def test_main_without_command_returns_usage_exit_code(self) -> None:
@@ -82,6 +114,15 @@ class CLICommandParserTest(unittest.TestCase):
         self.assertEqual(exit_code, 2)
         self.assertEqual(stdout.getvalue(), "")
         self.assertIn("inferops status: error:", stderr.getvalue())
+
+    def test_doctor_rejects_unknown_check_name(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            exit_code = main.main(["doctor", "--check", "not-a-check"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn("invalid choice", stderr.getvalue())
 
     def _parse_help(self, argv: list[str]) -> str:
         parser = main.build_parser()
@@ -169,11 +210,15 @@ class CLICommandHandlerTest(unittest.TestCase):
             )
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(json.loads(deploy_stdout)["deployments"][0]["phase"], "Inactive")
+        self.assertEqual(
+            json.loads(deploy_stdout)["deployments"][0]["phase"], "Inactive"
+        )
         self.assertEqual(json.loads(status_stdout)["deployment"]["name"], "qwen-chat")
         self.assertEqual(json.loads(activate_stdout)["deployment"]["phase"], "Active")
         self.assertIn("placeholder log stream", json.loads(logs_stdout)["lines"][0])
-        self.assertEqual(json.loads(deactivate_stdout)["deployment"]["phase"], "Inactive")
+        self.assertEqual(
+            json.loads(deactivate_stdout)["deployment"]["phase"], "Inactive"
+        )
         self.assertEqual(json.loads(cache_stdout)["caches"][0]["name"], "qwen-chat")
         self.assertTrue(json.loads(cache_delete_stdout)["deleted"])
         self.assertEqual(json.loads(gpu_stdout)["gpus"], [])
@@ -181,7 +226,7 @@ class CLICommandHandlerTest(unittest.TestCase):
         self.assertTrue(json.loads(delete_stdout)["deleted"])
         self.assertEqual(json.loads(init_stdout)["mode"], "placeholder")
 
-    def test_runtime_command_fails_without_live_kubernetes_client(self) -> None:
+    def test_runtime_command_reports_invalid_kubeconfig(self) -> None:
         source = textwrap.dedent(
             """
             import inferops
@@ -205,7 +250,7 @@ class CLICommandHandlerTest(unittest.TestCase):
 
         self.assertEqual(exit_code, 1)
         self.assertEqual(stdout.getvalue(), "")
-        self.assertIn("live Kubernetes client not available", stderr.getvalue())
+        self.assertIn("failed to load kubeconfig", stderr.getvalue())
 
     def test_not_found_errors_use_stable_exit_code(self) -> None:
         fake_client = FakeKubernetesClient()
@@ -247,8 +292,12 @@ class CLICommandHandlerTest(unittest.TestCase):
                 make_args(app=str(app_path), namespace="team-b"),
                 fake_client,
             )
-            team_a_cache_stdout, _, _ = self._run(cache.run_list, make_args(namespace="team-a"), fake_client)
-            team_b_cache_stdout, _, _ = self._run(cache.run_list, make_args(namespace="team-b"), fake_client)
+            team_a_cache_stdout, _, _ = self._run(
+                cache.run_list, make_args(namespace="team-a"), fake_client
+            )
+            team_b_cache_stdout, _, _ = self._run(
+                cache.run_list, make_args(namespace="team-b"), fake_client
+            )
             self._run(
                 cache.run_delete,
                 make_args(namespace="team-a", name="qwen-chat", force=True),
@@ -260,9 +309,16 @@ class CLICommandHandlerTest(unittest.TestCase):
                 fake_client,
             )
 
-        self.assertEqual(json.loads(team_a_cache_stdout)["caches"][0]["namespace"], "team-a")
-        self.assertEqual(json.loads(team_b_cache_stdout)["caches"][0]["namespace"], "team-b")
-        self.assertEqual(json.loads(remaining_team_b_cache_stdout)["caches"][0]["namespace"], "team-b")
+        self.assertEqual(
+            json.loads(team_a_cache_stdout)["caches"][0]["namespace"], "team-a"
+        )
+        self.assertEqual(
+            json.loads(team_b_cache_stdout)["caches"][0]["namespace"], "team-b"
+        )
+        self.assertEqual(
+            json.loads(remaining_team_b_cache_stdout)["caches"][0]["namespace"],
+            "team-b",
+        )
 
     def test_output_redacts_sensitive_fields(self) -> None:
         stdout = io.StringIO()
@@ -290,7 +346,119 @@ class CLICommandHandlerTest(unittest.TestCase):
         self.assertNotIn("c2ho", rendered)
         self.assertIn("***REDACTED***", rendered)
 
-    def _run(self, func, args: argparse.Namespace, fake_client: FakeKubernetesClient) -> tuple[str, str, int]:
+    def test_doctor_returns_checks_and_exits_on_failure(self) -> None:
+        fake_client = FakeKubernetesClient()
+        fake_client._doctor_checks = [
+            {"id": "kubernetes-api", "status": "PASS", "message": "ok"},
+            {
+                "id": "gateway",
+                "status": "FAIL",
+                "message": "not ready",
+                "remediation": "install",
+            },
+        ]
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            exit_code = doctor.run(make_args(), fake_client)
+
+        self.assertEqual(exit_code, 1)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(len(payload["checks"]), 2)
+        self.assertEqual(payload["checks"][0]["status"], "PASS")
+        self.assertEqual(payload["checks"][1]["status"], "FAIL")
+
+    def test_doctor_filters_by_check_name(self) -> None:
+        fake_client = FakeKubernetesClient()
+        fake_client._doctor_checks = [
+            {"id": "kubernetes-api", "status": "PASS", "message": "ok"},
+            {"id": "gateway", "status": "PASS", "message": "ok"},
+        ]
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            exit_code = doctor.run(make_args(checks=["gateway"]), fake_client)
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(len(payload["checks"]), 1)
+        self.assertEqual(payload["checks"][0]["id"], "gateway")
+
+    def test_gpu_list_shows_inventory(self) -> None:
+        fake_client = FakeKubernetesClient()
+        fake_client._gpus = [
+            {
+                "node": "node-1",
+                "resourceName": "nvidia.com/gpu",
+                "vendor": "nvidia",
+                "product": "A100",
+                "capacity": 2,
+                "allocatable": 2,
+                "occupied": 1,
+                "available": 1,
+            }
+        ]
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            exit_code = gpu.run_list(make_args(), fake_client)
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["gpus"][0]["node"], "node-1")
+        self.assertEqual(payload["gpus"][0]["available"], 1)
+
+    def test_cache_delete_refuses_without_force(self) -> None:
+        fake_client = FakeKubernetesClient()
+        key = fake_client._resource_key(
+            ClusterTarget(namespace="team-a", context="kind-dev"), "qwen-chat"
+        )
+        fake_client._caches[key] = {
+            "name": "qwen-chat",
+            "namespace": "team-a",
+            "referencedBy": ["other-deploy"],
+        }
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            exit_code = cache.run_delete(
+                make_args(name="qwen-chat", force=False), fake_client
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("referenced by deployments", stderr.getvalue())
+
+    def test_cache_delete_forces_resource_deletion(self) -> None:
+        fake_client = FakeKubernetesClient()
+        key = fake_client._resource_key(
+            ClusterTarget(namespace="team-a", context="kind-dev"), "qwen-chat"
+        )
+        fake_client._caches[key] = {
+            "name": "qwen-chat",
+            "namespace": "team-a",
+            "referencedBy": ["other-deploy"],
+        }
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            exit_code = cache.run_delete(
+                make_args(name="qwen-chat", force=True), fake_client
+            )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload.get("annotated"))
+        self.assertTrue(payload.get("deleted"))
+        self.assertFalse(payload.get("nodeFilesModified"))
+
+    def _run(
+        self, func, args: argparse.Namespace, fake_client: FakeKubernetesClient
+    ) -> tuple[str, str, int]:
         stdout = io.StringIO()
         stderr = io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):

@@ -102,7 +102,27 @@ Re-running either command performs an in-place Helm upgrade. It does not
 install k3s, host drivers, the NVIDIA Container Toolkit, the NVIDIA device
 plugin, or the Tailscale operator.
 
-## 7. Hugging Face token (gated models only)
+## 7. Verify the platform
+
+Run diagnostics after installation:
+
+```bash
+inferops doctor
+```
+
+The cache diagnostic uses temporary read-only probe Jobs on GPU, cache, or
+otherwise schedulable nodes. It reports free bytes but does not create the
+cache directory or repair host prerequisites. Jobs have an active deadline and
+TTL for cleanup after interruption. If Job or Pod inspection is forbidden,
+doctor reports a failed check with the required RBAC remediation.
+
+Check GPU inventory:
+
+```bash
+inferops gpu list
+```
+
+## 8. Hugging Face token (gated models only)
 
 ```bash
 kubectl create secret generic hf-token \
@@ -127,3 +147,5 @@ spec:
 | Cache download stuck | Check HF token; verify disk space and path permissions |
 | Activation stays `WaitingForGPU` | Another model may be active; deactivate or use `--when-full ReplaceOldest` |
 | Gateway 503 | Deployment not `Active`; check `inferops status` and operator logs |
+| Doctor reports missing namespace | Create the namespace or select the correct one with `--namespace` |
+| Doctor cannot list pods | Grant broader Pod list permissions or run with elevated RBAC |
