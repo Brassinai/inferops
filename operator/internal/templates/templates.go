@@ -29,8 +29,32 @@ const (
 	EnvTensorParallelSize = "TENSOR_PARALLEL_SIZE"
 	// EnvGPUMemoryUtilization configures the runtime GPU memory target.
 	EnvGPUMemoryUtilization = "GPU_MEMORY_UTILIZATION"
+	// EnvModelDType configures the runtime model data type.
+	EnvModelDType = "MODEL_DTYPE"
 	// EnvPort configures the runtime HTTP listen port.
 	EnvPort = "PORT"
+
+	// CacheVolumeName is the name of the volume mounting the prepared model cache.
+	CacheVolumeName = "model-cache"
+	// RuntimeModelMountPath is the stable in-container path for prepared model files.
+	RuntimeModelMountPath = "/models/model"
+	// HTTPPortName is the canonical name for the runtime HTTP port.
+	HTTPPortName = "http"
+	// DefaultGPUVendor is the default GPU vendor resource name prefix.
+	DefaultGPUVendor = "nvidia"
+	// CacheDownloaderContainerName is the container name for cache download Jobs.
+	CacheDownloaderContainerName = "downloader"
+	// CacheDownloaderJobSuffix is appended to a ModelCache name for its download Job.
+	CacheDownloaderJobSuffix = "-download"
+
+	// ProbePeriodSeconds is the default probe interval.
+	ProbePeriodSeconds int32 = 10
+	// ProbeTimeoutSeconds is the default probe timeout.
+	ProbeTimeoutSeconds int32 = 5
+	// ProbeFailureThreshold is the default failure threshold for readiness/liveness.
+	ProbeFailureThreshold int32 = 3
+	// StartupProbeFailureThreshold is the startup probe failure threshold.
+	StartupProbeFailureThreshold int32 = 30
 )
 
 // RuntimeServiceName returns the stable runtime Service name for a ModelDeployment.

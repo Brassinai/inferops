@@ -20,4 +20,25 @@ func TestStableRuntimeNamesAndRoutes(t *testing.T) {
 	if got, want := GatewayOpenAIBasePath("qwen-chat"), "/models/qwen-chat/v1"; got != want {
 		t.Fatalf("GatewayOpenAIBasePath() = %q, want %q", got, want)
 	}
+	if got, want := CacheVolumeName, "model-cache"; got != want {
+		t.Fatalf("CacheVolumeName = %q, want %q", got, want)
+	}
+	if got, want := HTTPPortName, "http"; got != want {
+		t.Fatalf("HTTPPortName = %q, want %q", got, want)
+	}
+	if got, want := RuntimeModelMountPath, "/models/model"; got != want {
+		t.Fatalf("RuntimeModelMountPath = %q, want %q", got, want)
+	}
+	if got, want := DefaultGPUVendor, "nvidia"; got != want {
+		t.Fatalf("DefaultGPUVendor = %q, want %q", got, want)
+	}
+	if got, want := CacheDownloaderContainerName, "downloader"; got != want {
+		t.Fatalf("CacheDownloaderContainerName = %q, want %q", got, want)
+	}
+	if got, want := CacheDownloaderJobSuffix, "-download"; got != want {
+		t.Fatalf("CacheDownloaderJobSuffix = %q, want %q", got, want)
+	}
+	if got, want := EnvModelDType, "MODEL_DTYPE"; got != want {
+		t.Fatalf("EnvModelDType = %q, want %q", got, want)
+	}
 }

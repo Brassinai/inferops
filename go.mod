@@ -2,7 +2,10 @@ module github.com/brassinai/inferops
 
 go 1.22.0
 
-require k8s.io/apimachinery v0.30.3
+require (
+	k8s.io/api v0.30.3
+	k8s.io/apimachinery v0.30.3
+)
 
 require (
 	github.com/go-logr/logr v1.4.1 // indirect
