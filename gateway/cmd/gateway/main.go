@@ -4,12 +4,17 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
-	"github.com/brassinai/inferops/gateway/internal/routing"
+	"github.com/brassinai/inferops/internal/health"
 )
 
 func main() {
-	if err := run(context.Background()); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "gateway failed: %v\n", err)
 		os.Exit(1)
 	}
@@ -20,7 +25,5 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	_ = routing.NewRouter()
-	fmt.Println("nano-vLLM gateway bootstrap")
-	return nil
+	return health.Run(ctx, ":8080")
 }

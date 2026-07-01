@@ -254,11 +254,10 @@ class LiveKubernetesClient(KubernetesClient):
         }
 
     def install(self, request: InstallRequest) -> dict[str, Any]:
-        """Placeholder: Helm-based install is not yet implemented via the Python client."""
-        raise CLIError(
-            "inferops install is not yet implemented for the live Kubernetes client. "
-            "Use Helm directly: helm install inferops-operator ./deploy/helm/inferops-operator"
-        )
+        """Install or upgrade InferOps with the packaged Helm charts."""
+        from .helm import HelmInstaller
+
+        return HelmInstaller().install(request)
 
     def delete(self, request: NamedRequest) -> dict[str, Any]:
         """Delete one ModelDeployment."""

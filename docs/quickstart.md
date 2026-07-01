@@ -1,29 +1,44 @@
 # Quickstart
 
-Deploy an OpenAI-compatible model on a single-GPU k3s homelab.
+Deploy an OpenAI-compatible model on a k3s homelab using either an NVIDIA GPU
+or the portable llama.cpp CPU path.
 
 ## Prerequisites
 
-- Linux node with one NVIDIA GPU (8GB+ VRAM for the 0.5B example)
+- Linux node; an NVIDIA GPU is required only for nano-vLLM, vLLM, or SGLang
 - [k3s with NVIDIA container runtime](https://docs.k3s.io/advanced#nvidia-container-runtime-support)
-- [NVIDIA Device Plugin](https://github.com/NVIDIA/k8s-device-plugin)
+  and the [NVIDIA Device Plugin](https://github.com/NVIDIA/k8s-device-plugin)
+  for GPU deployments
 - `kubectl` and `helm` 3.15+
 - Hugging Face token as a Kubernetes Secret (if pulling gated models)
 
 ## Install InferOps
 
-```bash
-helm install inferops-operator ./deploy/helm/inferops-operator \
-  --namespace inferops-system --create-namespace
+The homelab profile installs or upgrades both charts, the CRDs, and the
+packaged `nano-vllm`, `vllm`, `sglang`, and `llama-cpp` runtime definitions:
 
-helm install inferops-gateway ./deploy/helm/inferops-gateway \
-  --namespace inferops-system
+```bash
+inferops install --profile homelab \
+  --cache-path /var/lib/inferops/models
+```
+
+The equivalent lower-level Helm commands are:
+
+```bash
+helm upgrade --install inferops-operator ./deploy/helm/inferops-operator \
+  --namespace default \
+  --values ./deploy/helm/inferops-operator/values-homelab.yaml
+
+helm upgrade --install inferops-gateway ./deploy/helm/inferops-gateway \
+  --namespace default \
+  --values ./deploy/helm/inferops-gateway/values-homelab.yaml
 ```
 
 Verify:
 
 ```bash
-kubectl get pods -n inferops-system
+kubectl get pods
+kubectl get modelruntime
 ```
 
 ## Deploy a model
@@ -88,6 +103,36 @@ class QwenChat:
 ```bash
 inferops deploy app.py
 ```
+
+### CPU-only option
+
+Select the installed `llama-cpp` runtime and omit the GPU request:
+
+```python
+# cpu_app.py
+import inferops
+
+app = inferops.App("cpu-quickstart")
+
+@app.model(
+    name="cpu-smollm",
+    engine="llama-cpp",
+    model="jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF",
+    gpu=None,
+    cpu="4",
+    memory="2Gi",
+    max_model_len=512,
+)
+class CPUSmolLM:
+    pass
+```
+
+```bash
+inferops deploy cpu_app.py
+```
+
+The equivalent Kubernetes manifest is
+[`examples/yaml-deploy/modeldeployment-cpu.yaml`](../examples/yaml-deploy/modeldeployment-cpu.yaml).
 
 ## Activate
 

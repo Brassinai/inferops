@@ -71,17 +71,38 @@ No special StorageClass is required for the homelab path.
 
 ## 5. (Optional) Tailscale private access
 
-If you want to reach the gateway remotely without public ingress:
+If you want to reach the gateway remotely without public ingress, install and
+configure the Tailscale Kubernetes Operator by following its current official
+documentation. InferOps deliberately does not install the operator or tailnet
+credentials.
+
+Docs: [Tailscale Kubernetes Operator](https://tailscale.com/docs/kubernetes-operator)
+and [layer 7 Ingress](https://tailscale.com/docs/kubernetes-operator/ingress/expose-workload-to-tailnet-l7)
+
+## 6. Install InferOps
+
+The install command validates that the cache root is an absolute, clean path,
+then passes it to the operator chart:
 
 ```bash
-kubectl apply -f https://github.com/tailscale/tailscale/releases/download/v1.82.0/tailscale-operator.yaml
+inferops install --profile homelab \
+  --cache-path /var/lib/inferops/models
 ```
 
-Expose the gateway Service with a Tailscale `Ingress` or `ProxyClass` as documented:
+To create a private Tailscale ingress for the gateway after the Tailscale
+operator is ready:
 
-Docs: [Tailscale Kubernetes Operator](https://tailscale.com/kb/1236/kubernetes-operator)
+```bash
+inferops install --profile homelab \
+  --cache-path /var/lib/inferops/models \
+  --tailscale-hostname inferops
+```
 
-## 6. Hugging Face token (gated models only)
+Re-running either command performs an in-place Helm upgrade. It does not
+install k3s, host drivers, the NVIDIA Container Toolkit, the NVIDIA device
+plugin, or the Tailscale operator.
+
+## 7. Hugging Face token (gated models only)
 
 ```bash
 kubectl create secret generic hf-token \

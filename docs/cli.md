@@ -1,6 +1,9 @@
 # CLI Reference
 
-All commands target a namespace. Default is `default`. Use `--namespace`, `--context`, or `--kubeconfig` as needed.
+All commands target the `default` namespace unless overridden. Use
+`--namespace`, `--context`, or `--kubeconfig` as needed. Install the
+cluster-wide operator once, and use the install namespace for model deployments
+that reference its default namespaced `ModelRuntime`.
 
 ## Global flags
 
@@ -15,10 +18,12 @@ All commands target a namespace. Default is `default`. Use `--namespace`, `--con
 
 ### install
 
-Install the operator and gateway into the cluster.
+Install or upgrade the CRDs, operator, gateway, and packaged `nano-vllm`,
+`vllm`, `sglang`, and `llama-cpp` `ModelRuntime` definitions with Helm:
 
 ```bash
-inferops install --profile homelab
+inferops install --profile homelab \
+  --cache-path /var/lib/inferops/models
 ```
 
 Profiles:
@@ -27,6 +32,66 @@ Profiles:
 | --- | --- |
 | `default` | Minimal operator + gateway |
 | `homelab` | Includes cache-path defaults and sensible resource defaults |
+
+The command uses repeatable `helm upgrade --install` operations with atomic
+waits. It forwards `--context` and `--kubeconfig` to Helm. Use
+`--tailscale-hostname` only after installing and configuring the Tailscale
+Kubernetes Operator:
+
+```bash
+inferops install --profile homelab \
+  --tailscale-hostname inferops
+```
+
+InferOps does not install or guess host NVIDIA drivers, the NVIDIA Container
+Toolkit, a device plugin, k3s, or Tailscale. Those host and cluster
+prerequisites must be installed and verified independently.
+
+When running a CLI development build outside this repository, use
+`--charts-dir /path/to/inferops/deploy/helm` if the packaged charts cannot be
+detected.
+
+All component images are configurable in chart values. For a private registry
+or a development build, override `image.repository` and `image.tag` in each
+chart; the operator chart also exposes the `modelRuntimes` map and
+`cache.downloaderImage`.
+
+Set `rbac.create=false` when cluster-scoped RBAC is provisioned separately.
+The supplied ClusterRole deliberately excludes Secret reads: model download
+credentials are referenced by name from downloader Jobs and resolved by
+Kubernetes rather than read into operator memory.
+
+The install profile does not choose the engine for every model. Each
+deployment selects a registered runtime and independently declares whether it
+needs GPUs:
+
+| Runtime reference | Packaged compute path |
+| --- | --- |
+| `nano-vllm` | NVIDIA GPU; SDK default |
+| `vllm` | NVIDIA GPU |
+| `sglang` | NVIDIA GPU |
+| `llama-cpp` | Portable CPU |
+
+For example, an SDK declaration selects the out-of-the-box CPU path with
+`engine="llama-cpp"` and `gpu=None`:
+
+```python
+@app.model(
+    name="cpu-smollm",
+    engine="llama-cpp",
+    model="jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF",
+    gpu=None,
+    cpu="4",
+    memory="2Gi",
+    max_model_len=512,
+)
+class CPUSmolLM:
+    pass
+```
+
+Selecting `gpu=None` only removes the Kubernetes GPU request; it does not make
+a CUDA image CPU-compatible. Use `llama-cpp` for the portable CPU default, or
+provide an explicitly built CPU image through `runtime_image`.
 
 ### deploy
 

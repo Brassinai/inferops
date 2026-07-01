@@ -25,6 +25,14 @@ def register(subcommands) -> None:
         "--cache-path",
         help="Optional cache root path for profile-specific configuration.",
     )
+    parser.add_argument(
+        "--tailscale-hostname",
+        help="Expose the gateway through an installed Tailscale Kubernetes Operator.",
+    )
+    parser.add_argument(
+        "--charts-dir",
+        help="Path to the InferOps Helm charts. Usually detected automatically.",
+    )
     add_cluster_options(parser)
     parser.set_defaults(handler=run)
 
@@ -39,13 +47,15 @@ def run(args, client=None) -> int:
                 cluster=cluster,
                 profile=getattr(args, "profile", "default"),
                 cache_path=getattr(args, "cache_path", None),
+                tailscale_hostname=getattr(args, "tailscale_hostname", None),
+                charts_dir=getattr(args, "charts_dir", None),
             )
         )
         install = response["install"]
         emit_result(
             args.output,
             CommandResult(
-                summary=f"Install placeholder prepared for profile {install['profile']} in namespace {install['namespace']}.",
+                summary=f"InferOps installed with profile {install['profile']} in namespace {install['namespace']}.",
                 payload=response,
                 details=tuple(install["resources"]),
             ),

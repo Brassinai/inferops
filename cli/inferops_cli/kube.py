@@ -63,6 +63,8 @@ class InstallRequest:
     cluster: ClusterTarget
     profile: str
     cache_path: str | None = None
+    tailscale_hostname: str | None = None
+    charts_dir: str | None = None
 
 
 @dataclass(frozen=True)

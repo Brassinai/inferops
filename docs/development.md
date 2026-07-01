@@ -40,6 +40,7 @@ make test           # run Go tests
 make vet            # run Go vet
 make python-check   # parse all Python source
 make python-test    # run Python unit tests
+make python-package # build the CLI sdist and wheel, including packaged charts
 make helm-lint      # lint every Helm chart
 make helm-template  # render every Helm chart into .verify/helm
 make yaml-check     # parse YAML and check required CRD contracts

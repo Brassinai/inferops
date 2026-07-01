@@ -29,6 +29,8 @@ def make_args(**overrides) -> argparse.Namespace:
         "force": False,
         "profile": "default",
         "cache_path": None,
+        "tailscale_hostname": None,
+        "charts_dir": None,
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -54,6 +56,12 @@ class CLICommandParserTest(unittest.TestCase):
 
         self.assertIn("List placeholder GPU inventory", gpu_help)
         self.assertIn("Delete one placeholder cache entry", cache_help)
+
+    def test_install_help_documents_profile_configuration(self) -> None:
+        install_help = self._parse_help(["install", "--help"])
+
+        for option in ("--profile", "--cache-path", "--tailscale-hostname", "--charts-dir"):
+            self.assertIn(option, install_help)
 
     def test_main_without_command_returns_usage_exit_code(self) -> None:
         stdout = io.StringIO()

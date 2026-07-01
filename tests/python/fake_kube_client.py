@@ -145,6 +145,7 @@ class FakeKubernetesClient:
             "profile": request.profile,
             "namespace": request.cluster.namespace,
             "cachePath": request.cache_path,
+            "tailscaleHostname": request.tailscale_hostname,
             "resources": [
                 f"namespace/{request.cluster.namespace}",
                 "crd/modeldeployments.inference.inferops.dev",

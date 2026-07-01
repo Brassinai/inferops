@@ -1,0 +1,30 @@
+{{- define "inferops-operator.modelRuntime" -}}
+{{- $root := .root -}}
+{{- $name := .name -}}
+{{- $runtime := .runtime -}}
+apiVersion: inference.inferops.dev/v1alpha1
+kind: ModelRuntime
+metadata:
+  name: {{ $name }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "inferops-operator.labels" $root | nindent 4 }}
+spec:
+  engine: {{ required "runtime engine is required" $runtime.engine | quote }}
+  protocol: {{ required "runtime protocol is required" $runtime.protocol | quote }}
+  defaultImage: "{{ required "runtime image repository is required" $runtime.image.repository }}:{{ required "runtime image tag is required" $runtime.image.tag }}"
+  port: {{ required (printf "modelRuntimes.%s.port is required" $name) $runtime.port }}
+  healthPath: {{ required (printf "modelRuntimes.%s.healthPath is required" $name) $runtime.healthPath | quote }}
+  readinessPath: {{ required (printf "modelRuntimes.%s.readinessPath is required" $name) $runtime.readinessPath | quote }}
+  metricsPath: {{ required (printf "modelRuntimes.%s.metricsPath is required" $name) $runtime.metricsPath | quote }}
+{{- end -}}
+
+{{- range $name, $runtime := .Values.modelRuntimes }}
+{{- if .enabled }}
+{{- if or (gt (len $name) 63) (not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $name)) }}
+{{- fail (printf "model runtime name %q must be a DNS-1123 label" $name) }}
+{{- end }}
+---
+{{ include "inferops-operator.modelRuntime" (dict "root" $ "name" $name "runtime" $runtime) }}
+{{- end }}
+{{- end }}
