@@ -1,31 +1,8 @@
-# CRD Contracts
+# CRD Reference
 
-The month-one API group is `inference.inferops.dev/v1alpha1`. All three
-resources are namespaced. Specs express desired state; controllers alone write
-status. Unknown fields are rejected by the checked-in schemas.
+API group: `inference.inferops.dev/v1alpha1`. All resources are namespaced.
 
-## Common Status Rules
-
-Every status includes `observedGeneration`, `phase`, and Kubernetes-style
-`conditions`. Conditions use:
-
-```yaml
-- type: Ready
-  status: "True" # True, False, or Unknown
-  observedGeneration: 3
-  lastTransitionTime: "2026-06-11T09:00:00Z"
-  reason: RuntimeReady
-  message: Runtime is accepting traffic.
-```
-
-Controllers preserve the last transition time while a condition's status is
-unchanged. `reason` is a stable machine-readable value; `message` is for
-operators. A stale status is identifiable when `observedGeneration` is behind
-`metadata.generation`.
-
-## ModelDeployment
-
-`ModelDeployment` declares exactly one model endpoint.
+## Quick reference
 
 ```yaml
 apiVersion: inference.inferops.dev/v1alpha1
@@ -40,8 +17,6 @@ spec:
     revision: main
   runtime:
     ref: nano-vllm
-    image: ghcr.io/your-org/inferops-runtime:nano-vllm
-    dtype: bfloat16
     maxModelLen: 4096
     tensorParallelSize: 1
     gpuMemoryUtilization: 0.85
@@ -51,7 +26,6 @@ spec:
     gpu:
       count: 1
       vendor: nvidia
-      type: ""
   activation:
     desiredState: Inactive
     whenFull: Queue
@@ -69,65 +43,72 @@ spec:
     type: nodeLocal
     size: 100Gi
     path: /var/lib/inferops/models
-  secrets:
-    huggingFaceTokenSecretName: hf-token
 ```
 
-Required month-one fields are `spec.model.repo` and `spec.runtime.ref`.
-Defaults are `model.source=huggingface`, `model.revision=main`,
-`activation.desiredState=Inactive`, `activation.whenFull=Queue`,
-`activation.drainTimeout=5m`, `scaling.minReplicas=0`,
-`scaling.maxReplicas=1`, `routing.enabled=true`, and
-`routing.openAICompatible=true`.
+## ModelDeployment
 
-`resources.cpu` and `resources.memory` describe ordinary Kubernetes compute
-requirements. `resources.gpu` is optional; omitting it creates a CPU-only
-runtime workload with no GPU extended-resource request. CPU-only deployments
-must specify both `resources.cpu` and `resources.memory`, and must omit
-`runtime.tensorParallelSize` and `runtime.gpuMemoryUtilization`. When present,
-`resources.gpu.count` is required and must be at least one, and
-`resources.gpu.vendor` defaults to `nvidia`. Runtime compatibility with CPU or
-the requested GPU vendor is determined by the selected `ModelRuntime`.
-Existing GPU manifests should include the GPU block explicitly rather than
-relying on admission defaults.
+### Required fields
 
-`spec.runtime.ref` references a `ModelRuntime`; it is not restricted to one
-engine. The standard runtime names are `nano-vllm`, `vllm`, `sglang`, and
-`llama-cpp`. The Python SDK defaults the reference to `nano-vllm`; direct YAML
-keeps it explicit.
+| Field | Description |
+| --- | --- |
+| `spec.model.repo` | Model identifier (e.g. `Qwen/Qwen2.5-7B-Instruct`) |
+| `spec.runtime.ref` | `ModelRuntime` name: `nano-vllm`, `vllm`, `sglang`, `llama-cpp` |
 
-`activation.desiredState` is `Inactive` or `Active`.
-`activation.whenFull` is `Queue`, `Reject`, `ReplaceOldest`, or
-`ReplaceLowestPriority`. Replacement modes are the only policies that permit
-eviction. Month-one scaling is limited to explicit replica bounds; advanced
-autoscaling behavior is not part of this contract.
+### Defaults
 
-Observed phases:
+| Field | Default |
+| --- | --- |
+| `model.source` | `huggingface` |
+| `model.revision` | `main` |
+| `activation.desiredState` | `Inactive` |
+| `activation.whenFull` | `Queue` |
+| `activation.drainTimeout` | `5m` |
+| `scaling.minReplicas` | `0` |
+| `scaling.maxReplicas` | `1` |
+| `routing.enabled` | `true` |
+| `routing.openAICompatible` | `true` |
+
+### GPU rules
+
+- Include `resources.gpu` for GPU workloads; omit for CPU-only.
+- `resources.gpu.count` >= 1 when present.
+- `resources.gpu.vendor` defaults to `nvidia`.
+- `runtime.tensorParallelSize` and `runtime.gpuMemoryUtilization` apply only to GPU workloads.
+- CPU-only workloads must specify `resources.cpu` and `resources.memory`.
+
+### Activation policies
+
+| Policy | Behavior |
+| --- | --- |
+| `Queue` | Wait for a free GPU slot (default) |
+| `Reject` | Fail immediately if no slot |
+| `ReplaceOldest` | Evict oldest active model |
+| `ReplaceLowestPriority` | Evict lowest-priority active model |
+
+### Phases
 
 | Phase | Meaning |
 | --- | --- |
-| `Pending` | Accepted but not yet reconciled |
-| `Downloading` | Model cache is being prepared |
-| `Cached` | Cache is ready and desired state is inactive |
-| `WaitingForCapacity` | Active is desired but compatible non-GPU compute capacity is unavailable |
-| `WaitingForGPU` | Active is desired but compatible capacity is unavailable |
-| `Activating` | Runtime is starting or loading |
-| `Active` | Runtime is ready and gateway routing is enabled |
-| `Draining` | New traffic is stopped while in-flight requests finish |
-| `Deactivating` | Runtime is stopping and releasing capacity |
-| `Failed` | Reconciliation cannot currently make progress |
+| `Pending` | Accepted, not yet reconciled |
+| `Downloading` | Cache download in progress |
+| `Cached` | Cache ready, inactive |
+| `WaitingForCapacity` | Active desired, no CPU/memory capacity |
+| `WaitingForGPU` | Active desired, no free GPU slot |
+| `Activating` | Runtime starting |
+| `Active` | Ready, routed |
+| `Draining` | Stopping new traffic, finishing in-flight |
+| `Deactivating` | Runtime stopping, releasing capacity |
+| `Failed` | Unrecoverable error; check conditions and logs |
 
-Standard condition types are `Ready`, `CacheReady`, `RuntimeReady`,
-`RoutingReady`, and `Degraded`. GPU deployments also report `GPUAssigned`.
+### Conditions
 
-Status also reports `endpoint`, `serviceName`, `assignedNode`,
-`assignedGPUs`, cache summary, desired/ready replicas, and loaded model state.
+Standard types: `Ready`, `CacheReady`, `RuntimeReady`, `RoutingReady`, `Degraded`. GPU workloads also report `GPUAssigned`.
+
+Stable `reason` values are machine-readable; `message` is for operators. `observedGeneration` must match `metadata.generation` for freshness.
 
 ## ModelRuntime
 
-`ModelRuntime` freezes a reusable runtime protocol and container defaults.
-InferOps is designed for nano-vLLM, vLLM, SGLang, and llama.cpp, and permits
-additional conforming runtimes. The default runtime object is:
+Reusable runtime definition.
 
 ```yaml
 apiVersion: inference.inferops.dev/v1alpha1
@@ -137,38 +118,20 @@ metadata:
 spec:
   engine: nano-vllm
   protocol: openai
-  defaultImage: ghcr.io/your-org/inferops-runtime:nano-vllm
+  defaultImage: ghcr.io/inferops/inferops-runtime:nano-vllm
   port: 8000
   healthPath: /health
   readinessPath: /health
   metricsPath: /metrics
 ```
 
-Required fields are `engine`, `protocol`, `defaultImage`, `port`, and
-`healthPath`. Optional `readinessPath`, `metricsPath`, `command`, `args`, and
-non-secret `env` support custom runtimes. When `readinessPath` is omitted, the
-operator falls back to `healthPath` for compatibility. The packaged nano-vLLM
-and vLLM runtimes use `/health`; SGLang uses `/health_generate` for readiness.
-`defaultImage` identifies a released runtime image that already contains the
-engine server plus any thin InferOps CLI adapter; the operator does not build
-engine images.
-Drain state remains owned by the operator and gateway rather than an
-InferOps-managed engine server. `engine` is intentionally open-ended.
-`protocol` describes the gateway-facing protocol and is `openai` for
-nano-vLLM, vLLM, SGLang, and llama.cpp.
-Secret values belong in referenced Secrets, never `spec.env`.
+Required: `engine`, `protocol`, `defaultImage`, `port`, `healthPath`. Optional: `readinessPath`, `metricsPath`, `command`, `args`, `env`. Secret values belong in referenced Secrets, never in `spec.env`.
 
-Observed phases are `Pending`, `Ready`, `Unavailable`, and `Failed`. Standard
-condition types are `Ready` and `Valid`.
-
-The checked-in contract fixtures include `nano-vllm`, `vllm`, `sglang`, and
-`llama-cpp` runtime objects. A `Ready` fixture proves shape compatibility for
-lane tests; runtime conformance and image release validation remain
-implementation work.
+Phases: `Pending`, `Ready`, `Unavailable`, `Failed`.
 
 ## ModelCache
 
-`ModelCache` tracks one model revision at one persisted location:
+Tracks one model revision at one location.
 
 ```yaml
 apiVersion: inference.inferops.dev/v1alpha1
@@ -186,27 +149,18 @@ spec:
   secretRef: hf-token
 ```
 
-Required fields are `modelRepo`, `storage.type`, `storage.size`, and
-`storage.path`. `nodeLocal` caches are not portable; `storage.nodeName` is
-selected or confirmed by the cache controller.
+Required: `modelRepo`, `storage.type`, `storage.size`, `storage.path`. `nodeName` is selected by the controller.
 
-Observed phases are `Pending`, `Downloading`, `Ready`, and `Failed`. Standard
-condition types are `Ready`, `Downloaded`, `Verified`, and `Degraded`. Status
-reports the resolved revision, checksum, node, path, size, last-used time, and
-failure details through conditions.
+Phases: `Pending`, `Downloading`, `Ready`, `Failed`.
 
-## Fixtures
+## Stable names and routes
 
-`deploy/manifests/examples/contracts/` contains dependency-free examples for
-the shared runtime and cache plus inactive, waiting, active, and failed
-`ModelDeployment` states. They are contract fixtures for operator tests,
-gateway route tests, and SDK/CLI parsing tests. Status-bearing fixtures model
-API responses; clients creating objects should submit only `metadata` and
-`spec`.
+For a `ModelDeployment` named `<name>` in namespace `<namespace>`:
+
+- Runtime Service: `<name>-runtime`
+- Gateway route: `/models/<name>/v1/...`
+- Gateway strips `/models/<name>` and forwards `/v1/...` to the runtime Service on port `8000`
 
 ## Compatibility
 
-The v1alpha1 shapes are frozen for month one. Changes should be additive where
-possible. Renaming/removing fields, changing defaults, phases, conditions,
-Service naming, routes, or runtime behavior requires review from every lane
-owner and synchronized updates to schemas, fixtures, docs, SDK, and CLI.
+v1alpha1 is frozen for month one. Additive changes only. Renaming fields, phases, conditions, or routes requires review from all lane owners.

@@ -121,6 +121,15 @@ spec:
 kubectl apply -f modeldeployment.yaml
 ```
 
+## Documentation
+
+- [Quickstart](docs/quickstart.md)
+- [Homelab setup](docs/homelab.md)
+- [CLI reference](docs/cli.md)
+- [SDK reference](docs/sdk.md)
+- [CRD reference](docs/crds.md)
+- [Production notes](docs/production.md)
+
 ## Development
 
 Install the required tool versions described in

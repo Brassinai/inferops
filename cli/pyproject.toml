@@ -3,7 +3,7 @@ name = "inferops-cli"
 version = "0.0.0"
 description = "CLI for deploying inference runtimes to Kubernetes."
 requires-python = ">=3.10"
-dependencies = ["PyYAML>=6,<7"]
+dependencies = ["PyYAML>=6,<7", "kubernetes>=30.0.0,<32.0.0"]
 
 [project.scripts]
 inferops = "inferops_cli.main:main"

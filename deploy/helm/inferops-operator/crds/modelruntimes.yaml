@@ -1,0 +1,112 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: modelruntimes.inference.inferops.dev
+spec:
+  group: inference.inferops.dev
+  names:
+    kind: ModelRuntime
+    plural: modelruntimes
+    singular: modelruntime
+    shortNames:
+      - mruntime
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Engine
+          type: string
+          jsonPath: .spec.engine
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - engine
+                - protocol
+                - defaultImage
+                - port
+                - healthPath
+              properties:
+                engine:
+                  type: string
+                  minLength: 1
+                protocol:
+                  type: string
+                  minLength: 1
+                defaultImage:
+                  type: string
+                  minLength: 1
+                port:
+                  type: integer
+                  format: int32
+                  minimum: 1
+                  maximum: 65535
+                healthPath:
+                  type: string
+                  pattern: ^/
+                readinessPath:
+                  type: string
+                  pattern: ^/
+                metricsPath:
+                  type: string
+                  pattern: ^/
+                command:
+                  type: array
+                  items:
+                    type: string
+                args:
+                  type: array
+                  items:
+                    type: string
+                env:
+                  type: object
+                  additionalProperties:
+                    type: string
+            status:
+              type: object
+              properties:
+                observedGeneration:
+                  type: integer
+                  format: int64
+                phase:
+                  type: string
+                  enum: [Pending, Ready, Unavailable, Failed]
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, status]
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", Unknown]
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string

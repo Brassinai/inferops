@@ -2,7 +2,20 @@
 
 from __future__ import annotations
 
-from . import activate, cache, deactivate, delete, deploy, generate, gpu, init, install, logs, status
+from . import (
+    activate,
+    cache,
+    deactivate,
+    delete,
+    deploy,
+    doctor,
+    generate,
+    gpu,
+    init,
+    install,
+    logs,
+    status,
+)
 from .errors import run_with_cli_errors
 from .parser import CLIArgumentParser
 
@@ -18,14 +31,15 @@ def build_parser() -> CLIArgumentParser:
     activate.register(subcommands)
     cache.register(subcommands)
     deactivate.register(subcommands)
+    delete.register(subcommands)
     deploy.register(subcommands)
+    doctor.register(subcommands)
     generate.register(subcommands)
     gpu.register(subcommands)
     init.register(subcommands)
     install.register(subcommands)
-    status.register(subcommands)
     logs.register(subcommands)
-    delete.register(subcommands)
+    status.register(subcommands)
     return parser
 
 

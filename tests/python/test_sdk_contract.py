@@ -48,8 +48,14 @@ class SDKContractTest(unittest.TestCase):
     def test_cpu_only_deployment_omits_gpu_runtime_fields(self) -> None:
         app = App("support")
 
-        @app.model(name="cpu-qwen", engine="vllm", model="Qwen/Qwen2.5-0.5B-Instruct", gpu=None, max_model_len=2048)
-        class CPUQwen:
+        @app.model(
+            name="cpu-smollm",
+            engine="llama-cpp",
+            model="jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF",
+            gpu=None,
+            max_model_len=2048,
+        )
+        class CPUSmolLM:
             pass
 
         manifest = build_manifest(app)
@@ -58,7 +64,7 @@ class SDKContractTest(unittest.TestCase):
         self.assertNotIn("tensorParallelSize", manifest["spec"]["runtime"])
         self.assertNotIn("gpuMemoryUtilization", manifest["spec"]["runtime"])
         self.assertEqual(manifest["spec"]["resources"], {"cpu": "8", "memory": "32Gi"})
-        self.assertEqual(manifest["spec"]["runtime"], {"ref": "vllm", "maxModelLen": 2048})
+        self.assertEqual(manifest["spec"]["runtime"], {"ref": "llama-cpp", "maxModelLen": 2048})
 
     def test_gpu_count_and_type_are_rendered(self) -> None:
         app = App("support")

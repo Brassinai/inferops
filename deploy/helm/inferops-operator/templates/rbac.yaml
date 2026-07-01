@@ -1,0 +1,113 @@
+{{- if .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "inferops-operator.fullname" . }}
+  labels:
+    {{- include "inferops-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - inference.inferops.dev
+    resources:
+      - modeldeployments
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - inference.inferops.dev
+    resources:
+      - modelruntimes
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - inference.inferops.dev
+    resources:
+      - modelcaches
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+  - apiGroups:
+      - inference.inferops.dev
+    resources:
+      - modeldeployments/status
+      - modelruntimes/status
+      - modelcaches/status
+    verbs:
+      - get
+      - update
+      - patch
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+      - services
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "inferops-operator.fullname" . }}
+  labels:
+    {{- include "inferops-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "inferops-operator.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "inferops-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -15,7 +15,7 @@ func (r *ModelRuntimeReconciler) Reconcile(ctx context.Context, runtime v1alpha1
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if runtime.Metadata.Name == "" {
+	if runtime.Name == "" {
 		return fmt.Errorf("modelruntime name is required")
 	}
 	return nil
