@@ -2,17 +2,45 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
-	"github.com/brassinai/inferops/internal/health"
+	v1alpha1 "github.com/brassinai/inferops/operator/api/v1alpha1"
+	"github.com/brassinai/inferops/operator/controllers"
+	"github.com/brassinai/inferops/operator/internal/resources"
+	"github.com/brassinai/inferops/operator/internal/validation"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
+	ctrl "sigs.k8s.io/controller-runtime"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
+
+var (
+	scheme = runtime.NewScheme()
+)
+
+func init() {
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+}
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
 
 	if err := run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "operator failed: %v\n", err)
@@ -25,12 +53,194 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	return health.Run(ctx, healthAddress())
+	config, err := operatorConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	if err := config.validate(); err != nil {
+		return err
+	}
+
+	restConfig, err := ctrl.GetConfig()
+	if err != nil {
+		return fmt.Errorf("load Kubernetes client configuration: %w", err)
+	}
+	leaderNamespace := leaderElectionNamespace()
+	if messages := utilvalidation.IsDNS1123Label(leaderNamespace); len(messages) != 0 {
+		return fmt.Errorf("leader election namespace %q is invalid: %s", leaderNamespace, strings.Join(messages, ", "))
+	}
+
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
+		Scheme: scheme,
+		Client: crclient.Options{
+			Cache: &crclient.CacheOptions{
+				DisableFor: []crclient.Object{&corev1.Secret{}},
+			},
+		},
+		Metrics: server.Options{
+			BindAddress: "0",
+		},
+		HealthProbeBindAddress:        config.healthAddr,
+		LeaderElection:                true,
+		LeaderElectionID:              "inferops-operator.inferops.dev",
+		LeaderElectionNamespace:       leaderNamespace,
+		LeaderElectionResourceLock:    resourcelock.LeasesResourceLock,
+		LeaderElectionReleaseOnCancel: true,
+	})
+	if err != nil {
+		return fmt.Errorf("create manager: %w", err)
+	}
+
+	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
+		return fmt.Errorf("add healthz check: %w", err)
+	}
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+		return fmt.Errorf("add readyz check: %w", err)
+	}
+
+	eventRecorder := mgr.GetEventRecorderFor("inferops-operator")
+	cacheReconciler, err := controllers.NewModelCacheReconciler(
+		mgr.GetClient(),
+		controllers.ModelCacheReconcilerConfig{
+			CacheRoot:               config.cacheRoot,
+			DownloaderImage:         config.downloaderImage,
+			CacheNodeSelector:       config.cacheNodeSelector,
+			CacheCapacityAnnotation: config.cacheCapacityAnnotation,
+			CacheRequiredResources:  config.cacheRequiredResources,
+		},
+		eventRecorder,
+	)
+	if err != nil {
+		return fmt.Errorf("create cache reconciler: %w", err)
+	}
+	if err := cacheReconciler.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup cache controller: %w", err)
+	}
+
+	mgr.GetLogger().Info("starting operator manager")
+	if err := mgr.Start(ctx); err != nil {
+		return fmt.Errorf("start manager: %w", err)
+	}
+	return nil
 }
 
-func healthAddress() string {
-	if address := os.Getenv("INFEROPS_HEALTH_ADDR"); address != "" {
-		return address
+type operatorConfig struct {
+	healthAddr              string
+	cacheRoot               string
+	downloaderImage         string
+	cacheNodeSelector       map[string]string
+	cacheCapacityAnnotation string
+	cacheRequiredResources  []corev1.ResourceName
+}
+
+func operatorConfigFromEnv() (operatorConfig, error) {
+	nodeSelector, err := parseNodeSelector(os.Getenv("INFEROPS_CACHE_NODE_SELECTOR"))
+	if err != nil {
+		return operatorConfig{}, fmt.Errorf("parse INFEROPS_CACHE_NODE_SELECTOR: %w", err)
 	}
-	return ":8081"
+	requiredResources, err := parseResourceNames(os.Getenv("INFEROPS_CACHE_REQUIRED_RESOURCES"))
+	if err != nil {
+		return operatorConfig{}, fmt.Errorf("parse INFEROPS_CACHE_REQUIRED_RESOURCES: %w", err)
+	}
+	return operatorConfig{
+		healthAddr:              envOrDefault("INFEROPS_HEALTH_ADDR", ":8081"),
+		cacheRoot:               os.Getenv("INFEROPS_CACHE_ROOT"),
+		downloaderImage:         os.Getenv("INFEROPS_CACHE_DOWNLOADER_IMAGE"),
+		cacheNodeSelector:       nodeSelector,
+		cacheCapacityAnnotation: envOrDefault("INFEROPS_CACHE_CAPACITY_ANNOTATION", "inferops.dev/cache-capacity"),
+		cacheRequiredResources:  requiredResources,
+	}, nil
+}
+
+func (c operatorConfig) validate() error {
+	if _, err := validation.NewReconciliationValidator(c.cacheRoot); err != nil {
+		return fmt.Errorf("validate cache root: %w", err)
+	}
+	if c.downloaderImage == "" {
+		return errors.New("INFEROPS_CACHE_DOWNLOADER_IMAGE is required")
+	}
+	if err := resources.ValidatePinnedImage(c.downloaderImage); err != nil {
+		return fmt.Errorf("validate INFEROPS_CACHE_DOWNLOADER_IMAGE: %w", err)
+	}
+	if messages := utilvalidation.IsQualifiedName(c.cacheCapacityAnnotation); len(messages) != 0 {
+		return fmt.Errorf(
+			"INFEROPS_CACHE_CAPACITY_ANNOTATION %q is invalid: %s",
+			c.cacheCapacityAnnotation,
+			strings.Join(messages, ", "),
+		)
+	}
+	return nil
+}
+
+func envOrDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+func parseNodeSelector(value string) (map[string]string, error) {
+	if value == "" {
+		return nil, nil
+	}
+	result := make(map[string]string)
+	for _, pair := range strings.Split(value, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			return nil, errors.New("selector contains an empty entry")
+		}
+		parts := strings.SplitN(pair, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("selector entry %q must use key=value syntax", pair)
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		if messages := utilvalidation.IsQualifiedName(key); len(messages) != 0 {
+			return nil, fmt.Errorf("selector key %q is invalid: %s", key, strings.Join(messages, ", "))
+		}
+		if messages := utilvalidation.IsValidLabelValue(val); len(messages) != 0 {
+			return nil, fmt.Errorf("selector value %q for key %q is invalid: %s", val, key, strings.Join(messages, ", "))
+		}
+		if _, exists := result[key]; exists {
+			return nil, fmt.Errorf("selector key %q is repeated", key)
+		}
+		result[key] = val
+	}
+	return result, nil
+}
+
+func parseResourceNames(value string) ([]corev1.ResourceName, error) {
+	if value == "" {
+		return nil, nil
+	}
+	seen := make(map[corev1.ResourceName]struct{})
+	result := make([]corev1.ResourceName, 0)
+	for _, item := range strings.Split(value, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			return nil, errors.New("resource list contains an empty entry")
+		}
+		if messages := utilvalidation.IsQualifiedName(item); len(messages) != 0 {
+			return nil, fmt.Errorf("resource name %q is invalid: %s", item, strings.Join(messages, ", "))
+		}
+		name := corev1.ResourceName(item)
+		if _, exists := seen[name]; exists {
+			return nil, fmt.Errorf("resource name %q is repeated", name)
+		}
+		seen[name] = struct{}{}
+		result = append(result, name)
+	}
+	return result, nil
+}
+
+func leaderElectionNamespace() string {
+	if ns := os.Getenv("INFEROPS_OPERATOR_NAMESPACE"); ns != "" {
+		return strings.TrimSpace(ns)
+	}
+	if data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+		if namespace := strings.TrimSpace(string(data)); namespace != "" {
+			return namespace
+		}
+	}
+	return "inferops-system"
 }

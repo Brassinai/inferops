@@ -36,3 +36,5 @@ spec:
     type: nodeLocal
     size: 50Gi
     path: /var/lib/inferops/models
+  secrets:
+    huggingFaceTokenSecretName: hf-token

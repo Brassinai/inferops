@@ -62,10 +62,24 @@ Docs: [NVIDIA k8s-device-plugin](https://github.com/NVIDIA/k8s-device-plugin)
 Model caches use `hostPath` under `/var/lib/inferops/models`. Ensure the path exists and has space:
 
 ```bash
-sudo mkdir -p /var/lib/inferops/models
-sudo chmod 755 /var/lib/inferops/models
+sudo install -d -o 65532 -g 65532 -m 0750 /var/lib/inferops/models
 df -h /var/lib/inferops/models
 ```
+
+The downloader runs as UID/GID `65532` and deliberately uses a
+`hostPath.type` of `Directory`; InferOps will not create a root-owned cache
+directory that its non-root downloader cannot write.
+
+Advertise the portion of that filesystem InferOps may reserve on each cache
+node:
+
+```bash
+kubectl annotate node <node-name> inferops.dev/cache-capacity=500Gi
+```
+
+This is declared capacity, not a live free-space reading. Set it below the
+filesystem's usable size to leave operating headroom. Live disk-pressure and
+eviction reporting belongs to MVP-503.
 
 No special StorageClass is required for the homelab path.
 

@@ -28,6 +28,9 @@ rbac:
 cache:
   root: /var/lib/inferops/models
   downloaderImage: ghcr.io/inferops/model-downloader:0.0.0
+  nodeSelector: {}
+  capacityAnnotation: inferops.dev/cache-capacity
+  requiredNodeResources: []
 
 modelRuntimes:
   nano-vllm:

@@ -9,6 +9,7 @@ import (
 	"github.com/brassinai/inferops/operator/internal/templates"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,6 +21,15 @@ const (
 	testCachePath       = testCacheRoot + "/qwen-chat"
 	testDownloaderImage = "ghcr.io/inferops/model-downloader:v0.1.0"
 )
+
+func testCachePlacement() CachePlacement {
+	return CachePlacement{
+		NodeName:     "gpu-node-1",
+		NodeUID:      "gpu-node-1-uid",
+		Path:         testCachePath,
+		ReservedSize: resource.MustParse("100Gi"),
+	}
+}
 
 func testBuilder(t *testing.T) Builder {
 	t.Helper()
@@ -234,6 +244,41 @@ func TestBuilderOptions(t *testing.T) {
 	}
 }
 
+func TestValidatePinnedImage(t *testing.T) {
+	t.Parallel()
+
+	validDigest := "ghcr.io/inferops/runtime@sha256:" + strings.Repeat("a", 64)
+	tests := []struct {
+		name    string
+		image   string
+		wantErr bool
+	}{
+		{name: "tag", image: "ghcr.io/inferops/runtime:v1.2.3"},
+		{name: "registry port and tag", image: "registry.example:5000/runtime:v1"},
+		{name: "digest", image: validDigest},
+		{name: "missing tag", image: "ghcr.io/inferops/runtime", wantErr: true},
+		{name: "latest tag", image: "ghcr.io/inferops/runtime:latest", wantErr: true},
+		{name: "latest tag case insensitive", image: "ghcr.io/inferops/runtime:LATEST", wantErr: true},
+		{name: "empty digest", image: "ghcr.io/inferops/runtime@sha256:", wantErr: true},
+		{name: "short digest", image: "ghcr.io/inferops/runtime@sha256:abc123", wantErr: true},
+		{name: "non-hex digest", image: "ghcr.io/inferops/runtime@sha256:" + strings.Repeat("z", 64), wantErr: true},
+		{name: "non-canonical digest", image: "ghcr.io/inferops/runtime@sha256:" + strings.Repeat("A", 64), wantErr: true},
+		{name: "invalid tag", image: "ghcr.io/inferops/runtime:-bad", wantErr: true},
+		{name: "whitespace", image: "ghcr.io/inferops/runtime:v1 ", wantErr: true},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidatePinnedImage(test.image)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("ValidatePinnedImage(%q) error = %v, wantErr %v", test.image, err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestBuilderUsesConfiguredCacheDownloaderResources(t *testing.T) {
 	t.Parallel()
 
@@ -306,7 +351,7 @@ func TestBuildersAreDeterministic(t *testing.T) {
 		{
 			name: "cache downloader job",
 			build: func() (any, error) {
-				return builder.BuildCacheDownloaderJob(cache)
+				return builder.BuildCacheDownloaderJob(cache, testCachePlacement())
 			},
 		},
 	}
@@ -442,7 +487,11 @@ func TestImagePullPolicy(t *testing.T) {
 		{name: "implicit latest", image: "ghcr.io/inferops/runtime", want: corev1.PullAlways},
 		{name: "explicit latest", image: "ghcr.io/inferops/runtime:latest", want: corev1.PullAlways},
 		{name: "version tag", image: "ghcr.io/inferops/runtime:v1.2.3", want: corev1.PullIfNotPresent},
-		{name: "digest", image: "ghcr.io/inferops/runtime@sha256:abc123", want: corev1.PullIfNotPresent},
+		{
+			name:  "digest",
+			image: "ghcr.io/inferops/runtime@sha256:" + strings.Repeat("a", 64),
+			want:  corev1.PullIfNotPresent,
+		},
 		{name: "registry port", image: "registry.example:5000/runtime", want: corev1.PullAlways},
 	}
 
@@ -557,7 +606,7 @@ func TestBuildRuntimeDeploymentRejectsInvalidInput(t *testing.T) {
 			name:      "cache path escapes root",
 			cacheNode: "gpu-node-1",
 			cachePath: "/etc/models",
-			wantErr:   "must be a child",
+			wantErr:   "must be \"/var/lib/inferops/models\" or a child of it",
 		},
 		{
 			name:      "invalid CPU quantity",
@@ -684,7 +733,8 @@ func TestBuildCacheDownloaderJob(t *testing.T) {
 
 	builder := testBuilder(t)
 	cache := testModelCache()
-	job, err := builder.BuildCacheDownloaderJob(cache)
+	placement := testCachePlacement()
+	job, err := builder.BuildCacheDownloaderJob(cache, placement)
 	if err != nil {
 		t.Fatalf("BuildCacheDownloaderJob() error = %v", err)
 	}
@@ -693,8 +743,17 @@ func TestBuildCacheDownloaderJob(t *testing.T) {
 		t.Errorf("job name = %q, want %q", got, want)
 	}
 	assertOwnerReference(t, job.OwnerReferences, "ModelCache", cache.Name, cache.UID)
-	if job.Spec.BackoffLimit == nil || *job.Spec.BackoffLimit != 3 {
-		t.Errorf("backoff limit = %v, want 3", job.Spec.BackoffLimit)
+	if job.Spec.BackoffLimit == nil || *job.Spec.BackoffLimit != cacheBackoffLimit {
+		t.Errorf("backoff limit = %v, want %d", job.Spec.BackoffLimit, cacheBackoffLimit)
+	}
+	if job.Spec.TTLSecondsAfterFinished == nil || *job.Spec.TTLSecondsAfterFinished != cacheTTLSecondsAfterFinished {
+		t.Errorf("TTL after finished = %v, want %d", job.Spec.TTLSecondsAfterFinished, cacheTTLSecondsAfterFinished)
+	}
+	if job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != cacheActiveDeadlineSeconds {
+		t.Errorf("active deadline = %v, want %d", job.Spec.ActiveDeadlineSeconds, cacheActiveDeadlineSeconds)
+	}
+	if job.Annotations == nil || job.Annotations[CacheInputHashAnnotation] == "" {
+		t.Error("job must have a cache input hash annotation")
 	}
 
 	podSpec := job.Spec.Template.Spec
@@ -704,7 +763,7 @@ func TestBuildCacheDownloaderJob(t *testing.T) {
 	if podSpec.AutomountServiceAccountToken == nil || *podSpec.AutomountServiceAccountToken {
 		t.Error("downloader pod must not automount a Kubernetes API token")
 	}
-	if got, want := podSpec.NodeSelector[corev1.LabelHostname], cache.Spec.Storage.NodeName; got != want {
+	if got, want := podSpec.NodeSelector[corev1.LabelHostname], placement.NodeName; got != want {
 		t.Errorf("cache node = %q, want %q", got, want)
 	}
 
@@ -726,17 +785,23 @@ func TestBuildCacheDownloaderJob(t *testing.T) {
 		defaultCacheDownloaderMemoryRequest,
 		defaultCacheDownloaderMemoryLimit,
 	)
-	wantCommand := []string{
-		"hf",
-		"download",
-		cache.Spec.ModelRepo,
-		"--revision",
-		cache.Spec.Revision,
-		"--local-dir",
-		templates.RuntimeModelMountPath,
+	if len(container.Command) == 0 || container.Command[0] != "python" || container.Command[1] != "/opt/inferops/download.py" {
+		t.Errorf("command = %#v, want python /opt/inferops/download.py ...", container.Command)
 	}
-	if !reflect.DeepEqual(container.Command, wantCommand) {
-		t.Errorf("command = %#v, want %#v", container.Command, wantCommand)
+	if got := commandFlagValue(container.Command, "--input-hash"); got != job.Annotations[CacheInputHashAnnotation] {
+		t.Errorf("downloader input hash = %q, want Job hash %q", got, job.Annotations[CacheInputHashAnnotation])
+	}
+	if got := commandFlagValue(container.Command, "--staging-subpath"); !strings.HasPrefix(got, cacheStagingDirectory+"/") {
+		t.Errorf("staging subpath = %q, want isolated %s tree", got, cacheStagingDirectory)
+	}
+	if container.SecurityContext == nil ||
+		container.SecurityContext.RunAsNonRoot == nil ||
+		!*container.SecurityContext.RunAsNonRoot ||
+		container.SecurityContext.ReadOnlyRootFilesystem == nil ||
+		!*container.SecurityContext.ReadOnlyRootFilesystem ||
+		container.SecurityContext.Capabilities == nil ||
+		len(container.SecurityContext.Capabilities.Drop) == 0 {
+		t.Error("downloader container must have a hardened security context")
 	}
 	token := environmentVariable(container.Env, "HF_TOKEN")
 	if token == nil || token.ValueFrom == nil || token.ValueFrom.SecretKeyRef == nil {
@@ -748,11 +813,17 @@ func TestBuildCacheDownloaderJob(t *testing.T) {
 	if got, want := token.ValueFrom.SecretKeyRef.Name, cache.Spec.SecretRef; got != want {
 		t.Errorf("Secret name = %q, want %q", got, want)
 	}
-	if podSpec.Volumes[0].HostPath.Path != cache.Spec.Storage.Path {
-		t.Errorf("host cache path = %q, want %q", podSpec.Volumes[0].HostPath.Path, cache.Spec.Storage.Path)
+	if podSpec.Volumes[0].HostPath.Path != testCacheRoot {
+		t.Errorf("host cache root = %q, want %q", podSpec.Volumes[0].HostPath.Path, testCacheRoot)
+	}
+	if podSpec.Volumes[0].HostPath.Type == nil || *podSpec.Volumes[0].HostPath.Type != corev1.HostPathDirectory {
+		t.Errorf("host cache root type = %v, want Directory", podSpec.Volumes[0].HostPath.Type)
 	}
 	if container.VolumeMounts[0].ReadOnly {
 		t.Error("downloader cache mount must be writable")
+	}
+	if container.VolumeMounts[0].MountPath != downloaderCacheRootMount {
+		t.Errorf("downloader mount path = %q, want %q", container.VolumeMounts[0].MountPath, downloaderCacheRootMount)
 	}
 }
 
@@ -760,29 +831,84 @@ func TestBuildCacheDownloaderJobRejectsInvalidInput(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		cache   *v1alpha1.ModelCache
-		mutate  func(*v1alpha1.ModelCache)
-		wantErr string
+		name            string
+		cache           *v1alpha1.ModelCache
+		cacheMutate     func(*v1alpha1.ModelCache)
+		placementMutate func(*CachePlacement)
+		wantErr         string
 	}{
 		{name: "nil cache", cache: nil, wantErr: "model cache is required"},
 		{
-			name:    "missing repository",
-			cache:   testModelCache(),
-			mutate:  func(cache *v1alpha1.ModelCache) { cache.Spec.ModelRepo = "" },
+			name:  "missing namespace",
+			cache: testModelCache(),
+			cacheMutate: func(cache *v1alpha1.ModelCache) {
+				cache.Namespace = ""
+			},
+			wantErr: "namespace is required",
+		},
+		{
+			name:  "missing UID",
+			cache: testModelCache(),
+			cacheMutate: func(cache *v1alpha1.ModelCache) {
+				cache.UID = ""
+			},
+			wantErr: "UID is required",
+		},
+		{
+			name:  "missing repository",
+			cache: testModelCache(),
+			cacheMutate: func(cache *v1alpha1.ModelCache) {
+				cache.Spec.ModelRepo = ""
+			},
 			wantErr: "repository is required",
 		},
 		{
-			name:    "missing node",
-			cache:   testModelCache(),
-			mutate:  func(cache *v1alpha1.ModelCache) { cache.Spec.Storage.NodeName = "" },
-			wantErr: "node is required",
+			name:  "missing placement node",
+			cache: testModelCache(),
+			placementMutate: func(placement *CachePlacement) {
+				placement.NodeName = ""
+			},
+			wantErr: "placement node is required",
 		},
 		{
-			name:    "path escapes root",
-			cache:   testModelCache(),
-			mutate:  func(cache *v1alpha1.ModelCache) { cache.Spec.Storage.Path = "/tmp/model" },
-			wantErr: "must be a child",
+			name:  "missing placement node UID",
+			cache: testModelCache(),
+			placementMutate: func(placement *CachePlacement) {
+				placement.NodeUID = ""
+			},
+			wantErr: "node UID is required",
+		},
+		{
+			name:  "missing placement path",
+			cache: testModelCache(),
+			placementMutate: func(placement *CachePlacement) {
+				placement.Path = ""
+			},
+			wantErr: "placement path is required",
+		},
+		{
+			name:  "path escapes root",
+			cache: testModelCache(),
+			placementMutate: func(placement *CachePlacement) {
+				placement.Path = "/tmp/model"
+			},
+			wantErr: "must be \"/var/lib/inferops/models\" or a child of it",
+		},
+		{
+			name:  "path uses reserved staging directory",
+			cache: testModelCache(),
+			placementMutate: func(placement *CachePlacement) {
+				placement.Path = testCacheRoot + "/" + cacheStagingDirectory + "/model"
+			},
+			wantErr: "uses reserved staging directory",
+		},
+		{
+			name:  "zero reserved size",
+			cache: testModelCache(),
+			placementMutate: func(placement *CachePlacement) {
+				placement.ReservedSize = resource.Quantity{}
+			},
+			wantErr: "reserved size must be greater than zero",
 		},
 	}
 
@@ -790,14 +916,100 @@ func TestBuildCacheDownloaderJobRejectsInvalidInput(t *testing.T) {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			if test.mutate != nil {
-				test.mutate(test.cache)
+			if test.cache != nil && test.cacheMutate != nil {
+				test.cacheMutate(test.cache)
 			}
-			_, err := testBuilder(t).BuildCacheDownloaderJob(test.cache)
+			placement := testCachePlacement()
+			if test.placementMutate != nil {
+				test.placementMutate(&placement)
+			}
+			_, err := testBuilder(t).BuildCacheDownloaderJob(test.cache, placement)
 			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 				t.Fatalf("BuildCacheDownloaderJob() error = %v, want containing %q", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestObserveDownloaderJobUsesTerminalCondition(t *testing.T) {
+	t.Parallel()
+
+	backoff := int32(2)
+	job := &batchv1.Job{
+		Spec: batchv1.JobSpec{BackoffLimit: &backoff},
+		Status: batchv1.JobStatus{
+			Failed: 1,
+			Conditions: []batchv1.JobCondition{{
+				Type:    batchv1.JobFailed,
+				Status:  corev1.ConditionTrue,
+				Reason:  "BackoffLimitExceeded",
+				Message: "download retries exhausted",
+			}},
+		},
+	}
+
+	observed := ObserveDownloaderJob(job)
+	if !observed.FailedTerminal {
+		t.Fatal("JobFailed=True was not classified as terminal")
+	}
+	if observed.Message != "download retries exhausted" {
+		t.Fatalf("message = %q, want download retries exhausted", observed.Message)
+	}
+}
+
+func TestRetryTokenDoesNotChangeCacheIdentity(t *testing.T) {
+	t.Parallel()
+
+	builder := testBuilder(t)
+	cache := testModelCache()
+	cache.Annotations = map[string]string{CacheRetryAnnotation: "attempt-1"}
+	first, err := builder.BuildCacheDownloaderJob(cache, testCachePlacement())
+	if err != nil {
+		t.Fatalf("first BuildCacheDownloaderJob() error = %v", err)
+	}
+
+	cache.Annotations[CacheRetryAnnotation] = "attempt-2"
+	second, err := builder.BuildCacheDownloaderJob(cache, testCachePlacement())
+	if err != nil {
+		t.Fatalf("second BuildCacheDownloaderJob() error = %v", err)
+	}
+
+	if got, want := CacheInputHashFromJob(second), CacheInputHashFromJob(first); got != want {
+		t.Fatalf("retry changed cache identity hash from %q to %q", want, got)
+	}
+	if got := second.Annotations[CacheRetryTokenAnnotation]; got != "attempt-2" {
+		t.Fatalf("handled retry token = %q, want attempt-2", got)
+	}
+}
+
+func TestDownloaderImageChangesJobIdentityOnly(t *testing.T) {
+	t.Parallel()
+
+	cache := testModelCache()
+	placement := testCachePlacement()
+	firstBuilder := testBuilder(t)
+	secondBuilder, err := NewBuilder(BuilderOptions{
+		CacheRoot:            testCacheRoot,
+		CacheDownloaderImage: "ghcr.io/inferops/model-downloader:v0.2.0",
+	})
+	if err != nil {
+		t.Fatalf("NewBuilder() error = %v", err)
+	}
+
+	first, err := firstBuilder.BuildCacheDownloaderJob(cache, placement)
+	if err != nil {
+		t.Fatalf("first BuildCacheDownloaderJob() error = %v", err)
+	}
+	second, err := secondBuilder.BuildCacheDownloaderJob(cache, placement)
+	if err != nil {
+		t.Fatalf("second BuildCacheDownloaderJob() error = %v", err)
+	}
+
+	if got, want := CacheInputHashFromJob(second), CacheInputHashFromJob(first); got != want {
+		t.Fatalf("image upgrade changed artifact identity from %q to %q", want, got)
+	}
+	if CacheJobHashFromJob(second) == CacheJobHashFromJob(first) {
+		t.Fatal("image upgrade did not change downloader Job identity")
 	}
 }
 
@@ -938,6 +1150,15 @@ func environmentVariable(environment []corev1.EnvVar, name string) *corev1.EnvVa
 		}
 	}
 	return nil
+}
+
+func commandFlagValue(command []string, flag string) string {
+	for i := 0; i+1 < len(command); i++ {
+		if command[i] == flag {
+			return command[i+1]
+		}
+	}
+	return ""
 }
 
 func assertEnvironmentOrder(t *testing.T, environment []corev1.EnvVar, first, second string) {

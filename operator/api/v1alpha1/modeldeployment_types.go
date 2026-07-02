@@ -51,6 +51,34 @@ type ModelDeploymentStatus struct {
 	Conditions         []Condition          `json:"conditions,omitempty"`
 }
 
+// Well-known condition types for ModelDeployment status.
+const (
+	// ConditionSpecValid indicates that the deployment spec passed both static
+	// and reconciliation-time validation.
+	ConditionSpecValid = "SpecValid"
+	// ConditionRuntimeResolved indicates that the referenced ModelRuntime was
+	// found and an effective runtime configuration could be produced.
+	ConditionRuntimeResolved = "RuntimeResolved"
+	// ConditionSecretsReady indicates that required Secrets are referenced.
+	ConditionSecretsReady = "SecretsReady"
+	// ConditionCacheReady indicates that the model cache is ready for use.
+	ConditionCacheReady = "CacheReady"
+	// ConditionReady aggregates the overall readiness of the deployment.
+	ConditionReady = "Ready"
+)
+
+// Stable condition/Event reason codes for ModelDeployment reconciliation.
+const (
+	ReasonSpecValidated       = "SpecValidated"
+	ReasonSpecInvalid         = "SpecInvalid"
+	ReasonRuntimeResolved     = "RuntimeResolved"
+	ReasonRuntimeNotFound     = "RuntimeNotFound"
+	ReasonSecretsAvailable    = "SecretsAvailable"
+	ReasonSecretRequired      = "SecretRequired"
+	ReasonInvalidCachePath    = "InvalidCachePath"
+	ReasonInvalidDrainTimeout = "InvalidDrainTimeout"
+)
+
 // ModelDeploymentPhase is the observed lifecycle phase of a model deployment.
 // +kubebuilder:validation:Enum=Pending;Downloading;Cached;WaitingForCapacity;WaitingForGPU;Activating;Active;Draining;Deactivating;Failed
 type ModelDeploymentPhase string

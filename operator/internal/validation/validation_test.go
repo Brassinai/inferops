@@ -45,6 +45,9 @@ func TestValidateModelDeployment(t *testing.T) {
 		}, wantErr: true},
 		{name: "missing model repo", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Model.Repo = "" }, wantErr: true},
 		{name: "missing runtime ref", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Runtime.Ref = "" }, wantErr: true},
+		{name: "invalid runtime ref", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Runtime.Ref = "Not Valid" }, wantErr: true},
+		{name: "invalid cpu quantity", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Resources.CPU = "many" }, wantErr: true},
+		{name: "zero memory quantity", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Resources.Memory = "0" }, wantErr: true},
 		{name: "invalid desired state", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Activation.DesiredState = "Warm" }, wantErr: true},
 		{name: "invalid full policy", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Activation.WhenFull = "EvictAny" }, wantErr: true},
 		{name: "invalid gpu count", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Resources.GPU.Count = 0 }, wantErr: true},
@@ -52,6 +55,11 @@ func TestValidateModelDeployment(t *testing.T) {
 			d.Spec.Runtime.TensorParallelSize = 2
 		}, wantErr: true},
 		{name: "invalid scaling bounds", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Scaling.MinReplicas = 2 }, wantErr: true},
+		{name: "active with zero maximum replicas", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Activation.DesiredState = v1alpha1.ActivationDesiredStateActive
+			d.Spec.Scaling.MinReplicas = 0
+			d.Spec.Scaling.MaxReplicas = 0
+		}, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -153,4 +161,163 @@ func TestValidateModelCache(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNewReconciliationValidator(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewReconciliationValidator("/var/lib/inferops/models")
+	if err != nil {
+		t.Fatalf("NewReconciliationValidator() error = %v", err)
+	}
+
+	_, err = NewReconciliationValidator("relative/path")
+	if err == nil {
+		t.Error("NewReconciliationValidator() expected error for relative path")
+	}
+
+	_, err = NewReconciliationValidator("/")
+	if err == nil {
+		t.Error("NewReconciliationValidator() expected error for filesystem root")
+	}
+}
+
+func TestNilReconciliationValidator(t *testing.T) {
+	t.Parallel()
+
+	var validator *ReconciliationValidator
+	if err := validator.ValidateForReconciliation(&v1alpha1.ModelDeployment{}); err == nil {
+		t.Fatal("ValidateForReconciliation() expected an error for a nil validator")
+	}
+}
+
+func TestReconciliationValidator(t *testing.T) {
+	t.Parallel()
+
+	validator, err := NewReconciliationValidator("/var/lib/inferops/models")
+	if err != nil {
+		t.Fatalf("NewReconciliationValidator() error = %v", err)
+	}
+
+	valid := &v1alpha1.ModelDeployment{
+		Spec: v1alpha1.ModelDeploymentSpec{
+			Model: v1alpha1.ModelSpec{
+				Repo:   "Qwen/Qwen2.5-7B-Instruct",
+				Source: "huggingface",
+			},
+			Runtime: v1alpha1.RuntimeSpec{Ref: "nano-vllm"},
+			Resources: v1alpha1.ResourceRequirements{
+				CPU:    "4",
+				Memory: "16Gi",
+				GPU:    &v1alpha1.GPUResourceRequest{Count: 1},
+			},
+			Activation: v1alpha1.ActivationSpec{DrainTimeout: "5m"},
+			Cache:      v1alpha1.CacheSpec{Path: "/var/lib/inferops/models"},
+			Secrets: v1alpha1.SecretReferences{
+				HuggingFaceTokenSecretName: "hf-token",
+			},
+		},
+	}
+
+	tests := []struct {
+		name       string
+		mutate     func(*v1alpha1.ModelDeployment)
+		wantErr    bool
+		wantReason string
+	}{
+		{name: "valid"},
+		{
+			name: "valid child cache path",
+			mutate: func(d *v1alpha1.ModelDeployment) {
+				d.Spec.Cache.Path = "/var/lib/inferops/models/qwen-chat"
+			},
+		},
+		{
+			name: "invalid drain timeout",
+			mutate: func(d *v1alpha1.ModelDeployment) {
+				d.Spec.Activation.DrainTimeout = "not-a-duration"
+			},
+			wantErr:    true,
+			wantReason: v1alpha1.ReasonInvalidDrainTimeout,
+		},
+		{
+			name: "zero drain timeout",
+			mutate: func(d *v1alpha1.ModelDeployment) {
+				d.Spec.Activation.DrainTimeout = "0s"
+			},
+			wantErr: true,
+		},
+		{
+			name: "cache path outside root",
+			mutate: func(d *v1alpha1.ModelDeployment) {
+				d.Spec.Cache.Path = "/tmp/models"
+			},
+			wantErr:    true,
+			wantReason: v1alpha1.ReasonInvalidCachePath,
+		},
+		{
+			name: "relative cache path",
+			mutate: func(d *v1alpha1.ModelDeployment) {
+				d.Spec.Cache.Path = "models"
+			},
+			wantErr:    true,
+			wantReason: v1alpha1.ReasonInvalidCachePath,
+		},
+		{
+			name: "missing huggingface token secret",
+			mutate: func(d *v1alpha1.ModelDeployment) {
+				d.Spec.Secrets.HuggingFaceTokenSecretName = ""
+			},
+			wantErr:    true,
+			wantReason: v1alpha1.ReasonSecretRequired,
+		},
+		{
+			name: "invalid huggingface token secret name",
+			mutate: func(d *v1alpha1.ModelDeployment) {
+				d.Spec.Secrets.HuggingFaceTokenSecretName = "Not Valid"
+			},
+			wantErr:    true,
+			wantReason: v1alpha1.ReasonSecretRequired,
+		},
+		{
+			name: "non-huggingface source does not require secret",
+			mutate: func(d *v1alpha1.ModelDeployment) {
+				d.Spec.Model.Source = "s3"
+				d.Spec.Secrets.HuggingFaceTokenSecretName = ""
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			deployment := valid.DeepCopy()
+			if tt.mutate != nil {
+				tt.mutate(deployment)
+			}
+			err := validator.ValidateForReconciliation(deployment)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ValidateForReconciliation() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantReason != "" && err != nil && !containsSubstring(err.Error(), tt.wantReason) {
+				t.Errorf("error %q does not contain reason %q", err.Error(), tt.wantReason)
+			}
+		})
+	}
+}
+
+func containsSubstring(s, substr string) bool {
+	if len(substr) == 0 {
+		return true
+	}
+	if len(s) < len(substr) {
+		return false
+	}
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
