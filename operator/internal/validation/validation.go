@@ -3,9 +3,26 @@ package validation
 import (
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	v1alpha1 "github.com/brassinai/inferops/operator/api/v1alpha1"
+	"github.com/brassinai/inferops/operator/internal/resources"
+	"k8s.io/apimachinery/pkg/api/resource"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 )
+
+// ValidationError carries a stable reason code together with a human-readable
+// message.  Callers can use errors.As to recover the reason for status
+// conditions and Events.
+type ValidationError struct {
+	Reason  string
+	Message string
+}
+
+func (e *ValidationError) Error() string {
+	return e.Reason + ": " + e.Message
+}
 
 // ValidateModelDeployment validates the minimal fields needed for a model deployment.
 func ValidateModelDeployment(deployment v1alpha1.ModelDeployment) error {
@@ -17,6 +34,15 @@ func ValidateModelDeployment(deployment v1alpha1.ModelDeployment) error {
 	}
 	if deployment.Spec.Runtime.Ref == "" {
 		return errors.New("spec.runtime.ref is required")
+	}
+	if messages := utilvalidation.IsDNS1123Subdomain(deployment.Spec.Runtime.Ref); len(messages) != 0 {
+		return fmt.Errorf("spec.runtime.ref %q is invalid: %s", deployment.Spec.Runtime.Ref, strings.Join(messages, ", "))
+	}
+	if err := validatePositiveQuantity(deployment.Spec.Resources.CPU, "spec.resources.cpu"); err != nil {
+		return err
+	}
+	if err := validatePositiveQuantity(deployment.Spec.Resources.Memory, "spec.resources.memory"); err != nil {
+		return err
 	}
 	if deployment.Spec.Resources.GPU == nil {
 		if deployment.Spec.Resources.CPU == "" {
@@ -56,6 +82,133 @@ func ValidateModelDeployment(deployment v1alpha1.ModelDeployment) error {
 	}
 	if deployment.Spec.Scaling.MaxReplicas < deployment.Spec.Scaling.MinReplicas {
 		return errors.New("spec.scaling.maxReplicas must be greater than or equal to minReplicas")
+	}
+	if deployment.Spec.Activation.DesiredState == v1alpha1.ActivationDesiredStateActive &&
+		deployment.Spec.Scaling.MaxReplicas < 1 {
+		return errors.New("spec.scaling.maxReplicas must be at least 1 for active deployments")
+	}
+	return nil
+}
+
+func validatePositiveQuantity(value, field string) error {
+	if value == "" {
+		return nil
+	}
+	quantity, err := resource.ParseQuantity(value)
+	if err != nil {
+		return fmt.Errorf("%s %q is invalid: %w", field, value, err)
+	}
+	if quantity.Sign() <= 0 {
+		return fmt.Errorf("%s must be greater than zero", field)
+	}
+	return nil
+}
+
+// ReconciliationValidator validates ModelDeployment objects at reconciliation
+// time using operator configuration that is not available to CRD OpenAPI
+// validation.
+type ReconciliationValidator struct {
+	cacheRoot string
+}
+
+// NewReconciliationValidator creates a validator with the configured cache root.
+func NewReconciliationValidator(cacheRoot string) (*ReconciliationValidator, error) {
+	cleanRoot, err := resources.CleanAbsolutePath(cacheRoot, "cache root")
+	if err != nil {
+		return nil, err
+	}
+	if cleanRoot == "/" {
+		return nil, errors.New("cache root must not be the filesystem root")
+	}
+	return &ReconciliationValidator{cacheRoot: cleanRoot}, nil
+}
+
+// ValidateForReconciliation checks cross-object and configuration-dependent
+// rules.  It assumes static validation has already passed.
+func (v *ReconciliationValidator) ValidateForReconciliation(deployment *v1alpha1.ModelDeployment) error {
+	if v == nil {
+		return errors.New("reconciliation validator is required")
+	}
+	if deployment == nil {
+		return errors.New("model deployment is required")
+	}
+
+	if err := v.validateDrainTimeout(deployment.Spec.Activation.DrainTimeout); err != nil {
+		return err
+	}
+
+	if err := v.validateCachePath(deployment.Spec.Cache.Path); err != nil {
+		return err
+	}
+
+	if err := v.validateSecrets(deployment); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (v *ReconciliationValidator) validateDrainTimeout(drainTimeout string) error {
+	if drainTimeout == "" {
+		return nil
+	}
+	parsed, err := time.ParseDuration(drainTimeout)
+	if err != nil {
+		return &ValidationError{
+			Reason:  v1alpha1.ReasonInvalidDrainTimeout,
+			Message: fmt.Sprintf("spec.activation.drainTimeout %q is invalid: %v", drainTimeout, err),
+		}
+	}
+	if parsed <= 0 {
+		return &ValidationError{
+			Reason:  v1alpha1.ReasonInvalidDrainTimeout,
+			Message: "spec.activation.drainTimeout must be greater than zero",
+		}
+	}
+	return nil
+}
+
+func (v *ReconciliationValidator) validateCachePath(cachePath string) error {
+	if cachePath == "" {
+		return nil
+	}
+	cleanPath, err := resources.CleanAbsolutePath(cachePath, "spec.cache.path")
+	if err != nil {
+		return &ValidationError{
+			Reason:  v1alpha1.ReasonInvalidCachePath,
+			Message: err.Error(),
+		}
+	}
+	cachePrefix := strings.TrimSuffix(v.cacheRoot, "/") + "/"
+	if cleanPath != v.cacheRoot && !strings.HasPrefix(cleanPath, cachePrefix) {
+		return &ValidationError{
+			Reason:  v1alpha1.ReasonInvalidCachePath,
+			Message: fmt.Sprintf("spec.cache.path %q must be %q or a child of it", cleanPath, v.cacheRoot),
+		}
+	}
+	return nil
+}
+
+func (v *ReconciliationValidator) validateSecrets(deployment *v1alpha1.ModelDeployment) error {
+	if deployment.Spec.Model.Source != "huggingface" {
+		return nil
+	}
+	secretName := deployment.Spec.Secrets.HuggingFaceTokenSecretName
+	if secretName == "" {
+		return &ValidationError{
+			Reason:  v1alpha1.ReasonSecretRequired,
+			Message: "spec.secrets.huggingFaceTokenSecretName is required when model source is huggingface",
+		}
+	}
+	if messages := utilvalidation.IsDNS1123Subdomain(secretName); len(messages) != 0 {
+		return &ValidationError{
+			Reason: v1alpha1.ReasonSecretRequired,
+			Message: fmt.Sprintf(
+				"spec.secrets.huggingFaceTokenSecretName %q is invalid: %s",
+				secretName,
+				strings.Join(messages, ", "),
+			),
+		}
 	}
 	return nil
 }

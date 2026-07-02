@@ -1,0 +1,78 @@
+apiVersion: inference.inferops.dev/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: qwen-missing-runtime
+spec:
+  model:
+    name: qwen-missing-runtime
+    source: huggingface
+    repo: Qwen/Qwen2.5-0.5B-Instruct
+    revision: main
+  runtime:
+    ref: runtime-does-not-exist
+    maxModelLen: 4096
+    tensorParallelSize: 1
+    gpuMemoryUtilization: 0.85
+  resources:
+    cpu: "4"
+    memory: 16Gi
+    gpu:
+      count: 1
+      vendor: nvidia
+  activation:
+    desiredState: Inactive
+    whenFull: Queue
+    priority: 50
+    drainTimeout: 5m
+  scaling:
+    minReplicas: 0
+    maxReplicas: 1
+  routing:
+    enabled: true
+    path: /models/qwen-missing-runtime
+    openAICompatible: true
+  cache:
+    enabled: true
+    type: nodeLocal
+    size: 50Gi
+    path: /var/lib/inferops/models
+  secrets:
+    huggingFaceTokenSecretName: hf-token
+status:
+  observedGeneration: 1
+  phase: Failed
+  endpoint: ""
+  serviceName: ""
+  cache:
+    state: ""
+  replicas:
+    desired: 0
+    ready: 0
+  model:
+    loaded: false
+    repo: Qwen/Qwen2.5-0.5B-Instruct
+  conditions:
+    - type: SpecValid
+      status: Unknown
+      observedGeneration: 1
+      lastTransitionTime: "2026-06-11T09:00:00Z"
+      reason: RuntimeNotFound
+      message: Referenced runtime must exist before validation can complete
+    - type: RuntimeResolved
+      status: "False"
+      observedGeneration: 1
+      lastTransitionTime: "2026-06-11T09:00:00Z"
+      reason: RuntimeNotFound
+      message: 'RuntimeNotFound: referenced ModelRuntime not found: runtime-does-not-exist'
+    - type: SecretsReady
+      status: Unknown
+      observedGeneration: 1
+      lastTransitionTime: "2026-06-11T09:00:00Z"
+      reason: RuntimeNotFound
+      message: 'Runtime resolution failed before secret checks'
+    - type: Ready
+      status: "False"
+      observedGeneration: 1
+      lastTransitionTime: "2026-06-11T09:00:00Z"
+      reason: RuntimeNotFound
+      message: 'RuntimeNotFound: referenced ModelRuntime not found: runtime-does-not-exist'

@@ -1,6 +1,7 @@
 package resources
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	pathpkg "path"
@@ -38,14 +39,14 @@ type Builder struct {
 
 // NewBuilder creates a resource builder with validated operator configuration.
 func NewBuilder(options BuilderOptions) (Builder, error) {
-	cacheRoot, err := cleanAbsolutePath(options.CacheRoot, "cache root")
+	cacheRoot, err := CleanAbsolutePath(options.CacheRoot, "cache root")
 	if err != nil {
 		return Builder{}, err
 	}
 	if cacheRoot == "/" {
 		return Builder{}, errors.New("cache root must not be the filesystem root")
 	}
-	if err := validatePinnedImage(options.CacheDownloaderImage); err != nil {
+	if err := ValidatePinnedImage(options.CacheDownloaderImage); err != nil {
 		return Builder{}, fmt.Errorf("cache downloader image: %w", err)
 	}
 	cacheDownloaderResources, err := validatedCacheDownloaderResources(options.CacheDownloaderResources)
@@ -57,7 +58,7 @@ func NewBuilder(options BuilderOptions) (Builder, error) {
 	if runtimeModelPath == "" {
 		runtimeModelPath = templates.RuntimeModelMountPath
 	}
-	runtimeModelPath, err = cleanAbsolutePath(runtimeModelPath, "runtime model path")
+	runtimeModelPath, err = CleanAbsolutePath(runtimeModelPath, "runtime model path")
 	if err != nil {
 		return Builder{}, err
 	}
@@ -105,7 +106,7 @@ func validatedCacheDownloaderResources(input corev1.ResourceRequirements) (corev
 }
 
 func (b Builder) validateCachePath(cachePath string) error {
-	cleanPath, err := cleanAbsolutePath(cachePath, "cache path")
+	cleanPath, err := CleanAbsolutePath(cachePath, "cache path")
 	if err != nil {
 		return err
 	}
@@ -117,7 +118,9 @@ func (b Builder) validateCachePath(cachePath string) error {
 	return nil
 }
 
-func cleanAbsolutePath(path, field string) (string, error) {
+// CleanAbsolutePath validates that a path is absolute and clean and returns
+// the cleaned path.
+func CleanAbsolutePath(path, field string) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("%s is required", field)
 	}
@@ -159,20 +162,74 @@ func validateModelCacheName(name string) error {
 	return nil
 }
 
-func validatePinnedImage(image string) error {
+// ValidatePinnedImage returns an error if an image reference does not include
+// a tag or digest, or if it uses the mutable :latest tag.
+func ValidatePinnedImage(image string) error {
 	if image == "" {
 		return errors.New("is required")
 	}
+	if strings.TrimSpace(image) != image || strings.ContainsAny(image, " \t\r\n") {
+		return fmt.Errorf("%q must not contain whitespace", image)
+	}
 
 	lastSlash := strings.LastIndex(image, "/")
+	lastAt := strings.LastIndex(image, "@")
+	if lastAt > lastSlash {
+		if strings.Count(image[lastSlash+1:], "@") != 1 || lastAt == len(image)-1 {
+			return fmt.Errorf("%q has an invalid digest", image)
+		}
+		if image[:lastAt] == "" {
+			return fmt.Errorf("%q must include an image name", image)
+		}
+		digest := image[lastAt+1:]
+		const sha256Prefix = "sha256:"
+		if !strings.HasPrefix(digest, sha256Prefix) {
+			return fmt.Errorf("%q must use a sha256 digest", image)
+		}
+		encoded := strings.TrimPrefix(digest, sha256Prefix)
+		if len(encoded) != 64 {
+			return fmt.Errorf("%q has an invalid sha256 digest", image)
+		}
+		if encoded != strings.ToLower(encoded) {
+			return fmt.Errorf("%q has a non-canonical sha256 digest", image)
+		}
+		if _, err := hex.DecodeString(encoded); err != nil {
+			return fmt.Errorf("%q has an invalid sha256 digest: %w", image, err)
+		}
+		return nil
+	}
+
 	lastColon := strings.LastIndex(image, ":")
 	hasTag := lastColon > lastSlash && lastColon < len(image)-1
-	hasDigest := strings.Contains(image[lastSlash+1:], "@sha256:")
-	if !hasTag && !hasDigest {
+	if !hasTag {
 		return fmt.Errorf("%q must include a tag or digest", image)
 	}
-	if strings.HasSuffix(image, ":latest") {
+	if lastColon == 0 {
+		return fmt.Errorf("%q must include an image name", image)
+	}
+	tag := image[lastColon+1:]
+	if strings.EqualFold(tag, "latest") {
 		return fmt.Errorf("%q must not use the mutable latest tag", image)
 	}
+	if !validImageTag(tag) {
+		return fmt.Errorf("%q has an invalid tag", image)
+	}
 	return nil
+}
+
+func validImageTag(tag string) bool {
+	if len(tag) == 0 || len(tag) > 128 {
+		return false
+	}
+	for i, r := range tag {
+		if r >= 'a' && r <= 'z' ||
+			r >= 'A' && r <= 'Z' ||
+			r >= '0' && r <= '9' ||
+			r == '_' ||
+			i > 0 && (r == '.' || r == '-') {
+			continue
+		}
+		return false
+	}
+	return true
 }

@@ -234,6 +234,41 @@ func TestBuilderOptions(t *testing.T) {
 	}
 }
 
+func TestValidatePinnedImage(t *testing.T) {
+	t.Parallel()
+
+	validDigest := "ghcr.io/inferops/runtime@sha256:" + strings.Repeat("a", 64)
+	tests := []struct {
+		name    string
+		image   string
+		wantErr bool
+	}{
+		{name: "tag", image: "ghcr.io/inferops/runtime:v1.2.3"},
+		{name: "registry port and tag", image: "registry.example:5000/runtime:v1"},
+		{name: "digest", image: validDigest},
+		{name: "missing tag", image: "ghcr.io/inferops/runtime", wantErr: true},
+		{name: "latest tag", image: "ghcr.io/inferops/runtime:latest", wantErr: true},
+		{name: "latest tag case insensitive", image: "ghcr.io/inferops/runtime:LATEST", wantErr: true},
+		{name: "empty digest", image: "ghcr.io/inferops/runtime@sha256:", wantErr: true},
+		{name: "short digest", image: "ghcr.io/inferops/runtime@sha256:abc123", wantErr: true},
+		{name: "non-hex digest", image: "ghcr.io/inferops/runtime@sha256:" + strings.Repeat("z", 64), wantErr: true},
+		{name: "non-canonical digest", image: "ghcr.io/inferops/runtime@sha256:" + strings.Repeat("A", 64), wantErr: true},
+		{name: "invalid tag", image: "ghcr.io/inferops/runtime:-bad", wantErr: true},
+		{name: "whitespace", image: "ghcr.io/inferops/runtime:v1 ", wantErr: true},
+	}
+
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidatePinnedImage(test.image)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("ValidatePinnedImage(%q) error = %v, wantErr %v", test.image, err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestBuilderUsesConfiguredCacheDownloaderResources(t *testing.T) {
 	t.Parallel()
 
@@ -442,7 +477,11 @@ func TestImagePullPolicy(t *testing.T) {
 		{name: "implicit latest", image: "ghcr.io/inferops/runtime", want: corev1.PullAlways},
 		{name: "explicit latest", image: "ghcr.io/inferops/runtime:latest", want: corev1.PullAlways},
 		{name: "version tag", image: "ghcr.io/inferops/runtime:v1.2.3", want: corev1.PullIfNotPresent},
-		{name: "digest", image: "ghcr.io/inferops/runtime@sha256:abc123", want: corev1.PullIfNotPresent},
+		{
+			name:  "digest",
+			image: "ghcr.io/inferops/runtime@sha256:" + strings.Repeat("a", 64),
+			want:  corev1.PullIfNotPresent,
+		},
 		{name: "registry port", image: "registry.example:5000/runtime", want: corev1.PullAlways},
 	}
 

@@ -43,6 +43,8 @@ spec:
     type: nodeLocal
     size: 100Gi
     path: /var/lib/inferops/models
+  secrets:
+    huggingFaceTokenSecretName: hf-token
 ```
 
 ## ModelDeployment
@@ -102,9 +104,48 @@ spec:
 
 ### Conditions
 
-Standard types: `Ready`, `CacheReady`, `RuntimeReady`, `RoutingReady`, `Degraded`. GPU workloads also report `GPUAssigned`.
+| Type | Meaning |
+| --- | --- |
+| `Ready` | Aggregate readiness of the deployment |
+| `SpecValid` | Static and reconciliation-time validation passed |
+| `RuntimeResolved` | Referenced `ModelRuntime` exists and produced an effective configuration |
+| `SecretsReady` | Required Secret references are present and syntactically valid |
+| `CacheReady` | Model cache is ready |
+| `RoutingReady` | Gateway route is configured |
+| `Degraded` | Reconciliation is blocked but may recover |
+| `GPUAssigned` | GPU capacity assigned (GPU workloads only) |
 
 Stable `reason` values are machine-readable; `message` is for operators. `observedGeneration` must match `metadata.generation` for freshness.
+
+### Validation reason codes
+
+| Reason | Situation |
+| --- | --- |
+| `InvalidSpec` | Generic validation failure |
+| `RuntimeNotFound` | `spec.runtime.ref` does not match an existing `ModelRuntime` |
+| `SecretRequired` | A required Secret reference is missing or is not a valid Kubernetes name |
+| `InvalidCachePath` | `spec.cache.path` is not under the operator's configured cache root |
+| `InvalidDrainTimeout` | `spec.activation.drainTimeout` is not a positive duration |
+
+### Runtime resolution
+
+The operator resolves `spec.runtime.ref` in the `ModelDeployment` namespace and
+produces an effective runtime configuration:
+
+- `spec.runtime.image` overrides `ModelRuntime.spec.defaultImage`.
+- `port` defaults to `8000`.
+- `healthPath` defaults to `/health`.
+- `readinessPath` defaults to `healthPath`.
+- `metricsPath` defaults to `/metrics`.
+
+The resolved image must include a tag or digest. The mutable `:latest` tag is
+rejected, and SHA-256 digests must contain the complete 64-character digest.
+The current CRD requires `ModelRuntime.spec.port` and `healthPath`; resolver
+fallbacks preserve compatibility if older objects omit them.
+
+Runtime lookup failures caused by API availability, authorization, or request
+cancellation are returned for retry. Only an actual Kubernetes `NotFound`
+result produces the stable `RuntimeNotFound` condition.
 
 ## ModelRuntime
 
