@@ -8,6 +8,7 @@ import (
 
 	v1alpha1 "github.com/brassinai/inferops/operator/api/v1alpha1"
 	"github.com/brassinai/inferops/operator/internal/paths"
+	"github.com/brassinai/inferops/operator/internal/templates"
 	"k8s.io/apimachinery/pkg/api/resource"
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 )
@@ -29,8 +30,21 @@ func ValidateModelDeployment(deployment v1alpha1.ModelDeployment) error {
 	if deployment.Name == "" {
 		return errors.New("metadata.name is required")
 	}
+	runtimeName := templates.RuntimeServiceName(deployment.Name)
+	if messages := utilvalidation.IsDNS1035Label(runtimeName); len(messages) != 0 {
+		return fmt.Errorf("generated runtime resource name %q is invalid: %s", runtimeName, strings.Join(messages, ", "))
+	}
+	if messages := utilvalidation.IsValidLabelValue(deployment.Name); len(messages) != 0 {
+		return fmt.Errorf("metadata.name %q cannot be used as a managed-resource label: %s",
+			deployment.Name, strings.Join(messages, ", "))
+	}
 	if deployment.Spec.Model.Repo == "" {
 		return errors.New("spec.model.repo is required")
+	}
+	switch deployment.Spec.Model.Source {
+	case "", "huggingface":
+	default:
+		return fmt.Errorf("spec.model.source %q is unsupported; expected huggingface", deployment.Spec.Model.Source)
 	}
 	if deployment.Spec.Runtime.Ref == "" {
 		return errors.New("spec.runtime.ref is required")
@@ -61,6 +75,15 @@ func ValidateModelDeployment(deployment v1alpha1.ModelDeployment) error {
 		if deployment.Spec.Resources.GPU.Count < 1 {
 			return errors.New("spec.resources.gpu.count must be at least 1")
 		}
+		vendor := deployment.Spec.Resources.GPU.Vendor
+		if vendor == "" {
+			vendor = templates.DefaultGPUVendor
+		}
+		resourceName := vendor + ".com/gpu"
+		if messages := utilvalidation.IsQualifiedName(resourceName); len(messages) != 0 {
+			return fmt.Errorf("spec.resources.gpu.vendor %q produces invalid resource %q: %s",
+				vendor, resourceName, strings.Join(messages, ", "))
+		}
 		if deployment.Spec.Runtime.TensorParallelSize > deployment.Spec.Resources.GPU.Count {
 			return fmt.Errorf("spec.runtime.tensorParallelSize (%d) must not exceed spec.resources.gpu.count (%d)",
 				deployment.Spec.Runtime.TensorParallelSize, deployment.Spec.Resources.GPU.Count)
@@ -86,6 +109,15 @@ func ValidateModelDeployment(deployment v1alpha1.ModelDeployment) error {
 	if deployment.Spec.Activation.DesiredState == v1alpha1.ActivationDesiredStateActive &&
 		deployment.Spec.Scaling.MaxReplicas < 1 {
 		return errors.New("spec.scaling.maxReplicas must be at least 1 for active deployments")
+	}
+	if deployment.Spec.Cache.Type != "" && deployment.Spec.Cache.Type != "nodeLocal" {
+		return fmt.Errorf("spec.cache.type %q is unsupported; expected nodeLocal", deployment.Spec.Cache.Type)
+	}
+	if err := validatePositiveQuantity(deployment.Spec.Cache.Size, "spec.cache.size"); err != nil {
+		return err
+	}
+	if deployment.Spec.Routing.Path != "" && !strings.HasPrefix(deployment.Spec.Routing.Path, "/") {
+		return errors.New("spec.routing.path must start with /")
 	}
 	return nil
 }
@@ -194,10 +226,8 @@ func (v *ReconciliationValidator) validateSecrets(deployment *v1alpha1.ModelDepl
 	}
 	secretName := deployment.Spec.Secrets.HuggingFaceTokenSecretName
 	if secretName == "" {
-		return &ValidationError{
-			Reason:  v1alpha1.ReasonSecretRequired,
-			Message: "spec.secrets.huggingFaceTokenSecretName is required when model source is huggingface",
-		}
+		// Public Hugging Face repositories do not require credentials.
+		return nil
 	}
 	if messages := utilvalidation.IsDNS1123Subdomain(secretName); len(messages) != 0 {
 		return &ValidationError{

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/brassinai/inferops/operator/api/v1alpha1"
+	controllermetrics "github.com/brassinai/inferops/operator/internal/metrics"
 	"github.com/brassinai/inferops/operator/internal/resources"
 	"github.com/brassinai/inferops/operator/internal/scheduler"
 	"github.com/brassinai/inferops/operator/internal/status"
@@ -34,7 +35,8 @@ const (
 	// idempotent.
 	RetryAnnotation = resources.CacheRetryAnnotation
 
-	pendingRequeueAfter = 30 * time.Second
+	defaultPendingRequeueAfter  = 30 * time.Second
+	defaultDownloadRequeueAfter = 10 * time.Second
 )
 
 // ModelCacheReconcilerConfig carries trusted operator configuration for cache
@@ -52,14 +54,25 @@ type ModelCacheReconcilerConfig struct {
 	// CacheRequiredResources restricts placement to nodes advertising these
 	// allocatable resources.
 	CacheRequiredResources []corev1.ResourceName
+	// Metrics receives bounded-cardinality lifecycle observations.
+	Metrics controllermetrics.Recorder
+	// PendingRequeueAfter controls fallback polling while placement or a
+	// referenced Secret is unavailable.
+	PendingRequeueAfter time.Duration
+	// DownloadRequeueAfter controls fallback polling while a downloader Job is
+	// active. Job watches normally trigger earlier reconciliation.
+	DownloadRequeueAfter time.Duration
 }
 
 // ModelCacheReconciler owns reconciliation for ModelCache resources.
 type ModelCacheReconciler struct {
-	client        client.Client
-	builder       resources.Builder
-	planner       *scheduler.CachePlanner
-	eventRecorder record.EventRecorder
+	client               client.Client
+	builder              resources.Builder
+	planner              *scheduler.CachePlanner
+	eventRecorder        record.EventRecorder
+	metrics              controllermetrics.Recorder
+	pendingRequeueAfter  time.Duration
+	downloadRequeueAfter time.Duration
 }
 
 // NewModelCacheReconciler creates a reconciler with validated dependencies.
@@ -73,6 +86,21 @@ func NewModelCacheReconciler(
 	}
 	if eventRecorder == nil {
 		return nil, errors.New("event recorder is required")
+	}
+	if config.Metrics == nil {
+		config.Metrics = controllermetrics.NoOpRecorder{}
+	}
+	if config.PendingRequeueAfter == 0 {
+		config.PendingRequeueAfter = defaultPendingRequeueAfter
+	}
+	if config.PendingRequeueAfter < 0 {
+		return nil, errors.New("pending requeue interval must be greater than zero")
+	}
+	if config.DownloadRequeueAfter == 0 {
+		config.DownloadRequeueAfter = defaultDownloadRequeueAfter
+	}
+	if config.DownloadRequeueAfter < 0 {
+		return nil, errors.New("download requeue interval must be greater than zero")
 	}
 
 	builder, err := resources.NewBuilder(resources.BuilderOptions{
@@ -94,10 +122,13 @@ func NewModelCacheReconciler(
 	}
 
 	return &ModelCacheReconciler{
-		client:        c,
-		builder:       builder,
-		planner:       planner,
-		eventRecorder: eventRecorder,
+		client:               c,
+		builder:              builder,
+		planner:              planner,
+		eventRecorder:        eventRecorder,
+		metrics:              config.Metrics,
+		pendingRequeueAfter:  config.PendingRequeueAfter,
+		downloadRequeueAfter: config.DownloadRequeueAfter,
 	}, nil
 }
 
@@ -114,8 +145,8 @@ func (r *ModelCacheReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	if !cache.DeletionTimestamp.IsZero() {
-		// Month one: no data cleanup finalizer. The object deletes immediately
-		// and leaves hostPath data in place.
+		// There is no data-cleanup finalizer. The object deletes immediately and
+		// leaves hostPath data in place.
 		return ctrl.Result{}, nil
 	}
 
@@ -559,7 +590,16 @@ func (r *ModelCacheReconciler) projectJobStatus(
 		setCondition(cache, v1alpha1.CacheConditionDownloaded, metav1.ConditionTrue, v1alpha1.CacheReasonDownloadSucceeded, "Download completed")
 		setCondition(cache, v1alpha1.CacheConditionVerified, metav1.ConditionTrue, v1alpha1.CacheReasonVerified, "Cache verified")
 		setCondition(cache, v1alpha1.CacheConditionReady, metav1.ConditionTrue, v1alpha1.CacheReasonCacheReady, "Cache is ready")
-		return r.patchStatus(ctx, cache, original, v1alpha1.CacheReasonCacheReady, "Cache is ready")
+		observeDuration := original.Status.Phase != v1alpha1.ModelCachePhaseReady &&
+			!job.CreationTimestamp.IsZero()
+		result, err := r.patchStatus(ctx, cache, original, v1alpha1.CacheReasonCacheReady, "Cache is ready")
+		if err == nil && !result.Requeue && observeDuration {
+			duration := time.Since(job.CreationTimestamp.Time)
+			if duration >= 0 {
+				r.metrics.ObserveCacheDownloadDuration(duration)
+			}
+		}
+		return result, err
 
 	case observed.FailedTerminal:
 		cache.Status.Phase = v1alpha1.ModelCachePhaseFailed
@@ -664,7 +704,7 @@ func (r *ModelCacheReconciler) patchStatus(
 ) (ctrl.Result, error) {
 	changed := statusChanged(original.Status, cache.Status)
 	if !changed {
-		return requeueForCachePhase(cache.Status.Phase), nil
+		return r.requeueForCachePhase(cache.Status.Phase), nil
 	}
 
 	if err := r.client.Status().Patch(ctx, cache, client.MergeFrom(original)); err != nil {
@@ -681,16 +721,20 @@ func (r *ModelCacheReconciler) patchStatus(
 			r.eventRecorder.Eventf(cache, corev1.EventTypeNormal, eventReason, "%s", eventMessage)
 		}
 	}
+	if cache.Status.Phase == v1alpha1.ModelCachePhaseFailed &&
+		original.Status.Phase != v1alpha1.ModelCachePhaseFailed {
+		r.metrics.IncFailure("modelcache", eventReason)
+	}
 
-	return requeueForCachePhase(cache.Status.Phase), nil
+	return r.requeueForCachePhase(cache.Status.Phase), nil
 }
 
-func requeueForCachePhase(phase v1alpha1.ModelCachePhase) ctrl.Result {
+func (r *ModelCacheReconciler) requeueForCachePhase(phase v1alpha1.ModelCachePhase) ctrl.Result {
 	switch phase {
 	case v1alpha1.ModelCachePhaseDownloading:
-		return ctrl.Result{RequeueAfter: 10 * time.Second}
+		return ctrl.Result{RequeueAfter: r.downloadRequeueAfter}
 	case v1alpha1.ModelCachePhasePending:
-		return ctrl.Result{RequeueAfter: pendingRequeueAfter}
+		return ctrl.Result{RequeueAfter: r.pendingRequeueAfter}
 	default:
 		return ctrl.Result{}
 	}

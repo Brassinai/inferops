@@ -24,9 +24,9 @@ const (
 	shutdownGraceBuffer = 30 * time.Second
 )
 
-// BuildRuntimeDeployment returns a deterministic Deployment for a ModelDeployment.
-// Active deployments require a ready node-local cache placement. Inactive
-// deployments retain a zero-replica workload without creating runtime pods.
+// BuildRuntimeDeployment returns a deterministic runtime Deployment. Active
+// deployments require a ready node-local cache placement. The lifecycle
+// controller does not persist the zero-replica form for inactive models.
 func (b Builder) BuildRuntimeDeployment(
 	md *v1alpha1.ModelDeployment,
 	runtime *v1alpha1.ModelRuntime,
@@ -126,6 +126,12 @@ func (b Builder) BuildRuntimeDeployment(
 		Resources: containerResources,
 		SecurityContext: &corev1.SecurityContext{
 			AllowPrivilegeEscalation: boolPointer(false),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: corev1.SeccompProfileTypeRuntimeDefault,
+			},
 		},
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
@@ -177,8 +183,10 @@ func (b Builder) BuildRuntimeDeployment(
 		}
 	}
 	automountServiceAccountToken := false
+	enableServiceLinks := false
 	podSpec := corev1.PodSpec{
 		AutomountServiceAccountToken:  &automountServiceAccountToken,
+		EnableServiceLinks:            &enableServiceLinks,
 		TerminationGracePeriodSeconds: &terminationGracePeriodSeconds,
 		Containers:                    []corev1.Container{container},
 		Volumes:                       volumes,

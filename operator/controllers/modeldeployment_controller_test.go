@@ -149,7 +149,7 @@ func TestReconcileBlocksOnMissingRuntime(t *testing.T) {
 	assertCondition(t, result.Status.Conditions, v1alpha1.ConditionSecretsReady, metav1.ConditionUnknown, v1alpha1.ReasonRuntimeNotFound, 1)
 }
 
-func TestReconcileBlocksOnMissingSecret(t *testing.T) {
+func TestReconcileAllowsPublicHuggingFaceModelWithoutSecret(t *testing.T) {
 	t.Parallel()
 
 	md := &v1alpha1.ModelDeployment{
@@ -186,21 +186,11 @@ func TestReconcileBlocksOnMissingSecret(t *testing.T) {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
 
-	if result.Status.Phase != v1alpha1.ModelDeploymentPhaseFailed {
-		t.Errorf("phase = %q, want Failed", result.Status.Phase)
+	if result.Status.Phase != v1alpha1.ModelDeploymentPhasePending {
+		t.Errorf("phase = %q, want Pending", result.Status.Phase)
 	}
-	assertCondition(t, result.Status.Conditions, v1alpha1.ConditionSpecValid, metav1.ConditionFalse, v1alpha1.ReasonSecretRequired, 1)
-	assertCondition(t, result.Status.Conditions, v1alpha1.ConditionSecretsReady, metav1.ConditionFalse, v1alpha1.ReasonSecretRequired, 1)
-
-	foundWarning := false
-	for _, event := range recorder.Events {
-		if event.EventType == "Warning" && event.Reason == v1alpha1.ReasonSecretRequired {
-			foundWarning = true
-		}
-	}
-	if !foundWarning {
-		t.Error("expected a SecretRequired warning event")
-	}
+	assertCondition(t, result.Status.Conditions, v1alpha1.ConditionSpecValid, metav1.ConditionTrue, v1alpha1.ReasonSpecValidated, 1)
+	assertCondition(t, result.Status.Conditions, v1alpha1.ConditionSecretsReady, metav1.ConditionTrue, v1alpha1.ReasonSecretsAvailable, 1)
 }
 
 func TestReconcileBlocksOnCachePathOutsideRoot(t *testing.T) {
@@ -280,7 +270,7 @@ func TestReconcileRecoversValidationOwnedFailedPhase(t *testing.T) {
 	t.Parallel()
 
 	md := validTestDeployment()
-	md.Spec.Secrets.HuggingFaceTokenSecretName = ""
+	md.Spec.Activation.DrainTimeout = "not-a-duration"
 	reconciler := newTestReconciler(validTestRuntime(), &events.FakeRecorder{})
 
 	failed, err := reconciler.Reconcile(context.Background(), md)
@@ -293,7 +283,7 @@ func TestReconcileRecoversValidationOwnedFailedPhase(t *testing.T) {
 
 	md.Status = failed.Status
 	md.Generation++
-	md.Spec.Secrets.HuggingFaceTokenSecretName = "hf-token"
+	md.Spec.Activation.DrainTimeout = "5m"
 	recovered, err := reconciler.Reconcile(context.Background(), md)
 	if err != nil {
 		t.Fatalf("second Reconcile() error = %v", err)

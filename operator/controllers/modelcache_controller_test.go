@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"testing"
+	"time"
 
 	v1alpha1 "github.com/brassinai/inferops/operator/api/v1alpha1"
 	"github.com/brassinai/inferops/operator/internal/resources"
@@ -66,6 +67,26 @@ func testCache(name string) *v1alpha1.ModelCache {
 				Path: testCacheRoot + "/" + name,
 			},
 		},
+	}
+}
+
+func TestNewModelCacheReconcilerRejectsInvalidRequeueIntervals(t *testing.T) {
+	t.Parallel()
+
+	c := fake.NewClientBuilder().WithScheme(testScheme()).Build()
+	for _, config := range []ModelCacheReconcilerConfig{
+		{
+			CacheRoot: testCacheRoot, DownloaderImage: testDownloaderImage,
+			PendingRequeueAfter: -time.Second,
+		},
+		{
+			CacheRoot: testCacheRoot, DownloaderImage: testDownloaderImage,
+			DownloadRequeueAfter: -time.Second,
+		},
+	} {
+		if _, err := NewModelCacheReconciler(c, config, &record.FakeRecorder{}); err == nil {
+			t.Fatalf("NewModelCacheReconciler(%#v) accepted an invalid interval", config)
+		}
 	}
 }
 
@@ -267,8 +288,8 @@ func TestModelCacheReconcilerHandlesNodeLoss(t *testing.T) {
 		t.Errorf("phase = %q, want Pending after node loss", updated.Status.Phase)
 	}
 
-	// A later reconcile must not silently create a replacement copy on the
-	// other node. Multi-node distribution belongs to MVP-503.
+	// A later reconcile must not silently create a replacement copy on another
+	// node because the completed files remain at the recorded placement.
 	if _, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: types.NamespacedName{Name: cache.Name, Namespace: cache.Namespace}}); err != nil {
 		t.Fatalf("second Reconcile() error = %v", err)
 	}
@@ -561,8 +582,8 @@ func TestPendingCacheUsesBoundedRequeue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
-	if result.RequeueAfter != pendingRequeueAfter {
-		t.Fatalf("requeueAfter = %s, want %s", result.RequeueAfter, pendingRequeueAfter)
+	if result.RequeueAfter != defaultPendingRequeueAfter {
+		t.Fatalf("requeueAfter = %s, want %s", result.RequeueAfter, defaultPendingRequeueAfter)
 	}
 }
 
@@ -580,8 +601,8 @@ func TestMissingSecretWaitsWithoutCreatingJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
-	if result.RequeueAfter != pendingRequeueAfter {
-		t.Fatalf("requeueAfter = %s, want %s", result.RequeueAfter, pendingRequeueAfter)
+	if result.RequeueAfter != defaultPendingRequeueAfter {
+		t.Fatalf("requeueAfter = %s, want %s", result.RequeueAfter, defaultPendingRequeueAfter)
 	}
 	var updated v1alpha1.ModelCache
 	if err := c.Get(context.Background(), req.NamespacedName, &updated); err != nil {

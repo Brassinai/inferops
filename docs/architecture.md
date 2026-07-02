@@ -29,7 +29,12 @@ Python SDK / CLI / YAML
   selects a compatible node, creates a retry-safe downloader Job, and marks the
   cache `Ready` only after the Job completes with the expected input hash. A
   directory without a valid `.inferops-cache.json` marker is never considered
-  ready.
+  ready. The downloader resolves mutable Hugging Face revisions to an
+  immutable provider revision and records both requested and resolved values
+  in that marker before atomic publication.
+  Deployment-created caches use a deterministic namespace/name/repository/
+  revision identity and are not owner-referenced by `ModelDeployment`, so
+  deleting an endpoint never implicitly deletes its reusable cache record.
 - The gateway owns the stable client-facing endpoint and sends traffic only to
   an `Active`, non-draining runtime.
 - The SDK and CLI produce and consume the same CRD shapes documented in
@@ -131,14 +136,29 @@ engine-specific readiness endpoints, such as SGLang's `/health_generate`.
 ## Scheduling And Failure Rules
 
 - GPU requests, when present, are whole devices. Requests and limits must be equal.
+- The activation scheduler reads node allocatable vendor resources and
+  reservations held by `Activating`/`Active` InferOps workloads. It also
+  recovers reservations from managed runtime Deployments when status is stale.
+- Node-local cache affinity is a hard placement constraint. The scheduler
+  prefers the ready cache placement by restricting activation to that node.
+- Scheduling is serialized and deterministic: compatible Ready schedulable
+  nodes are ranked by cache locality, available slots, then node name.
 - CPU-only workloads rely on ordinary Kubernetes CPU and memory scheduling.
-- `Queue` is the default full-capacity behavior. `ReplaceOldest` and
-  `ReplaceLowestPriority` are explicit eviction permissions.
+- `Queue` is the default full-capacity behavior and produces `WaitingForGPU`.
+  `Reject` produces a terminal `InsufficientGPUCapacity` condition.
+  Replacement values remain explicit permissions but are rejected until the
+  drain/rollback controller is present.
 - Kubernetes and the vendor device plugin choose physical devices. InferOps
-  records observed assignments but does not promise GPU UUID selection.
+  records its node reservation but leaves `assignedGPUs` empty until a trusted
+  runtime/device-plugin integration can report physical UUIDs.
 - A request for `Active` may remain `WaitingForCapacity` or `WaitingForGPU`.
 - A runtime is routed only after readiness succeeds.
 - Cache and activation failures are visible through phase and conditions.
+
+The scheduler uses `vendor.com/gpu`, defaulting to `nvidia.com/gpu`.
+`resources.gpu.type`, when set, must match the operator-configured GPU type
+label (default `inferops.dev/gpu-type`). See
+[gpu-scheduling.md](gpu-scheduling.md).
 
 ## Explicit Non-Goals
 

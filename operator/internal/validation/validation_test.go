@@ -44,6 +44,7 @@ func TestValidateModelDeployment(t *testing.T) {
 			d.Spec.Runtime.GPUMemoryUtilization = 0.85
 		}, wantErr: true},
 		{name: "missing model repo", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Model.Repo = "" }, wantErr: true},
+		{name: "unsupported model source", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Model.Source = "s3" }, wantErr: true},
 		{name: "missing runtime ref", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Runtime.Ref = "" }, wantErr: true},
 		{name: "invalid runtime ref", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Runtime.Ref = "Not Valid" }, wantErr: true},
 		{name: "invalid cpu quantity", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Resources.CPU = "many" }, wantErr: true},
@@ -264,12 +265,10 @@ func TestReconciliationValidator(t *testing.T) {
 			wantReason: v1alpha1.ReasonInvalidCachePath,
 		},
 		{
-			name: "missing huggingface token secret",
+			name: "public huggingface model without token secret",
 			mutate: func(d *v1alpha1.ModelDeployment) {
 				d.Spec.Secrets.HuggingFaceTokenSecretName = ""
 			},
-			wantErr:    true,
-			wantReason: v1alpha1.ReasonSecretRequired,
 		},
 		{
 			name: "invalid huggingface token secret name",
@@ -278,13 +277,6 @@ func TestReconciliationValidator(t *testing.T) {
 			},
 			wantErr:    true,
 			wantReason: v1alpha1.ReasonSecretRequired,
-		},
-		{
-			name: "non-huggingface source does not require secret",
-			mutate: func(d *v1alpha1.ModelDeployment) {
-				d.Spec.Model.Source = "s3"
-				d.Spec.Secrets.HuggingFaceTokenSecretName = ""
-			},
 		},
 	}
 

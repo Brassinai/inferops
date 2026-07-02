@@ -39,3 +39,11 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- join "," $pairs -}}
 {{- end -}}
+
+{{- define "inferops-operator.gpuNodeSelector" -}}
+{{- $pairs := list -}}
+{{- range $key, $value := .Values.scheduling.gpuNodeSelector -}}
+{{- $pairs = append $pairs (printf "%s=%s" $key $value) -}}
+{{- end -}}
+{{- join "," $pairs -}}
+{{- end -}}

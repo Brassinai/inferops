@@ -69,6 +69,10 @@ spec:
 | `scaling.maxReplicas` | `1` |
 | `routing.enabled` | `true` |
 | `routing.openAICompatible` | `true` |
+| `cache.enabled` | `true` |
+| `cache.type` | `nodeLocal` |
+| `cache.size` | Operator `cache.defaultSize` (`100Gi` by default) |
+| `cache.path` | Operator `cache.root` |
 
 ### GPU rules
 
@@ -86,6 +90,12 @@ spec:
 | `Reject` | Fail immediately if no slot |
 | `ReplaceOldest` | Evict oldest active model |
 | `ReplaceLowestPriority` | Evict lowest-priority active model |
+
+`Queue` and `Reject` are implemented by the activation controller.
+`ReplaceOldest` and `ReplaceLowestPriority` remain explicit API values but
+produce `ReplacementNotImplemented` until the drain, replacement, and rollback
+workflow is installed. They never silently degrade to `Queue` or evict a
+workload without that workflow.
 
 ### Phases
 
@@ -109,11 +119,12 @@ spec:
 | `Ready` | Aggregate readiness of the deployment |
 | `SpecValid` | Static and reconciliation-time validation passed |
 | `RuntimeResolved` | Referenced `ModelRuntime` exists and produced an effective configuration |
-| `SecretsReady` | Required Secret references are present and syntactically valid |
+| `SecretsReady` | Optional credential references are syntactically valid |
 | `CacheReady` | Model cache is ready |
 | `RoutingReady` | Gateway route is configured |
-| `Degraded` | Reconciliation is blocked but may recover |
-| `GPUAssigned` | GPU capacity assigned (GPU workloads only) |
+| `GPUAssigned` | Node-level whole-GPU capacity is reserved; this does not assert a physical GPU UUID |
+| `RuntimeReady` | Managed runtime has its desired ready replicas |
+| `ModelLoaded` | Runtime readiness indicates that the model can receive traffic |
 
 Stable `reason` values are machine-readable; `message` is for operators. `observedGeneration` must match `metadata.generation` for freshness.
 
@@ -121,11 +132,19 @@ Stable `reason` values are machine-readable; `message` is for operators. `observ
 
 | Reason | Situation |
 | --- | --- |
-| `InvalidSpec` | Generic validation failure |
+| `SpecInvalid` | Generic validation failure |
 | `RuntimeNotFound` | `spec.runtime.ref` does not match an existing `ModelRuntime` |
-| `SecretRequired` | A required Secret reference is missing or is not a valid Kubernetes name |
+| `SecretRequired` | A supplied Secret reference is not a valid Kubernetes name |
 | `InvalidCachePath` | `spec.cache.path` is not under the operator's configured cache root |
 | `InvalidDrainTimeout` | `spec.activation.drainTimeout` is not a positive duration |
+| `CachePending` / `CacheDownloading` / `CacheVerified` | Cache lifecycle projection |
+| `WaitingForGPU` | `Queue` is waiting for compatible whole-GPU capacity |
+| `InsufficientGPUCapacity` | `Reject` found no compatible free slot |
+| `RuntimeCreating` / `RuntimeReady` | Runtime Deployment lifecycle |
+
+Hugging Face credentials are optional. Public repositories work without a
+Secret; private repositories reference `secrets.huggingFaceTokenSecretName`,
+whose `token` key is consumed only by the downloader Job.
 
 ### Runtime resolution
 
@@ -168,7 +187,8 @@ spec:
 
 Required: `engine`, `protocol`, `defaultImage`, `port`, `healthPath`. Optional: `readinessPath`, `metricsPath`, `command`, `args`, `env`. Secret values belong in referenced Secrets, never in `spec.env`.
 
-Phases: `Pending`, `Ready`, `Unavailable`, `Failed`.
+Phases: `Pending`, `Ready`, `Unavailable`, `Failed`. The controller publishes a
+`Ready` condition with stable `RuntimeValidated` or `RuntimeInvalid` reasons.
 
 ## ModelCache
 
@@ -227,16 +247,31 @@ The controller records the token on the Job, so the same value causes exactly
 one attempt and is safe across reconciles. Retry tokens do not replace a Ready
 cache.
 
+Fallback polling intervals are explicit chart values:
+`cache.downloadRequeueInterval` while a Job is active and
+`cache.pendingRequeueInterval` while placement or a referenced Secret is
+unavailable. Job and Node watches normally reconcile sooner.
+
 ### Deletion
 
-Deleting a `ModelCache` object does not remove the on-disk cache files in month
-one. Explicit, retry-safe cache cleanup will be added in a future release.
+Deleting a `ModelDeployment` garbage-collects its owned Service, ConfigMap, and
+runtime Deployment. Its deterministic `ModelCache` is deliberately not owned
+by the deployment and remains available for reuse. Deleting a `ModelCache`
+object also does not remove on-disk files. Explicit, retry-safe cache cleanup
+will be added in a future release.
+
+`status.lastUsedTime` changes only when a runtime begins or ends a real
+consumer transition. Routine cache and deployment reconciliation does not
+refresh it.
 
 ## Stable names and routes
 
 For a `ModelDeployment` named `<name>` in namespace `<namespace>`:
 
 - Runtime Service: `<name>-runtime`
+- ModelCache: a label-safe name derived from namespace, deployment name, model
+  repository, and revision
+- ModelCache path: `<cache-root>/<namespace>/<derived-cache-name>`
 - Gateway route: `/models/<name>/v1/...`
 - Gateway strips `/models/<name>` and forwards `/v1/...` to the runtime Service on port `8000`
 

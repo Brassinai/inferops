@@ -8,13 +8,16 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	v1alpha1 "github.com/brassinai/inferops/operator/api/v1alpha1"
 	"github.com/brassinai/inferops/operator/controllers"
+	controllermetrics "github.com/brassinai/inferops/operator/internal/metrics"
 	"github.com/brassinai/inferops/operator/internal/resources"
 	"github.com/brassinai/inferops/operator/internal/validation"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
@@ -24,6 +27,7 @@ import (
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
@@ -78,7 +82,7 @@ func run(ctx context.Context) error {
 			},
 		},
 		Metrics: server.Options{
-			BindAddress: "0",
+			BindAddress: config.metricsAddr,
 		},
 		HealthProbeBindAddress:        config.healthAddr,
 		LeaderElection:                true,
@@ -99,6 +103,10 @@ func run(ctx context.Context) error {
 	}
 
 	eventRecorder := mgr.GetEventRecorderFor("inferops-operator")
+	metricsRecorder, err := controllermetrics.NewControllerMetrics(crmetrics.Registry)
+	if err != nil {
+		return fmt.Errorf("register controller metrics: %w", err)
+	}
 	cacheReconciler, err := controllers.NewModelCacheReconciler(
 		mgr.GetClient(),
 		controllers.ModelCacheReconcilerConfig{
@@ -107,6 +115,9 @@ func run(ctx context.Context) error {
 			CacheNodeSelector:       config.cacheNodeSelector,
 			CacheCapacityAnnotation: config.cacheCapacityAnnotation,
 			CacheRequiredResources:  config.cacheRequiredResources,
+			PendingRequeueAfter:     config.cachePendingRequeue,
+			DownloadRequeueAfter:    config.cacheDownloadRequeue,
+			Metrics:                 metricsRecorder,
 		},
 		eventRecorder,
 	)
@@ -115,6 +126,36 @@ func run(ctx context.Context) error {
 	}
 	if err := cacheReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup cache controller: %w", err)
+	}
+	deploymentReconciler, err := controllers.NewModelDeploymentController(
+		mgr.GetClient(),
+		mgr.GetScheme(),
+		controllers.ModelDeploymentControllerConfig{
+			CacheRoot:        config.cacheRoot,
+			DefaultCacheSize: config.defaultCacheSize,
+			DownloaderImage:  config.downloaderImage,
+			GPUNodeSelector:  config.gpuNodeSelector,
+			GPUTypeLabel:     config.gpuTypeLabel,
+		},
+		eventRecorder,
+		metricsRecorder,
+	)
+	if err != nil {
+		return fmt.Errorf("create ModelDeployment controller: %w", err)
+	}
+	if err := deploymentReconciler.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup ModelDeployment controller: %w", err)
+	}
+	runtimeReconciler, err := controllers.NewModelRuntimeController(
+		mgr.GetClient(),
+		eventRecorder,
+		metricsRecorder,
+	)
+	if err != nil {
+		return fmt.Errorf("create ModelRuntime controller: %w", err)
+	}
+	if err := runtimeReconciler.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("setup ModelRuntime controller: %w", err)
 	}
 
 	mgr.GetLogger().Info("starting operator manager")
@@ -126,11 +167,17 @@ func run(ctx context.Context) error {
 
 type operatorConfig struct {
 	healthAddr              string
+	metricsAddr             string
 	cacheRoot               string
+	defaultCacheSize        string
 	downloaderImage         string
 	cacheNodeSelector       map[string]string
 	cacheCapacityAnnotation string
 	cacheRequiredResources  []corev1.ResourceName
+	cachePendingRequeue     time.Duration
+	cacheDownloadRequeue    time.Duration
+	gpuNodeSelector         map[string]string
+	gpuTypeLabel            string
 }
 
 func operatorConfigFromEnv() (operatorConfig, error) {
@@ -142,13 +189,31 @@ func operatorConfigFromEnv() (operatorConfig, error) {
 	if err != nil {
 		return operatorConfig{}, fmt.Errorf("parse INFEROPS_CACHE_REQUIRED_RESOURCES: %w", err)
 	}
+	gpuNodeSelector, err := parseNodeSelector(os.Getenv("INFEROPS_GPU_NODE_SELECTOR"))
+	if err != nil {
+		return operatorConfig{}, fmt.Errorf("parse INFEROPS_GPU_NODE_SELECTOR: %w", err)
+	}
+	cachePendingRequeue, err := durationFromEnv("INFEROPS_CACHE_PENDING_REQUEUE", 30*time.Second)
+	if err != nil {
+		return operatorConfig{}, err
+	}
+	cacheDownloadRequeue, err := durationFromEnv("INFEROPS_CACHE_DOWNLOAD_REQUEUE", 10*time.Second)
+	if err != nil {
+		return operatorConfig{}, err
+	}
 	return operatorConfig{
 		healthAddr:              envOrDefault("INFEROPS_HEALTH_ADDR", ":8081"),
+		metricsAddr:             envOrDefault("INFEROPS_METRICS_ADDR", ":8080"),
 		cacheRoot:               os.Getenv("INFEROPS_CACHE_ROOT"),
+		defaultCacheSize:        envOrDefault("INFEROPS_DEFAULT_CACHE_SIZE", "100Gi"),
 		downloaderImage:         os.Getenv("INFEROPS_CACHE_DOWNLOADER_IMAGE"),
 		cacheNodeSelector:       nodeSelector,
 		cacheCapacityAnnotation: envOrDefault("INFEROPS_CACHE_CAPACITY_ANNOTATION", "inferops.dev/cache-capacity"),
 		cacheRequiredResources:  requiredResources,
+		cachePendingRequeue:     cachePendingRequeue,
+		cacheDownloadRequeue:    cacheDownloadRequeue,
+		gpuNodeSelector:         gpuNodeSelector,
+		gpuTypeLabel:            envOrDefault("INFEROPS_GPU_TYPE_LABEL", "inferops.dev/gpu-type"),
 	}, nil
 }
 
@@ -169,6 +234,25 @@ func (c operatorConfig) validate() error {
 			strings.Join(messages, ", "),
 		)
 	}
+	defaultCacheSizeValue := c.defaultCacheSize
+	if defaultCacheSizeValue == "" {
+		defaultCacheSizeValue = "100Gi"
+	}
+	defaultCacheSize, err := resource.ParseQuantity(defaultCacheSizeValue)
+	if err != nil || defaultCacheSize.Sign() <= 0 {
+		return fmt.Errorf("INFEROPS_DEFAULT_CACHE_SIZE %q must be a positive quantity", defaultCacheSizeValue)
+	}
+	gpuTypeLabel := c.gpuTypeLabel
+	if gpuTypeLabel == "" {
+		gpuTypeLabel = "inferops.dev/gpu-type"
+	}
+	if messages := utilvalidation.IsQualifiedName(gpuTypeLabel); len(messages) != 0 {
+		return fmt.Errorf(
+			"INFEROPS_GPU_TYPE_LABEL %q is invalid: %s",
+			gpuTypeLabel,
+			strings.Join(messages, ", "),
+		)
+	}
 	return nil
 }
 
@@ -177,6 +261,21 @@ func envOrDefault(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+func durationFromEnv(key string, defaultValue time.Duration) (time.Duration, error) {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue, nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", key, err)
+	}
+	if duration <= 0 {
+		return 0, fmt.Errorf("%s must be greater than zero", key)
+	}
+	return duration, nil
 }
 
 func parseNodeSelector(value string) (map[string]string, error) {

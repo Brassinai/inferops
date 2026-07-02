@@ -419,6 +419,9 @@ func TestBuildRuntimeDeployment(t *testing.T) {
 	if podSpec.AutomountServiceAccountToken == nil || *podSpec.AutomountServiceAccountToken {
 		t.Error("runtime pod must not automount a Kubernetes API token")
 	}
+	if podSpec.EnableServiceLinks == nil || *podSpec.EnableServiceLinks {
+		t.Error("runtime pod must disable service environment injection")
+	}
 	if got, want := *podSpec.TerminationGracePeriodSeconds, int64(330); got != want {
 		t.Errorf("termination grace period = %d, want %d", got, want)
 	}
@@ -429,6 +432,14 @@ func TestBuildRuntimeDeployment(t *testing.T) {
 		container.SecurityContext.AllowPrivilegeEscalation == nil ||
 		*container.SecurityContext.AllowPrivilegeEscalation {
 		t.Error("runtime container must disallow privilege escalation")
+	}
+	if container.SecurityContext.Capabilities == nil ||
+		!reflect.DeepEqual(container.SecurityContext.Capabilities.Drop, []corev1.Capability{"ALL"}) {
+		t.Error("runtime container must drop all Linux capabilities")
+	}
+	if container.SecurityContext.SeccompProfile == nil ||
+		container.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Error("runtime container must use the runtime-default seccomp profile")
 	}
 	if !reflect.DeepEqual(container.Command, runtime.Spec.Command) {
 		t.Errorf("command = %#v, want %#v", container.Command, runtime.Spec.Command)
@@ -763,6 +774,9 @@ func TestBuildCacheDownloaderJob(t *testing.T) {
 	if podSpec.AutomountServiceAccountToken == nil || *podSpec.AutomountServiceAccountToken {
 		t.Error("downloader pod must not automount a Kubernetes API token")
 	}
+	if podSpec.EnableServiceLinks == nil || *podSpec.EnableServiceLinks {
+		t.Error("downloader pod must disable service environment injection")
+	}
 	if got, want := podSpec.NodeSelector[corev1.LabelHostname], placement.NodeName; got != want {
 		t.Errorf("cache node = %q, want %q", got, want)
 	}
@@ -800,8 +814,14 @@ func TestBuildCacheDownloaderJob(t *testing.T) {
 		container.SecurityContext.ReadOnlyRootFilesystem == nil ||
 		!*container.SecurityContext.ReadOnlyRootFilesystem ||
 		container.SecurityContext.Capabilities == nil ||
-		len(container.SecurityContext.Capabilities.Drop) == 0 {
+		len(container.SecurityContext.Capabilities.Drop) == 0 ||
+		container.SecurityContext.SeccompProfile == nil ||
+		container.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 		t.Error("downloader container must have a hardened security context")
+	}
+	tmpdir := environmentVariable(container.Env, "TMPDIR")
+	if tmpdir == nil || tmpdir.Value != downloaderTemporaryMount {
+		t.Errorf("TMPDIR = %#v, want %q", tmpdir, downloaderTemporaryMount)
 	}
 	token := environmentVariable(container.Env, "HF_TOKEN")
 	if token == nil || token.ValueFrom == nil || token.ValueFrom.SecretKeyRef == nil {
@@ -824,6 +844,14 @@ func TestBuildCacheDownloaderJob(t *testing.T) {
 	}
 	if container.VolumeMounts[0].MountPath != downloaderCacheRootMount {
 		t.Errorf("downloader mount path = %q, want %q", container.VolumeMounts[0].MountPath, downloaderCacheRootMount)
+	}
+	if len(podSpec.Volumes) != 2 || podSpec.Volumes[1].EmptyDir == nil {
+		t.Fatalf("downloader volumes = %#v, want cache hostPath and temporary EmptyDir", podSpec.Volumes)
+	}
+	if len(container.VolumeMounts) != 2 ||
+		container.VolumeMounts[1].Name != downloaderTemporaryVolume ||
+		container.VolumeMounts[1].MountPath != downloaderTemporaryMount {
+		t.Errorf("downloader temporary mount = %#v, want writable %s", container.VolumeMounts, downloaderTemporaryMount)
 	}
 }
 

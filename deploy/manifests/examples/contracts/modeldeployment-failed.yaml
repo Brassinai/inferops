@@ -54,11 +54,11 @@ status:
       status: "False"
       observedGeneration: 1
       lastTransitionTime: "2026-06-11T09:15:00Z"
-      reason: CacheDownloadFailed
+      reason: CacheFailed
       message: Model revision could not be downloaded.
-    - type: Degraded
-      status: "True"
+    - type: CacheReady
+      status: "False"
       observedGeneration: 1
       lastTransitionTime: "2026-06-11T09:15:00Z"
-      reason: CacheDownloadFailed
+      reason: CacheFailed
       message: Reconciliation is blocked until the model revision is corrected.

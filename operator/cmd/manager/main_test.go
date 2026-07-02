@@ -3,6 +3,7 @@ package main
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -94,6 +95,18 @@ func TestOperatorConfigValidation(t *testing.T) {
 				config.cacheCapacityAnnotation = "not a valid annotation"
 			},
 		},
+		{
+			name: "invalid default cache size",
+			mutate: func(config *operatorConfig) {
+				config.defaultCacheSize = "not-a-quantity"
+			},
+		},
+		{
+			name: "invalid GPU type label",
+			mutate: func(config *operatorConfig) {
+				config.gpuTypeLabel = "not a label"
+			},
+		},
 	}
 	for _, test := range tests {
 		test := test
@@ -105,5 +118,21 @@ func TestOperatorConfigValidation(t *testing.T) {
 				t.Fatal("validate() expected error")
 			}
 		})
+	}
+}
+
+func TestDurationFromEnv(t *testing.T) {
+	t.Setenv("INFEROPS_TEST_DURATION", "15s")
+	got, err := durationFromEnv("INFEROPS_TEST_DURATION", time.Minute)
+	if err != nil {
+		t.Fatalf("durationFromEnv() error = %v", err)
+	}
+	if got != 15*time.Second {
+		t.Errorf("duration = %s, want 15s", got)
+	}
+
+	t.Setenv("INFEROPS_TEST_DURATION", "0s")
+	if _, err := durationFromEnv("INFEROPS_TEST_DURATION", time.Minute); err == nil {
+		t.Fatal("durationFromEnv() accepted a non-positive duration")
 	}
 }

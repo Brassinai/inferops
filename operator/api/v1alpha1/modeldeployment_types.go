@@ -63,6 +63,17 @@ const (
 	ConditionSecretsReady = "SecretsReady"
 	// ConditionCacheReady indicates that the model cache is ready for use.
 	ConditionCacheReady = "CacheReady"
+	// ConditionGPUAssigned indicates that node-level whole-GPU capacity is
+	// reserved. It does not claim a physical device UUID.
+	ConditionGPUAssigned = "GPUAssigned"
+	// ConditionRuntimeReady indicates that the managed runtime Deployment has
+	// its desired number of ready replicas.
+	ConditionRuntimeReady = "RuntimeReady"
+	// ConditionModelLoaded mirrors runtime readiness for model consumers.
+	ConditionModelLoaded = "ModelLoaded"
+	// ConditionRoutingReady indicates whether the stable Service may receive
+	// traffic from the gateway.
+	ConditionRoutingReady = "RoutingReady"
 	// ConditionReady aggregates the overall readiness of the deployment.
 	ConditionReady = "Ready"
 )
@@ -77,6 +88,21 @@ const (
 	ReasonSecretRequired      = "SecretRequired"
 	ReasonInvalidCachePath    = "InvalidCachePath"
 	ReasonInvalidDrainTimeout = "InvalidDrainTimeout"
+	ReasonCachePending        = "CachePending"
+	ReasonCacheDownloading    = "CacheDownloading"
+	ReasonCacheVerified       = "CacheVerified"
+	ReasonCacheFailed         = "CacheFailed"
+	ReasonInactive            = "Inactive"
+	ReasonGPUCapacityReserved = "GPUCapacityReserved"
+	ReasonWaitingForCapacity  = "WaitingForCapacity"
+	ReasonWaitingForGPU       = "WaitingForGPU"
+	ReasonInsufficientGPU     = "InsufficientGPUCapacity"
+	ReasonReplacementPending  = "ReplacementNotImplemented"
+	ReasonRuntimeCreating     = "RuntimeCreating"
+	ReasonRuntimeReady        = "RuntimeReady"
+	ReasonRuntimeUnavailable  = "RuntimeUnavailable"
+	ReasonRouteEnabled        = "RouteEnabled"
+	ReasonRouteDisabled       = "RouteDisabled"
 )
 
 // ModelDeploymentPhase is the observed lifecycle phase of a model deployment.

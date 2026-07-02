@@ -44,7 +44,7 @@ status:
   cache:
     state: Ready
     nodeName: gpu-node-1
-    path: /var/lib/inferops/models/qwen-waiting
+    path: /var/lib/inferops/models/default/qwen-waiting-e669f5031949-cache
   replicas:
     desired: 1
     ready: 0
@@ -62,5 +62,5 @@ status:
       status: "False"
       observedGeneration: 1
       lastTransitionTime: "2026-06-11T09:05:00Z"
-      reason: InsufficientCapacity
+      reason: WaitingForGPU
       message: No compatible GPU is currently available.

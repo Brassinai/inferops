@@ -55,9 +55,9 @@ class ModelDownloaderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
 
-            def fake_download(_args, staging: Path) -> int:
+            def fake_download(_args, staging: Path) -> tuple[int, str]:
                 (staging / "weights.bin").write_bytes(b"weights")
-                return 7
+                return 7, "resolved-sha"
 
             with (
                 mock.patch.object(sys, "argv", self._args(root)),
@@ -69,9 +69,37 @@ class ModelDownloaderTests(unittest.TestCase):
             self.assertEqual((destination / "weights.bin").read_bytes(), b"weights")
             manifest = json.loads((destination / downloader.MANIFEST_NAME).read_text())
             self.assertEqual(manifest["input_hash"], "sha256:test")
+            self.assertEqual(manifest["requested_revision"], "main")
+            self.assertEqual(manifest["revision"], "resolved-sha")
             self.assertFalse((root / "model.staging").exists())
 
     def test_existing_matching_marker_skips_download(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            destination = root / "model"
+            destination.mkdir()
+            (destination / downloader.MANIFEST_NAME).write_text(
+                json.dumps(
+                    {
+                        "repo": "org/model",
+                        "requested_revision": "main",
+                        "revision": "main",
+                        "source": "huggingface",
+                        "byte_size": 7,
+                        "completed_at": "2026-07-02T00:00:00+00:00",
+                        "input_hash": "sha256:test",
+                    }
+                )
+            )
+
+            with (
+                mock.patch.object(sys, "argv", self._args(root)),
+                mock.patch.object(downloader, "download_source") as download_source,
+            ):
+                self.assertEqual(self._run(), 0)
+            download_source.assert_not_called()
+
+    def test_incomplete_marker_is_not_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             destination = root / "model"
@@ -84,16 +112,16 @@ class ModelDownloaderTests(unittest.TestCase):
                 mock.patch.object(sys, "argv", self._args(root)),
                 mock.patch.object(downloader, "download_source") as download_source,
             ):
-                self.assertEqual(self._run(), 0)
+                self.assertEqual(self._run(), 1)
             download_source.assert_not_called()
 
     def test_publish_failure_never_exposes_incomplete_destination(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
 
-            def fake_download(_args, staging: Path) -> int:
+            def fake_download(_args, staging: Path) -> tuple[int, str]:
                 (staging / "weights.bin").write_bytes(b"weights")
-                return 7
+                return 7, "resolved-sha"
 
             original_replace = downloader.os.replace
 

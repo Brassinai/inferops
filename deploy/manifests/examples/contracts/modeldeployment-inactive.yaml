@@ -44,7 +44,7 @@ status:
   cache:
     state: Ready
     nodeName: gpu-node-1
-    path: /var/lib/inferops/models/qwen-inactive
+    path: /var/lib/inferops/models/default/qwen-inactive-59b392a9f3db-cache
   replicas:
     desired: 0
     ready: 0

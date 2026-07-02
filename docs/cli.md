@@ -57,9 +57,10 @@ chart; the operator chart also exposes the `modelRuntimes` map and
 `cache.downloaderImage`.
 
 Set `rbac.create=false` when cluster-scoped RBAC is provisioned separately.
-The supplied ClusterRole deliberately excludes Secret reads: model download
-credentials are referenced by name from downloader Jobs and resolved by
-Kubernetes rather than read into operator memory.
+The supplied ClusterRole grants only `get` on Secrets. The cache controller
+checks that a same-namespace referenced Secret contains the required key, but
+never logs or copies its value; the downloader Job receives the value through
+`secretKeyRef`.
 
 The install profile does not choose the engine for every model. Each
 deployment selects a registered runtime and independently declares whether it

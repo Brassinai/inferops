@@ -132,10 +132,15 @@ func (b Builder) BuildCacheDownloaderJob(
 			Name:      templates.CacheVolumeName,
 			MountPath: downloaderCacheRootMount,
 		},
+		{
+			Name:      downloaderTemporaryVolume,
+			MountPath: downloaderTemporaryMount,
+		},
 	}
 
 	labels := CacheLabels(cache.Name)
 	automountServiceAccountToken := false
+	enableServiceLinks := false
 	ttl := cacheTTLSecondsAfterFinished
 	deadline := cacheActiveDeadlineSeconds
 	backoff := cacheBackoffLimit
@@ -169,6 +174,7 @@ func (b Builder) BuildCacheDownloaderJob(
 				},
 				Spec: corev1.PodSpec{
 					AutomountServiceAccountToken: &automountServiceAccountToken,
+					EnableServiceLinks:           &enableServiceLinks,
 					RestartPolicy:                corev1.RestartPolicyNever,
 					NodeSelector: map[string]string{
 						corev1.LabelHostname: placement.NodeName,
@@ -182,6 +188,11 @@ func (b Builder) BuildCacheDownloaderJob(
 }
 
 const downloaderCacheRootMount = "/cache"
+
+const (
+	downloaderTemporaryVolume = "tmp"
+	downloaderTemporaryMount  = "/tmp"
+)
 
 func (b Builder) buildDownloaderContainer(
 	source, repo, revision, secretRef, destSubpath, stagingSubpath, inputHash string,
@@ -210,7 +221,10 @@ func (b Builder) buildDownloaderContainer(
 		Image:           b.cacheDownloaderImage,
 		ImagePullPolicy: imagePullPolicy(b.cacheDownloaderImage),
 		Command:         command,
-		Resources:       *b.cacheDownloaderResources.DeepCopy(),
+		Env: []corev1.EnvVar{
+			{Name: "TMPDIR", Value: downloaderTemporaryMount},
+		},
+		Resources: *b.cacheDownloaderResources.DeepCopy(),
 		SecurityContext: &corev1.SecurityContext{
 			AllowPrivilegeEscalation: boolPointer(false),
 			ReadOnlyRootFilesystem:   boolPointer(true),
@@ -219,6 +233,9 @@ func (b Builder) buildDownloaderContainer(
 			RunAsGroup:               int64Pointer(65532),
 			Capabilities: &corev1.Capabilities{
 				Drop: []corev1.Capability{"ALL"},
+			},
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: corev1.SeccompProfileTypeRuntimeDefault,
 			},
 		},
 	}
@@ -250,6 +267,12 @@ func (b Builder) buildDownloaderVolumes() []corev1.Volume {
 					Path: b.cacheRoot,
 					Type: &hostPathType,
 				},
+			},
+		},
+		{
+			Name: downloaderTemporaryVolume,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
 			},
 		},
 	}
