@@ -86,9 +86,15 @@ spec:
                   type: string
                 nodeName:
                   type: string
+                nodeUID:
+                  type: string
                 path:
                   type: string
                 size:
+                  type: string
+                reservedSize:
+                  type: string
+                inputHash:
                   type: string
                 lastUsedTime:
                   type: string

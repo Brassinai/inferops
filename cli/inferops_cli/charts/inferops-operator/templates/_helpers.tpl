@@ -31,3 +31,11 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 app.kubernetes.io/name: {{ include "inferops-operator.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
+
+{{- define "inferops-operator.cacheNodeSelector" -}}
+{{- $pairs := list -}}
+{{- range $key, $value := .Values.cache.nodeSelector -}}
+{{- $pairs = append $pairs (printf "%s=%s" $key $value) -}}
+{{- end -}}
+{{- join "," $pairs -}}
+{{- end -}}

@@ -25,7 +25,11 @@ Python SDK / CLI / YAML
   `nano-vllm`, `vllm`, `sglang`, `llama-cpp`, or another conforming runtime by
   reference. InferOps defaults to `nano-vllm`.
 - `ModelCache` records one persisted model revision and its node-local
-  location. Deactivating a model does not delete its cache.
+  location. Deactivating a model does not delete its cache. The controller
+  selects a compatible node, creates a retry-safe downloader Job, and marks the
+  cache `Ready` only after the Job completes with the expected input hash. A
+  directory without a valid `.inferops-cache.json` marker is never considered
+  ready.
 - The gateway owns the stable client-facing endpoint and sends traffic only to
   an `Active`, non-draining runtime.
 - The SDK and CLI produce and consume the same CRD shapes documented in

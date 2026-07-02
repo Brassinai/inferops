@@ -7,7 +7,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/brassinai/inferops/operator/api/v1alpha1"
-	"github.com/brassinai/inferops/operator/internal/resources"
+	"github.com/brassinai/inferops/operator/internal/paths"
 	"k8s.io/apimachinery/pkg/api/resource"
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 )
@@ -113,7 +113,7 @@ type ReconciliationValidator struct {
 
 // NewReconciliationValidator creates a validator with the configured cache root.
 func NewReconciliationValidator(cacheRoot string) (*ReconciliationValidator, error) {
-	cleanRoot, err := resources.CleanAbsolutePath(cacheRoot, "cache root")
+	cleanRoot, err := paths.CleanAbsolutePath(cacheRoot, "cache root")
 	if err != nil {
 		return nil, err
 	}
@@ -172,18 +172,17 @@ func (v *ReconciliationValidator) validateCachePath(cachePath string) error {
 	if cachePath == "" {
 		return nil
 	}
-	cleanPath, err := resources.CleanAbsolutePath(cachePath, "spec.cache.path")
+	cleanPath, err := paths.CleanAbsolutePath(cachePath, "spec.cache.path")
 	if err != nil {
 		return &ValidationError{
 			Reason:  v1alpha1.ReasonInvalidCachePath,
 			Message: err.Error(),
 		}
 	}
-	cachePrefix := strings.TrimSuffix(v.cacheRoot, "/") + "/"
-	if cleanPath != v.cacheRoot && !strings.HasPrefix(cleanPath, cachePrefix) {
+	if err := paths.UnderRoot(cleanPath, v.cacheRoot, "spec.cache.path"); err != nil {
 		return &ValidationError{
 			Reason:  v1alpha1.ReasonInvalidCachePath,
-			Message: fmt.Sprintf("spec.cache.path %q must be %q or a child of it", cleanPath, v.cacheRoot),
+			Message: err.Error(),
 		}
 	}
 	return nil
@@ -244,14 +243,26 @@ func ValidateModelCache(cache v1alpha1.ModelCache) error {
 	if cache.Spec.ModelRepo == "" {
 		return errors.New("spec.modelRepo is required")
 	}
-	if cache.Spec.Storage.Type == "" {
-		return errors.New("spec.storage.type is required")
+	if cache.Spec.Storage.Type != "nodeLocal" {
+		return fmt.Errorf("spec.storage.type %q is unsupported; expected nodeLocal", cache.Spec.Storage.Type)
 	}
 	if cache.Spec.Storage.Size == "" {
 		return errors.New("spec.storage.size is required")
 	}
+	size, err := resource.ParseQuantity(cache.Spec.Storage.Size)
+	if err != nil {
+		return fmt.Errorf("spec.storage.size %q is invalid: %w", cache.Spec.Storage.Size, err)
+	}
+	if size.Sign() <= 0 {
+		return errors.New("spec.storage.size must be greater than zero")
+	}
 	if cache.Spec.Storage.Path == "" {
 		return errors.New("spec.storage.path is required")
+	}
+	if cache.Spec.SecretRef != "" {
+		if messages := utilvalidation.IsDNS1123Subdomain(cache.Spec.SecretRef); len(messages) != 0 {
+			return fmt.Errorf("spec.secretRef %q is invalid: %s", cache.Spec.SecretRef, strings.Join(messages, ", "))
+		}
 	}
 	return nil
 }

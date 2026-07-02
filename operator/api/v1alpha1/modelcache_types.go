@@ -20,7 +20,7 @@ type ModelCache struct {
 	Status ModelCacheStatus `json:"status,omitempty"`
 }
 
-// ModelCacheSpec contains storage settings for downloaded model artifacts.
+// ModelCacheSpec contains source and destination settings for downloaded model artifacts.
 type ModelCacheSpec struct {
 	// +kubebuilder:validation:Required
 	ModelRepo string `json:"modelRepo"`
@@ -37,8 +37,11 @@ type ModelCacheStatus struct {
 	Revision           string          `json:"revision,omitempty"`
 	Checksum           string          `json:"checksum,omitempty"`
 	NodeName           string          `json:"nodeName,omitempty"`
+	NodeUID            string          `json:"nodeUID,omitempty"`
 	Path               string          `json:"path,omitempty"`
 	Size               string          `json:"size,omitempty"`
+	ReservedSize       string          `json:"reservedSize,omitempty"`
+	InputHash          string          `json:"inputHash,omitempty"`
 	LastUsedTime       metav1.Time     `json:"lastUsedTime,omitempty"`
 	Conditions         []Condition     `json:"conditions,omitempty"`
 }
@@ -64,6 +67,45 @@ const (
 	ModelCachePhaseDownloading ModelCachePhase = "Downloading"
 	ModelCachePhaseReady       ModelCachePhase = "Ready"
 	ModelCachePhaseFailed      ModelCachePhase = "Failed"
+)
+
+// Well-known condition types for ModelCache status.
+const (
+	// CacheConditionSpecValid indicates that the cache spec passed static and
+	// reconciliation-time validation.
+	CacheConditionSpecValid = "SpecValid"
+	// CacheConditionPlaced indicates that a suitable destination node or volume
+	// was selected.
+	CacheConditionPlaced = "Placed"
+	// CacheConditionDownloaded indicates that the download Job finished
+	// successfully.
+	CacheConditionDownloaded = "Downloaded"
+	// CacheConditionVerified indicates that the downloaded artifact passed
+	// integrity verification.
+	CacheConditionVerified = "Verified"
+	// CacheConditionReady aggregates overall cache readiness.
+	CacheConditionReady = "Ready"
+)
+
+// Stable condition/Event reason codes for ModelCache reconciliation.
+const (
+	CacheReasonSpecValidated         = "SpecValidated"
+	CacheReasonSpecInvalid           = "SpecInvalid"
+	CacheReasonPlaced                = "Placed"
+	CacheReasonNoEligibleNode        = "NoEligibleNode"
+	CacheReasonPinnedNodeUnavailable = "PinnedNodeUnavailable"
+	CacheReasonDownloadRunning       = "DownloadRunning"
+	CacheReasonDownloadSucceeded     = "DownloadSucceeded"
+	CacheReasonDownloadFailed        = "DownloadFailed"
+	CacheReasonVerified              = "Verified"
+	CacheReasonCacheReady            = "CacheReady"
+	CacheReasonCacheFailed           = "CacheFailed"
+	CacheReasonInsufficientCapacity  = "InsufficientCapacity"
+	CacheReasonPathConflict          = "PathConflict"
+	CacheReasonNodeLost              = "NodeLost"
+	CacheReasonIdentityChanged       = "CacheIdentityChanged"
+	CacheReasonSecretNotFound        = "SecretNotFound"
+	CacheReasonSecretKeyMissing      = "SecretKeyMissing"
 )
 
 // ModelCacheList contains a list of ModelCache.

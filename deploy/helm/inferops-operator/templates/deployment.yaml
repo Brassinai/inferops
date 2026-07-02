@@ -45,8 +45,18 @@ spec:
               value: {{ .Values.cache.root | quote }}
             - name: INFEROPS_CACHE_DOWNLOADER_IMAGE
               value: {{ .Values.cache.downloaderImage | quote }}
+            - name: INFEROPS_CACHE_CAPACITY_ANNOTATION
+              value: {{ .Values.cache.capacityAnnotation | quote }}
+            - name: INFEROPS_CACHE_NODE_SELECTOR
+              value: {{ include "inferops-operator.cacheNodeSelector" . | quote }}
+            - name: INFEROPS_CACHE_REQUIRED_RESOURCES
+              value: {{ join "," .Values.cache.requiredNodeResources | quote }}
             - name: INFEROPS_HEALTH_ADDR
               value: ":{{ .Values.probes.port }}"
+            - name: INFEROPS_OPERATOR_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           ports:
             - name: health
               containerPort: {{ .Values.probes.port }}

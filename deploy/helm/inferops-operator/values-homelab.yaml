@@ -5,6 +5,10 @@ gpu:
 
 cache:
   root: /var/lib/inferops/models
+  nodeSelector: {}
+  capacityAnnotation: inferops.dev/cache-capacity
+  requiredNodeResources:
+    - nvidia.com/gpu
 
 resources:
   requests:

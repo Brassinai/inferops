@@ -186,13 +186,51 @@ spec:
     type: nodeLocal
     size: 100Gi
     nodeName: homelab-server
-    path: /var/lib/inferops/models/qwen-chat
+    path: /var/lib/inferops/models/qwen-chat-cache
   secretRef: hf-token
 ```
 
-Required: `modelRepo`, `storage.type`, `storage.size`, `storage.path`. `nodeName` is selected by the controller.
+Required: `modelRepo`, `storage.type`, `storage.size`, `storage.path`.
+`spec.storage.nodeName` optionally pins placement; otherwise the controller
+selects a node and records it in `status.nodeName` and `status.nodeUID`.
 
 Phases: `Pending`, `Downloading`, `Ready`, `Failed`.
+
+For node-local caches, `status.size` and `status.reservedSize` report the
+configured reservation. They are not a live `du` measurement; observed disk
+usage and pressure reporting are part of MVP-503.
+
+The current reconciled source is Hugging Face and the current destination is
+node-local storage under the operator's configured cache root. S3-compatible
+sources, existing-cache copies, PVC/local-PV destinations, checksum policy,
+multi-node distribution, and eviction remain part of MVP-503 and are not
+accepted by the v1alpha1 schema yet.
+
+### Conditions
+
+| Type | Meaning |
+| --- | --- |
+| `SpecValid` | Spec passed validation |
+| `Placed` | A destination node or volume was selected |
+| `Downloaded` | Download Job finished successfully |
+| `Verified` | Integrity verification passed |
+| `Ready` | Cache is ready to mount |
+
+Stable reason codes: `SpecValidated`, `SpecInvalid`, `Placed`,
+`NoEligibleNode`, `PinnedNodeUnavailable`, `DownloadRunning`,
+`DownloadSucceeded`, `DownloadFailed`, `Verified`, `CacheReady`,
+`CacheFailed`, `InsufficientCapacity`, `PathConflict`, `NodeLost`,
+`CacheIdentityChanged`, `SecretNotFound`, and `SecretKeyMissing`.
+
+To retry a failed download, set `inferops.dev/retry` to a new non-empty token.
+The controller records the token on the Job, so the same value causes exactly
+one attempt and is safe across reconciles. Retry tokens do not replace a Ready
+cache.
+
+### Deletion
+
+Deleting a `ModelCache` object does not remove the on-disk cache files in month
+one. Explicit, retry-safe cache cleanup will be added in a future release.
 
 ## Stable names and routes
 

@@ -153,11 +153,7 @@ helm-template:
 		echo "error: operator chart rendered $$runtime_count packaged runtimes, want 4"; \
 		exit 1; \
 	}
-	@! grep -Eq '^[[:space:]]+- (pods|secrets|\*)$$' \
-		.verify/helm/inferops-operator.yaml || { \
-		echo "error: operator RBAC contains a forbidden broad or sensitive resource"; \
-		exit 1; \
-	}
+	@$(PYTHON) scripts/check_operator_rbac.py .verify/helm/inferops-operator.yaml
 	@grep -q 'pathType: Prefix' .verify/helm/inferops-gateway-homelab.yaml
 	@grep -q 'profile: "homelab"' .verify/helm/inferops-operator-homelab.yaml
 	@grep -q 'gpu.required: "true"' .verify/helm/inferops-operator-homelab.yaml

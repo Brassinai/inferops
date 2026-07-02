@@ -4,9 +4,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	pathpkg "path"
 	"strings"
 
+	"github.com/brassinai/inferops/operator/internal/paths"
 	"github.com/brassinai/inferops/operator/internal/templates"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -39,7 +39,7 @@ type Builder struct {
 
 // NewBuilder creates a resource builder with validated operator configuration.
 func NewBuilder(options BuilderOptions) (Builder, error) {
-	cacheRoot, err := CleanAbsolutePath(options.CacheRoot, "cache root")
+	cacheRoot, err := paths.CleanAbsolutePath(options.CacheRoot, "cache root")
 	if err != nil {
 		return Builder{}, err
 	}
@@ -58,7 +58,7 @@ func NewBuilder(options BuilderOptions) (Builder, error) {
 	if runtimeModelPath == "" {
 		runtimeModelPath = templates.RuntimeModelMountPath
 	}
-	runtimeModelPath, err = CleanAbsolutePath(runtimeModelPath, "runtime model path")
+	runtimeModelPath, err = paths.CleanAbsolutePath(runtimeModelPath, "runtime model path")
 	if err != nil {
 		return Builder{}, err
 	}
@@ -106,32 +106,11 @@ func validatedCacheDownloaderResources(input corev1.ResourceRequirements) (corev
 }
 
 func (b Builder) validateCachePath(cachePath string) error {
-	cleanPath, err := CleanAbsolutePath(cachePath, "cache path")
+	cleanPath, err := paths.CleanAbsolutePath(cachePath, "cache path")
 	if err != nil {
 		return err
 	}
-
-	cachePrefix := strings.TrimSuffix(b.cacheRoot, "/") + "/"
-	if !strings.HasPrefix(cleanPath, cachePrefix) {
-		return fmt.Errorf("cache path %q must be a child of configured root %q", cleanPath, b.cacheRoot)
-	}
-	return nil
-}
-
-// CleanAbsolutePath validates that a path is absolute and clean and returns
-// the cleaned path.
-func CleanAbsolutePath(path, field string) (string, error) {
-	if path == "" {
-		return "", fmt.Errorf("%s is required", field)
-	}
-	if !pathpkg.IsAbs(path) {
-		return "", fmt.Errorf("%s %q must be absolute", field, path)
-	}
-	cleanPath := pathpkg.Clean(path)
-	if cleanPath != path {
-		return "", fmt.Errorf("%s %q must be clean", field, path)
-	}
-	return cleanPath, nil
+	return paths.UnderRoot(cleanPath, b.cacheRoot, "cache path")
 }
 
 func validateModelDeploymentName(name string) error {
