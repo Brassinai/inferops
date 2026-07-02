@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
-from .errors import ExitCode, run_with_cli_errors
-from .kube import NamedRequest, build_cluster_target, resolve_client
+from .errors import run_with_cli_errors
+from .kube import DeactivationRequest, build_cluster_target, resolve_client
+from .lifecycle import (
+    lifecycle_exit_code,
+    parse_timeout,
+    progress_guidance,
+    progress_line,
+)
 from .options import add_cluster_options
 from .output import CommandResult, emit_result
 
@@ -13,9 +19,21 @@ def register(subcommands) -> None:
     parser = subcommands.add_parser(
         "deactivate",
         help="Request deactivation for a deployed model.",
-        description="Mark a deployment as inactive through the Kubernetes workflow.",
+        description="Drain and deactivate a deployment while preserving its model cache.",
     )
     parser.add_argument("name", help="Deployment name.")
+    parser.add_argument(
+        "--timeout",
+        type=parse_timeout,
+        default=300,
+        metavar="DURATION",
+        help="Maximum status wait, for example 30s or 5m. Defaults to 5m.",
+    )
+    parser.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="Submit the deactivation request without waiting for observed status.",
+    )
     add_cluster_options(parser)
     parser.set_defaults(handler=run)
 
@@ -25,15 +43,32 @@ def run(args, client=None) -> int:
 
     def action() -> int:
         cluster = build_cluster_target(args)
-        response = resolve_client(args, client).deactivate(NamedRequest(cluster=cluster, name=args.name))
+        response = resolve_client(args, client).deactivate(
+            DeactivationRequest(
+                cluster=cluster,
+                name=args.name,
+                wait=not args.no_wait,
+                timeout_seconds=args.timeout,
+                on_transition=(
+                    lambda transition: print(progress_line(transition))
+                    if args.output == "text"
+                    else None
+                ),
+            )
+        )
         deployment = response["deployment"]
+        outcome = response["outcome"]
         emit_result(
             args.output,
             CommandResult(
-                summary=f"Deactivation placeholder recorded for {deployment['name']} in namespace {deployment['namespace']}.",
+                summary=(
+                    f"Deactivation for {deployment['name']} is {outcome} "
+                    f"(phase: {deployment['phase']}); its model cache is preserved."
+                ),
                 payload=response,
+                details=progress_guidance(response),
             ),
         )
-        return ExitCode.SUCCESS
+        return lifecycle_exit_code(response)
 
     return run_with_cli_errors(action)

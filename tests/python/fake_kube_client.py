@@ -7,13 +7,16 @@ from typing import Any
 
 from inferops_cli.errors import CLIError, NotFoundError
 from inferops_cli.kube import (
+    ActivationRequest,
     CacheDeleteRequest,
     ClusterTarget,
+    DeactivationRequest,
     DeployRequest,
     DoctorRequest,
     InstallRequest,
     LogsRequest,
     NamedRequest,
+    StatusRequest,
 )
 
 
@@ -36,6 +39,7 @@ class FakeKubernetesClient:
         self._gpus: list[dict[str, Any]] = []
         self._doctor_checks: list[dict[str, Any]] = []
         self._cache_deletable: bool = True
+        self._activation_outcomes: dict[_ResourceKey, str] = {}
 
     def deploy(self, request: DeployRequest) -> dict[str, Any]:
         deployments = []
@@ -45,11 +49,25 @@ class FakeKubernetesClient:
             deployment = {
                 "name": name,
                 "namespace": request.cluster.namespace,
-                "phase": "Active"
-                if request.activate
-                else manifest["spec"]["activation"]["desiredState"],
+                "phase": (
+                    "Active"
+                    if manifest["spec"]["activation"]["desiredState"] == "Active"
+                    else "Cached"
+                ),
+                "desiredState": manifest["spec"]["activation"]["desiredState"],
+                "whenFull": manifest["spec"]["activation"].get("whenFull", "Queue"),
                 "runtime": manifest["spec"]["runtime"]["ref"],
                 "model": manifest["spec"]["model"]["repo"],
+                "endpoint": f"/models/{name}/v1",
+                "serviceName": f"{name}-runtime",
+                "assignedNode": "",
+                "assignedGPUs": [],
+                "cache": {},
+                "replicas": {},
+                "modelLoaded": False,
+                "observedGeneration": 1,
+                "generation": 1,
+                "conditions": [],
                 "action": "created" if key not in self._deployments else "replaced",
             }
             self._deployments[key] = deployment
@@ -69,7 +87,9 @@ class FakeKubernetesClient:
                 "referencesKnown": True,
                 "issues": [],
             }
-            deployments.append(deployment)
+            result = deployment.copy()
+            result["phase"] = manifest["spec"]["activation"]["desiredState"]
+            deployments.append(result)
 
         return {
             "mode": "fake",
@@ -78,36 +98,198 @@ class FakeKubernetesClient:
             "activate": request.activate,
             "whenFull": request.when_full,
             "deployments": sorted(deployments, key=lambda item: item["name"]),
-            "message": "Placeholder deploy executed against the fake Kubernetes client.",
+            "message": "Deployment applied to the fake Kubernetes client.",
         }
 
-    def activate(self, request: NamedRequest) -> dict[str, Any]:
+    def activate(self, request: ActivationRequest) -> dict[str, Any]:
         deployment = self._require_deployment(request)
-        deployment["phase"] = "Active"
+        deployment["desiredState"] = "Active"
+        if request.when_full is not None:
+            deployment["whenFull"] = request.when_full
+        if not request.wait:
+            return {
+                "mode": "fake",
+                "cluster": request.cluster.to_safe_dict(),
+                "deployment": deployment.copy(),
+                "operation": "activate",
+                "outcome": "requested",
+                "transitions": [],
+            }
+
+        key = self._resource_key(request.cluster, request.name)
+        outcome = self._activation_outcomes.get(key, "active")
+        if outcome == "waiting" and deployment["whenFull"] != "Queue":
+            outcome = "timeout"
+        conditions: list[dict[str, Any]] = []
+        if outcome in {"waiting", "timeout"}:
+            deployment["phase"] = "WaitingForGPU"
+            conditions = [
+                {
+                    "type": "Ready",
+                    "status": "False",
+                    "reason": "InsufficientGPU",
+                    "message": "waiting for a compatible GPU",
+                }
+            ]
+        elif outcome == "rejected":
+            deployment["phase"] = "Failed"
+            conditions = [
+                {
+                    "type": "Ready",
+                    "status": "False",
+                    "reason": "CapacityRejected",
+                    "message": "capacity is full and the policy is Reject",
+                }
+            ]
+        elif outcome == "failed":
+            deployment["phase"] = "Failed"
+            conditions = [
+                {
+                    "type": "Ready",
+                    "status": "False",
+                    "reason": "RuntimeFailed",
+                    "message": "runtime failed to become ready",
+                }
+            ]
+        else:
+            deployment["phase"] = "Active"
+            deployment["modelLoaded"] = True
+            deployment["replicas"] = {"desired": 1, "ready": 1}
+            conditions = [
+                {
+                    "type": "Ready",
+                    "status": "True",
+                    "reason": "RuntimeReady",
+                    "message": "runtime is ready",
+                }
+            ]
+        deployment["conditions"] = conditions
+        transition = {
+            "phase": deployment["phase"],
+            "observedGeneration": deployment["observedGeneration"],
+            "reason": conditions[0]["reason"],
+            "message": conditions[0]["message"],
+        }
+        if request.on_transition is not None:
+            request.on_transition(transition)
         return {
             "mode": "fake",
             "cluster": request.cluster.to_safe_dict(),
             "deployment": deployment.copy(),
-            "message": "Placeholder activation executed against the fake Kubernetes client.",
+            "operation": "activate",
+            "outcome": outcome,
+            "transitions": [transition],
         }
 
-    def deactivate(self, request: NamedRequest) -> dict[str, Any]:
+    def deactivate(self, request: DeactivationRequest) -> dict[str, Any]:
         deployment = self._require_deployment(request)
-        deployment["phase"] = "Inactive"
+        deployment["desiredState"] = "Inactive"
+        if not request.wait:
+            return {
+                "mode": "fake",
+                "cluster": request.cluster.to_safe_dict(),
+                "deployment": deployment.copy(),
+                "operation": "deactivate",
+                "outcome": "requested",
+                "transitions": [],
+            }
+        deployment["phase"] = "Cached"
+        deployment["modelLoaded"] = False
+        deployment["replicas"] = {"desired": 0, "ready": 0}
+        deployment["conditions"] = [
+            {
+                "type": "Ready",
+                "status": "False",
+                "reason": "Inactive",
+                "message": "runtime is inactive and the cache is preserved",
+            }
+        ]
+        transition = {
+            "phase": "Cached",
+            "observedGeneration": deployment["observedGeneration"],
+            "reason": "Inactive",
+            "message": "runtime is inactive and the cache is preserved",
+        }
+        if request.on_transition is not None:
+            request.on_transition(transition)
         return {
             "mode": "fake",
             "cluster": request.cluster.to_safe_dict(),
             "deployment": deployment.copy(),
-            "message": "Placeholder deactivation executed against the fake Kubernetes client.",
+            "operation": "deactivate",
+            "outcome": "inactive",
+            "transitions": [transition],
         }
 
-    def status(self, request: NamedRequest) -> dict[str, Any]:
+    def status(self, request: StatusRequest) -> dict[str, Any]:
         deployment = self._require_deployment(request)
-        return {
+        response = {
             "mode": "fake",
             "cluster": request.cluster.to_safe_dict(),
             "deployment": deployment.copy(),
-            "message": "Placeholder status fetched from the fake Kubernetes client.",
+            "message": "Deployment status fetched from the fake Kubernetes client.",
+        }
+        if request.watch:
+            phase = deployment["phase"]
+            if phase == "Active":
+                outcome = "active"
+            elif (
+                phase in {"WaitingForCapacity", "WaitingForGPU"}
+                and deployment["whenFull"] == "Queue"
+            ):
+                outcome = "waiting"
+            elif phase == "Failed":
+                outcome = "failed"
+            elif phase in {"Cached", "Pending"}:
+                outcome = "inactive"
+            else:
+                outcome = "timeout"
+            transition = {
+                "phase": phase,
+                "observedGeneration": deployment["observedGeneration"],
+            }
+            if request.on_transition is not None:
+                request.on_transition(transition)
+            response.update(
+                {
+                    "operation": "status",
+                    "outcome": outcome,
+                    "transitions": [transition],
+                }
+            )
+        return response
+
+    def models(self, cluster: ClusterTarget) -> dict[str, Any]:
+        return {
+            "mode": "fake",
+            "cluster": cluster.to_safe_dict(),
+            "models": sorted(
+                (
+                    deployment.copy()
+                    for key, deployment in self._deployments.items()
+                    if key.namespace == cluster.namespace
+                    and key.context == cluster.context
+                ),
+                key=lambda item: item["name"],
+            ),
+        }
+
+    def endpoints(self, cluster: ClusterTarget) -> dict[str, Any]:
+        models = self.models(cluster)["models"]
+        return {
+            "mode": "fake",
+            "cluster": cluster.to_safe_dict(),
+            "endpoints": [
+                {
+                    "name": model["name"],
+                    "namespace": model["namespace"],
+                    "phase": model["phase"],
+                    "ready": model["phase"] == "Active",
+                    "endpoint": model["endpoint"],
+                    "serviceName": model["serviceName"],
+                }
+                for model in models
+            ],
         }
 
     def logs(self, request: LogsRequest) -> dict[str, Any]:
@@ -115,7 +297,7 @@ class FakeKubernetesClient:
             NamedRequest(cluster=request.cluster, name=request.name)
         )
         lines = [
-            f"{deployment['name']}: placeholder log stream from fake Kubernetes client",
+            f"{deployment['name']}: runtime log stream from fake Kubernetes client",
             f"{deployment['name']}: phase={deployment['phase']} namespace={deployment['namespace']}",
         ]
         return {
@@ -124,7 +306,7 @@ class FakeKubernetesClient:
             "deployment": deployment.copy(),
             "tail": request.tail,
             "lines": lines[: request.tail],
-            "message": "Placeholder logs fetched from the fake Kubernetes client.",
+            "message": "Runtime logs fetched from the fake Kubernetes client.",
         }
 
     def gpu_list(self, cluster: ClusterTarget) -> dict[str, Any]:
@@ -196,12 +378,16 @@ class FakeKubernetesClient:
         deployment = self._require_deployment(request).copy()
         key = self._resource_key(request.cluster, request.name)
         self._deployments.pop(key, None)
+        cache = self._caches.get(key)
+        if cache is not None:
+            cache["referencedBy"] = []
         return {
             "mode": "fake",
             "cluster": request.cluster.to_safe_dict(),
             "deployment": deployment,
             "deleted": True,
-            "message": "Placeholder delete executed against the fake Kubernetes client.",
+            "cachePreserved": True,
+            "message": "Deployment deleted; model cache preserved.",
         }
 
     def doctor(self, request: DoctorRequest) -> dict[str, Any]:

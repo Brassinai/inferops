@@ -9,11 +9,13 @@ from . import (
     delete,
     deploy,
     doctor,
+    endpoints,
     generate,
     gpu,
     init,
     install,
     logs,
+    models,
     status,
 )
 from .errors import run_with_cli_errors
@@ -34,11 +36,13 @@ def build_parser() -> CLIArgumentParser:
     delete.register(subcommands)
     deploy.register(subcommands)
     doctor.register(subcommands)
+    endpoints.register(subcommands)
     generate.register(subcommands)
     gpu.register(subcommands)
     init.register(subcommands)
     install.register(subcommands)
     logs.register(subcommands)
+    models.register(subcommands)
     status.register(subcommands)
     return parser
 

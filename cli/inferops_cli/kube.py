@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from .errors import CLIError
 
@@ -45,6 +45,49 @@ class NamedRequest:
 
     cluster: ClusterTarget
     name: str
+
+
+@dataclass(frozen=True)
+class ActivationRequest:
+    """Inputs for an activation request and its status wait."""
+
+    cluster: ClusterTarget
+    name: str
+    when_full: str | None = None
+    wait: bool = True
+    timeout_seconds: float = 300
+    poll_interval_seconds: float = 1
+    on_transition: Callable[[dict[str, Any]], None] | None = field(
+        default=None, compare=False, repr=False
+    )
+
+
+@dataclass(frozen=True)
+class DeactivationRequest:
+    """Inputs for a deactivation request and its status wait."""
+
+    cluster: ClusterTarget
+    name: str
+    wait: bool = True
+    timeout_seconds: float = 300
+    poll_interval_seconds: float = 1
+    on_transition: Callable[[dict[str, Any]], None] | None = field(
+        default=None, compare=False, repr=False
+    )
+
+
+@dataclass(frozen=True)
+class StatusRequest:
+    """Inputs for reading or watching deployment status."""
+
+    cluster: ClusterTarget
+    name: str
+    watch: bool = False
+    timeout_seconds: float = 300
+    poll_interval_seconds: float = 1
+    on_transition: Callable[[dict[str, Any]], None] | None = field(
+        default=None, compare=False, repr=False
+    )
 
 
 @dataclass(frozen=True)
@@ -90,14 +133,20 @@ class KubernetesClient(Protocol):
     def deploy(self, request: DeployRequest) -> dict[str, Any]:
         """Apply one application deployment request."""
 
-    def activate(self, request: NamedRequest) -> dict[str, Any]:
+    def activate(self, request: ActivationRequest) -> dict[str, Any]:
         """Activate one deployment."""
 
-    def deactivate(self, request: NamedRequest) -> dict[str, Any]:
+    def deactivate(self, request: DeactivationRequest) -> dict[str, Any]:
         """Deactivate one deployment."""
 
-    def status(self, request: NamedRequest) -> dict[str, Any]:
+    def status(self, request: StatusRequest) -> dict[str, Any]:
         """Fetch deployment status."""
+
+    def models(self, cluster: ClusterTarget) -> dict[str, Any]:
+        """List model deployments."""
+
+    def endpoints(self, cluster: ClusterTarget) -> dict[str, Any]:
+        """List model endpoints."""
 
     def logs(self, request: LogsRequest) -> dict[str, Any]:
         """Fetch deployment logs."""

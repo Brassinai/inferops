@@ -85,8 +85,12 @@ Use the CLI for common deployment operations:
 ```bash
 inferops deploy app.py
 inferops generate app.py
+inferops activate support-bot
 inferops status support-bot
+inferops models
+inferops endpoints
 inferops logs support-bot
+inferops deactivate support-bot
 inferops delete support-bot
 ```
 

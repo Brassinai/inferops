@@ -18,11 +18,13 @@ from inferops_cli import (
     delete,
     deploy,
     doctor,
+    endpoints,
     gpu,
     init,
     install,
     logs,
     main,
+    models,
     status,
 )
 from inferops_cli.kube import ClusterTarget
@@ -46,6 +48,9 @@ def make_args(**overrides) -> argparse.Namespace:
         "tailscale_hostname": None,
         "charts_dir": None,
         "checks": None,
+        "no_wait": False,
+        "timeout": 300,
+        "watch": False,
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -62,9 +67,11 @@ class CLICommandParserTest(unittest.TestCase):
             "deactivate",
             "deploy",
             "doctor",
+            "endpoints",
             "gpu",
             "install",
             "logs",
+            "models",
             "status",
         ):
             self.assertIn(command, help_text)
@@ -178,6 +185,16 @@ class CLICommandHandlerTest(unittest.TestCase):
                 make_args(name="qwen-chat"),
                 fake_client,
             )
+            models_stdout, _, _ = self._run(
+                models.run,
+                make_args(),
+                fake_client,
+            )
+            endpoints_stdout, _, _ = self._run(
+                endpoints.run,
+                make_args(),
+                fake_client,
+            )
             cache_stdout, _, _ = self._run(
                 cache.run_list,
                 make_args(),
@@ -215,15 +232,21 @@ class CLICommandHandlerTest(unittest.TestCase):
         )
         self.assertEqual(json.loads(status_stdout)["deployment"]["name"], "qwen-chat")
         self.assertEqual(json.loads(activate_stdout)["deployment"]["phase"], "Active")
-        self.assertIn("placeholder log stream", json.loads(logs_stdout)["lines"][0])
+        self.assertIn("runtime log stream", json.loads(logs_stdout)["lines"][0])
         self.assertEqual(
-            json.loads(deactivate_stdout)["deployment"]["phase"], "Inactive"
+            json.loads(deactivate_stdout)["deployment"]["phase"], "Cached"
+        )
+        self.assertEqual(json.loads(models_stdout)["models"][0]["name"], "qwen-chat")
+        self.assertEqual(
+            json.loads(endpoints_stdout)["endpoints"][0]["endpoint"],
+            "/models/qwen-chat/v1",
         )
         self.assertEqual(json.loads(cache_stdout)["caches"][0]["name"], "qwen-chat")
         self.assertTrue(json.loads(cache_delete_stdout)["deleted"])
         self.assertEqual(json.loads(gpu_stdout)["gpus"], [])
         self.assertEqual(json.loads(install_stdout)["install"]["profile"], "homelab")
         self.assertTrue(json.loads(delete_stdout)["deleted"])
+        self.assertTrue(json.loads(delete_stdout)["cachePreserved"])
         self.assertEqual(json.loads(init_stdout)["mode"], "placeholder")
 
     def test_runtime_command_reports_invalid_kubeconfig(self) -> None:
