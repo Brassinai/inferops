@@ -1,0 +1,18 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- if or (lt (int .Values.podDisruptionBudget.minAvailable) 0) (gt (int .Values.podDisruptionBudget.minAvailable) (int .Values.replicaCount)) }}
+{{- fail "podDisruptionBudget.minAvailable must be between 0 and replicaCount" }}
+{{- end }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "inferops-gateway.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inferops-gateway.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      {{- include "inferops-gateway.selectorLabels" . | nindent 6 }}
+{{- end }}

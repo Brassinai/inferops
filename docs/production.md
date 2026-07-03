@@ -20,7 +20,8 @@ The operator needs:
 - Read `ModelDeployment` and write its status
 - Read `ModelRuntime` and write its status
 - Create/read/update `ModelCache` and write its status
-- Create/read/update/delete `Deployment`, `Service`, `ConfigMap`, and `Job`
+- Create/read/update/delete `Deployment`, `Service`, `ConfigMap`, `Job`, and
+  `PodDisruptionBudget`
 - Get referenced `Secret` objects only
 - Read `Node` (scheduling decisions)
 - Emit `Events`
@@ -73,13 +74,43 @@ Watch these:
 
 ## Upgrades
 
-- Helm upgrade the operator and gateway independently.
+- Back up the InferOps custom resources and referenced Secrets before changing
+  CRDs or controller images. See [Backup and disaster recovery](disaster-recovery.md).
+- Run `make verify`, then server-side dry-run the new CRDs against the target
+  cluster.
+- Apply CRDs before upgrading the operator. Helm does not upgrade files from a
+  chart's `crds/` directory:
+
+  ```bash
+  kubectl apply --server-side --dry-run=server -f deploy/manifests/crds
+  kubectl apply --server-side -f deploy/manifests/crds
+  ```
+
+  `inferops install` performs this CRD apply automatically before its Helm
+  upgrades.
+
+- Helm upgrade the operator and gateway independently with `--atomic --wait`.
 - The operator uses namespace-scoped Lease leader election. Set
   `replicaCount` above one for control-plane failover; only the elected replica
   runs reconcilers.
-- CRD changes require applying new manifests before upgrading the operator.
 - Runtime image updates are triggered by changing `spec.runtime.image` or the `ModelRuntime` default image.
 - Activation is not automatic on image change; re-activate explicitly.
+
+The validating admission configuration uses `failurePolicy: Fail`: malformed
+InferOps resources are rejected before reconciliation, and writes are also
+rejected while every webhook endpoint is unavailable. Existing runtime traffic
+does not depend on the webhook. The chart creates a self-signed serving
+certificate and preserves it through Helm upgrades with `lookup`; deleting the
+`*-webhook-certs` Secret intentionally rotates the CA and serving certificate
+on the next upgrade. GitOps renderers that cannot use cluster-side `lookup`
+should provide a stable TLS Secret and PEM CA through
+`webhook.tls.existingSecret` and `webhook.tls.caBundle`; the Secret must contain
+`tls.crt` and `tls.key`.
+
+The operator and gateway charts create `PodDisruptionBudget` objects by
+default. A single-replica component therefore blocks voluntary eviction.
+Increase replicas before planned node maintenance, or explicitly adjust the
+chart's `podDisruptionBudget` values after accepting the availability impact.
 
 ## Known limitations
 

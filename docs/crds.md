@@ -140,6 +140,8 @@ Stable `reason` values are machine-readable; `message` is for operators. `observ
 | `CachePending` / `CacheDownloading` / `CacheVerified` | Cache lifecycle projection |
 | `WaitingForGPU` | `Queue` is waiting for compatible whole-GPU capacity |
 | `InsufficientGPUCapacity` | `Reject` found no compatible free slot |
+| `InsufficientComputeCapacity` | The selected cache node cannot fit the aggregate runtime CPU or memory request in its allocatable capacity |
+| `SchedulingConstraintsUnsatisfied` | The selected cache node does not match the requested labels or has an untolerated scheduling taint |
 | `RuntimeCreating` / `RuntimeReady` | Runtime Deployment lifecycle |
 
 Hugging Face credentials are optional. Public repositories work without a
@@ -165,6 +167,47 @@ fallbacks preserve compatibility if older objects omit them.
 Runtime lookup failures caused by API availability, authorization, or request
 cancellation are returned for retry. Only an actual Kubernetes `NotFound`
 result produces the stable `RuntimeNotFound` condition.
+
+### Runtime scheduling and disruption protection
+
+`spec.scheduling` adds constraints to the managed runtime pods. InferOps keeps
+the model cache's node affinity authoritative and rejects a contradictory
+hostname selector instead of creating a pod that can never schedule:
+
+```yaml
+spec:
+  scheduling:
+    nodeSelector:
+      inferops.dev/pool: inference
+    tolerations:
+      - key: dedicated
+        operator: Equal
+        value: inference
+        effect: NoSchedule
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+  availability:
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+```
+
+The operator supplies the topology-spread label selector; users cannot broaden
+it to unrelated pods. Before creating a runtime Deployment, the controller
+checks node selectors, `NoSchedule`/`NoExecute` taints, and whether the
+aggregate replica request fits the selected node's total allocatable CPU and
+memory. Kubernetes scheduling remains authoritative for live free capacity.
+Node selectors and tolerations are also copied to the generated `ModelCache`
+so its downloader can reach the same constrained node. With a single
+node-local cache copy, required cache affinity can limit the useful spread;
+prefer `ScheduleAnyway` until cache copies exist on multiple topology domains.
+
+An active runtime gets a `PodDisruptionBudget` by default. With one replica,
+the default `minAvailable: 1` deliberately prevents voluntary eviction that
+would cause downtime. Set `enabled: false` or an explicit `minAvailable` only
+when that availability tradeoff is understood.
 
 ## ModelRuntime
 
@@ -206,6 +249,13 @@ spec:
     type: nodeLocal
     size: 100Gi
     nodeName: homelab-server
+    nodeSelector:
+      inferops.dev/pool: inference
+    tolerations:
+      - key: dedicated
+        operator: Equal
+        value: inference
+        effect: NoSchedule
     path: /var/lib/inferops/models/qwen-chat-cache
   secretRef: hf-token
 ```
@@ -213,6 +263,9 @@ spec:
 Required: `modelRepo`, `storage.type`, `storage.size`, `storage.path`.
 `spec.storage.nodeName` optionally pins placement; otherwise the controller
 selects a node and records it in `status.nodeName` and `status.nodeUID`.
+`spec.storage.nodeSelector` and `spec.storage.tolerations` constrain both
+placement and the downloader Job. Generated caches inherit these fields from
+their `ModelDeployment`.
 
 Phases: `Pending`, `Downloading`, `Ready`, `Failed`.
 
@@ -254,9 +307,10 @@ unavailable. Job and Node watches normally reconcile sooner.
 
 ### Deletion
 
-Deleting a `ModelDeployment` garbage-collects its owned Service, ConfigMap, and
-runtime Deployment. Its deterministic `ModelCache` is deliberately not owned
-by the deployment and remains available for reuse. Deleting a `ModelCache`
+Deleting a `ModelDeployment` garbage-collects its owned Service, ConfigMap,
+runtime Deployment, and `PodDisruptionBudget`. Its deterministic `ModelCache`
+is deliberately not owned by the deployment and remains available for reuse.
+Deleting a `ModelCache`
 object also does not remove on-disk files. Explicit, retry-safe cache cleanup
 will be added in a future release.
 

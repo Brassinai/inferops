@@ -14,6 +14,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,6 +37,7 @@ func TestLifecycleInactiveCreatesStableResourcesWithoutRuntime(t *testing.T) {
 	assertObjectExists(t, c, types.NamespacedName{Namespace: deployment.Namespace, Name: templates.RuntimeServiceName(deployment.Name)}, &corev1.Service{})
 	assertObjectExists(t, c, types.NamespacedName{Namespace: deployment.Namespace, Name: deployment.Name + "-runtime-config"}, &corev1.ConfigMap{})
 	assertObjectMissing(t, c, types.NamespacedName{Namespace: deployment.Namespace, Name: templates.RuntimeServiceName(deployment.Name)}, &appsv1.Deployment{})
+	assertObjectMissing(t, c, types.NamespacedName{Namespace: deployment.Namespace, Name: templates.RuntimeServiceName(deployment.Name)}, &policyv1.PodDisruptionBudget{})
 
 	cache := getLifecycleCache(t, c, deployment)
 	if len(cache.OwnerReferences) != 0 {
@@ -68,6 +70,11 @@ func TestLifecycleActiveReservesGPUAndProjectsReadiness(t *testing.T) {
 	reconcileLifecycle(t, reconciler, deployment)
 	var runtimeDeployment appsv1.Deployment
 	getObject(t, c, types.NamespacedName{Namespace: deployment.Namespace, Name: "qwen-runtime"}, &runtimeDeployment)
+	var pdb policyv1.PodDisruptionBudget
+	getObject(t, c, types.NamespacedName{Namespace: deployment.Namespace, Name: "qwen-runtime"}, &pdb)
+	if pdb.Spec.MinAvailable == nil || pdb.Spec.MinAvailable.IntValue() != 1 {
+		t.Fatalf("runtime PodDisruptionBudget minAvailable = %#v, want 1", pdb.Spec.MinAvailable)
+	}
 	if runtimeDeployment.Spec.Template.Spec.Affinity == nil {
 		t.Fatal("runtime Deployment has no cache-local node affinity")
 	}
@@ -101,6 +108,69 @@ func TestLifecycleActiveReservesGPUAndProjectsReadiness(t *testing.T) {
 	}
 	assertLifecycleCondition(t, active.Status.Conditions, v1alpha1.ConditionGPUAssigned, metav1.ConditionTrue, v1alpha1.ReasonGPUCapacityReserved)
 	assertLifecycleCondition(t, active.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionTrue, v1alpha1.ReasonRuntimeReady)
+}
+
+func TestLifecycleRuntimeNodePreflight(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		mutate     func(*v1alpha1.ModelDeployment, *corev1.Node)
+		wantPhase  v1alpha1.ModelDeploymentPhase
+		wantReason string
+	}{
+		{
+			name: "insufficient aggregate CPU waits",
+			mutate: func(deployment *v1alpha1.ModelDeployment, node *corev1.Node) {
+				deployment.Spec.Resources.CPU = "64"
+				node.Status.Allocatable[corev1.ResourceCPU] = resource.MustParse("32")
+			},
+			wantPhase:  v1alpha1.ModelDeploymentPhaseWaitingForCapacity,
+			wantReason: v1alpha1.ReasonInsufficientCompute,
+		},
+		{
+			name: "node selector mismatch fails visibly",
+			mutate: func(deployment *v1alpha1.ModelDeployment, node *corev1.Node) {
+				deployment.Spec.Scheduling.NodeSelector = map[string]string{
+					"inferops.dev/pool": "inference",
+				}
+				node.Labels = map[string]string{"inferops.dev/pool": "general"}
+			},
+			wantPhase:  v1alpha1.ModelDeploymentPhaseFailed,
+			wantReason: v1alpha1.ReasonSchedulingBlocked,
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			deployment := lifecycleDeployment(
+				v1alpha1.ActivationDesiredStateActive,
+				v1alpha1.ActivationWhenFullQueue,
+			)
+			node := lifecycleGPUNode("gpu-node-1", 1)
+			test.mutate(deployment, node)
+			cache := lifecycleReadyCache(t, deployment, "gpu-node-1")
+			c, reconciler := lifecycleTestController(t, deployment, lifecycleRuntime(), cache, node)
+
+			reconcileLifecycle(t, reconciler, deployment)
+			var updated v1alpha1.ModelDeployment
+			getObject(t, c, client.ObjectKeyFromObject(deployment), &updated)
+			if updated.Status.Phase != test.wantPhase {
+				t.Fatalf("phase = %q, want %q", updated.Status.Phase, test.wantPhase)
+			}
+			assertLifecycleCondition(
+				t,
+				updated.Status.Conditions,
+				v1alpha1.ConditionReady,
+				metav1.ConditionFalse,
+				test.wantReason,
+			)
+			key := types.NamespacedName{Namespace: deployment.Namespace, Name: "qwen-runtime"}
+			assertObjectMissing(t, c, key, &appsv1.Deployment{})
+			assertObjectMissing(t, c, key, &policyv1.PodDisruptionBudget{})
+		})
+	}
 }
 
 func TestLifecycleGPUWhenFullPolicies(t *testing.T) {
@@ -496,7 +566,11 @@ func lifecycleReadyCache(
 			Revision:  deployment.Spec.Model.Revision,
 			SecretRef: deployment.Spec.Secrets.HuggingFaceTokenSecretName,
 			Storage: v1alpha1.ModelCacheStorage{
-				Type: "nodeLocal", Size: "20Gi", Path: path,
+				Type:         "nodeLocal",
+				Size:         "20Gi",
+				Path:         path,
+				NodeSelector: copyStringMap(deployment.Spec.Scheduling.NodeSelector),
+				Tolerations:  copyTolerations(deployment.Spec.Scheduling.Tolerations),
 			},
 		},
 		Status: v1alpha1.ModelCacheStatus{
@@ -517,7 +591,9 @@ func lifecycleGPUNode(name string, count int64) *corev1.Node {
 		ObjectMeta: metav1.ObjectMeta{Name: name, UID: types.UID(name + "-uid")},
 		Status: corev1.NodeStatus{
 			Allocatable: corev1.ResourceList{
-				"nvidia.com/gpu": *resource.NewQuantity(count, resource.DecimalSI),
+				"nvidia.com/gpu":      *resource.NewQuantity(count, resource.DecimalSI),
+				corev1.ResourceCPU:    resource.MustParse("32"),
+				corev1.ResourceMemory: resource.MustParse("128Gi"),
 			},
 			Conditions: []corev1.NodeCondition{{
 				Type: corev1.NodeReady, Status: corev1.ConditionTrue,

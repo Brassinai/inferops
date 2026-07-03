@@ -61,6 +61,26 @@ func TestValidateModelDeployment(t *testing.T) {
 			d.Spec.Scaling.MinReplicas = 0
 			d.Spec.Scaling.MaxReplicas = 0
 		}, wantErr: true},
+		{name: "mutable runtime image", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Runtime.Image = "ghcr.io/inferops/runtime:latest"
+		}, wantErr: true},
+		{name: "invalid node selector", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Scheduling.NodeSelector = map[string]string{"not a key": "value"}
+		}, wantErr: true},
+		{name: "invalid toleration", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Scheduling.Tolerations = []v1alpha1.Toleration{{Operator: "Equal"}}
+		}, wantErr: true},
+		{name: "invalid topology spread", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Scheduling.TopologySpreadConstraints = []v1alpha1.TopologySpreadConstraint{{
+				MaxSkew:           0,
+				TopologyKey:       "topology.kubernetes.io/zone",
+				WhenUnsatisfiable: "ScheduleAnyway",
+			}}
+		}, wantErr: true},
+		{name: "PDB exceeds replicas", mutate: func(d *v1alpha1.ModelDeployment) {
+			minAvailable := int32(2)
+			d.Spec.Availability.PodDisruptionBudget.MinAvailable = &minAvailable
+		}, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -86,7 +106,7 @@ func TestValidateModelRuntime(t *testing.T) {
 		Spec: v1alpha1.ModelRuntimeSpec{
 			Engine:       "nano-vllm",
 			Protocol:     "openai",
-			DefaultImage: "ghcr.io/inferops/nano-vllm:latest",
+			DefaultImage: "ghcr.io/inferops/nano-vllm:v0.1.0",
 			Port:         8000,
 			HealthPath:   "/health",
 		},
@@ -106,6 +126,15 @@ func TestValidateModelRuntime(t *testing.T) {
 		{name: "invalid port zero", mutate: func(r *v1alpha1.ModelRuntime) { r.Spec.Port = 0 }, wantErr: true},
 		{name: "invalid port too high", mutate: func(r *v1alpha1.ModelRuntime) { r.Spec.Port = 70000 }, wantErr: true},
 		{name: "missing healthPath", mutate: func(r *v1alpha1.ModelRuntime) { r.Spec.HealthPath = "" }, wantErr: true},
+		{name: "mutable image", mutate: func(r *v1alpha1.ModelRuntime) {
+			r.Spec.DefaultImage = "ghcr.io/inferops/nano-vllm:latest"
+		}, wantErr: true},
+		{name: "invalid health path", mutate: func(r *v1alpha1.ModelRuntime) {
+			r.Spec.HealthPath = "health"
+		}, wantErr: true},
+		{name: "invalid environment name", mutate: func(r *v1alpha1.ModelRuntime) {
+			r.Spec.Env = map[string]string{"NOT VALID": "value"}
+		}, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -148,6 +177,15 @@ func TestValidateModelCache(t *testing.T) {
 		{name: "missing storage type", mutate: func(c *v1alpha1.ModelCache) { c.Spec.Storage.Type = "" }, wantErr: true},
 		{name: "missing storage size", mutate: func(c *v1alpha1.ModelCache) { c.Spec.Storage.Size = "" }, wantErr: true},
 		{name: "missing storage path", mutate: func(c *v1alpha1.ModelCache) { c.Spec.Storage.Path = "" }, wantErr: true},
+		{name: "relative storage path", mutate: func(c *v1alpha1.ModelCache) {
+			c.Spec.Storage.Path = "models/qwen"
+		}, wantErr: true},
+		{name: "invalid storage node selector", mutate: func(c *v1alpha1.ModelCache) {
+			c.Spec.Storage.NodeSelector = map[string]string{"not a key": "value"}
+		}, wantErr: true},
+		{name: "invalid storage toleration", mutate: func(c *v1alpha1.ModelCache) {
+			c.Spec.Storage.Tolerations = []v1alpha1.Toleration{{Operator: "Sometimes"}}
+		}, wantErr: true},
 	}
 
 	for _, tt := range tests {

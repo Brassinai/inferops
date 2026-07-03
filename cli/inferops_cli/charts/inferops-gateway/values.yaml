@@ -5,6 +5,10 @@ image:
 
 replicaCount: 1
 
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""

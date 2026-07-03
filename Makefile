@@ -134,6 +134,16 @@ helm-lint:
 		echo "error: operator chart accepted an unpinned diagnostics image"; \
 		exit 1; \
 	fi
+	@if $(HELM) template invalid deploy/helm/inferops-operator \
+		--set-string webhook.certDir=relative/path >/dev/null 2>&1; then \
+		echo "error: operator chart accepted an invalid webhook certificate directory"; \
+		exit 1; \
+	fi
+	@if $(HELM) template invalid deploy/helm/inferops-operator \
+		--set podDisruptionBudget.minAvailable=2 >/dev/null 2>&1; then \
+		echo "error: operator chart accepted an impossible PodDisruptionBudget"; \
+		exit 1; \
+	fi
 	@$(HELM) template inferops-operator-ha deploy/helm/inferops-operator \
 		--set replicaCount=2 >/dev/null
 
@@ -167,6 +177,9 @@ helm-template:
 	@grep -q 'profile: "homelab"' .verify/helm/inferops-operator-homelab.yaml
 	@grep -q 'gpu.required: "true"' .verify/helm/inferops-operator-homelab.yaml
 	@grep -q 'gpu.required: "false"' .verify/helm/inferops-operator.yaml
+	@grep -q '^kind: ValidatingWebhookConfiguration$$' .verify/helm/inferops-operator.yaml
+	@test "$$(grep -c '^kind: PodDisruptionBudget$$' .verify/helm/inferops-operator.yaml)" -eq 1
+	@test "$$(grep -c '^kind: PodDisruptionBudget$$' .verify/helm/inferops-gateway.yaml)" -eq 1
 	@! grep -q 'tailscale.com/hostname' .verify/helm/inferops-gateway-homelab.yaml || { \
 		echo "error: Tailscale Ingress hostname must be configured through spec.tls.hosts"; \
 		exit 1; \

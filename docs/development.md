@@ -52,7 +52,11 @@ make verify         # run every required CI check
 message when a dependency is missing. Verification output under `.verify/` is
 generated locally and ignored by Git.
 
-`yaml-check` verifies that each required CRD has a served OpenAPI schema.
+`yaml-check` verifies that each required CRD has a served OpenAPI schema and
+enforces the checked-in v1alpha1 compatibility contract: established fields
+must retain their types, enum values cannot disappear, and additive fields
+cannot become newly required. It also recursively compares current schemas
+with `tests/fixtures/crds/pre-mvp508` to exercise the supported upgrade path.
 `schema-check` then strictly validates Kubernetes resources known to
 kubeconform and skips custom-resource schemas that are not available locally.
 `helm-template` renders both the default GPU runtime chart and its CPU-only

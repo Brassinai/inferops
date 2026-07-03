@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	v1alpha1 "github.com/brassinai/inferops/operator/api/v1alpha1"
 	"github.com/brassinai/inferops/operator/controllers"
+	inferopsadmission "github.com/brassinai/inferops/operator/internal/admission"
 	controllermetrics "github.com/brassinai/inferops/operator/internal/metrics"
 	"github.com/brassinai/inferops/operator/internal/resources"
 	"github.com/brassinai/inferops/operator/internal/validation"
@@ -29,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 )
 
 var (
@@ -74,7 +77,7 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("leader election namespace %q is invalid: %s", leaderNamespace, strings.Join(messages, ", "))
 	}
 
-	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
+	managerOptions := ctrl.Options{
 		Scheme: scheme,
 		Client: crclient.Options{
 			Cache: &crclient.CacheOptions{
@@ -90,7 +93,14 @@ func run(ctx context.Context) error {
 		LeaderElectionNamespace:       leaderNamespace,
 		LeaderElectionResourceLock:    resourcelock.LeasesResourceLock,
 		LeaderElectionReleaseOnCancel: true,
-	})
+	}
+	if config.webhookEnabled {
+		managerOptions.WebhookServer = webhook.NewServer(webhook.Options{
+			Port:    config.webhookPort,
+			CertDir: config.webhookCertDir,
+		})
+	}
+	mgr, err := ctrl.NewManager(restConfig, managerOptions)
 	if err != nil {
 		return fmt.Errorf("create manager: %w", err)
 	}
@@ -100,6 +110,14 @@ func run(ctx context.Context) error {
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		return fmt.Errorf("add readyz check: %w", err)
+	}
+	if config.webhookEnabled {
+		if err := inferopsadmission.RegisterValidationWebhooks(mgr.GetWebhookServer(), mgr.GetScheme()); err != nil {
+			return fmt.Errorf("register validation webhooks: %w", err)
+		}
+		if err := mgr.AddReadyzCheck("webhook", mgr.GetWebhookServer().StartedChecker()); err != nil {
+			return fmt.Errorf("add webhook readiness check: %w", err)
+		}
 	}
 
 	eventRecorder := mgr.GetEventRecorderFor("inferops-operator")
@@ -178,6 +196,9 @@ type operatorConfig struct {
 	cacheDownloadRequeue    time.Duration
 	gpuNodeSelector         map[string]string
 	gpuTypeLabel            string
+	webhookEnabled          bool
+	webhookPort             int
+	webhookCertDir          string
 }
 
 func operatorConfigFromEnv() (operatorConfig, error) {
@@ -201,6 +222,14 @@ func operatorConfigFromEnv() (operatorConfig, error) {
 	if err != nil {
 		return operatorConfig{}, err
 	}
+	webhookEnabled, err := boolFromEnv("INFEROPS_WEBHOOK_ENABLED", false)
+	if err != nil {
+		return operatorConfig{}, err
+	}
+	webhookPort, err := intFromEnv("INFEROPS_WEBHOOK_PORT", 9443)
+	if err != nil {
+		return operatorConfig{}, err
+	}
 	return operatorConfig{
 		healthAddr:              envOrDefault("INFEROPS_HEALTH_ADDR", ":8081"),
 		metricsAddr:             envOrDefault("INFEROPS_METRICS_ADDR", ":8080"),
@@ -214,6 +243,9 @@ func operatorConfigFromEnv() (operatorConfig, error) {
 		cacheDownloadRequeue:    cacheDownloadRequeue,
 		gpuNodeSelector:         gpuNodeSelector,
 		gpuTypeLabel:            envOrDefault("INFEROPS_GPU_TYPE_LABEL", "inferops.dev/gpu-type"),
+		webhookEnabled:          webhookEnabled,
+		webhookPort:             webhookPort,
+		webhookCertDir:          envOrDefault("INFEROPS_WEBHOOK_CERT_DIR", "/tmp/k8s-webhook-server/serving-certs"),
 	}, nil
 }
 
@@ -253,6 +285,14 @@ func (c operatorConfig) validate() error {
 			strings.Join(messages, ", "),
 		)
 	}
+	if c.webhookEnabled {
+		if c.webhookPort < 1 || c.webhookPort > 65535 {
+			return fmt.Errorf("INFEROPS_WEBHOOK_PORT must be between 1 and 65535, got %d", c.webhookPort)
+		}
+		if strings.TrimSpace(c.webhookCertDir) == "" {
+			return errors.New("INFEROPS_WEBHOOK_CERT_DIR is required when admission webhooks are enabled")
+		}
+	}
 	return nil
 }
 
@@ -276,6 +316,30 @@ func durationFromEnv(key string, defaultValue time.Duration) (time.Duration, err
 		return 0, fmt.Errorf("%s must be greater than zero", key)
 	}
 	return duration, nil
+}
+
+func boolFromEnv(key string, defaultValue bool) (bool, error) {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("parse %s: %w", key, err)
+	}
+	return parsed, nil
+}
+
+func intFromEnv(key string, defaultValue int) (int, error) {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", key, err)
+	}
+	return parsed, nil
 }
 
 func parseNodeSelector(value string) (map[string]string, error) {

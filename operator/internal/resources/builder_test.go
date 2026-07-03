@@ -11,6 +11,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -567,6 +568,49 @@ func TestBuildRuntimeDeploymentVariants(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "scheduling constraints",
+			mutate: func(md *v1alpha1.ModelDeployment, _ *v1alpha1.ModelRuntime) {
+				seconds := int64(60)
+				md.Spec.Scheduling = v1alpha1.SchedulingSpec{
+					NodeSelector: map[string]string{"inferops.dev/pool": "gpu"},
+					Tolerations: []v1alpha1.Toleration{{
+						Key:               "dedicated",
+						Operator:          string(corev1.TolerationOpEqual),
+						Value:             "inference",
+						Effect:            string(corev1.TaintEffectNoExecute),
+						TolerationSeconds: &seconds,
+					}},
+					TopologySpreadConstraints: []v1alpha1.TopologySpreadConstraint{{
+						MaxSkew:           1,
+						TopologyKey:       corev1.LabelTopologyZone,
+						WhenUnsatisfiable: string(corev1.ScheduleAnyway),
+					}},
+				}
+			},
+			check: func(t *testing.T, deployment *appsv1.Deployment) {
+				podSpec := deployment.Spec.Template.Spec
+				if got := podSpec.NodeSelector["inferops.dev/pool"]; got != "gpu" {
+					t.Fatalf("node selector = %q, want gpu", got)
+				}
+				if len(podSpec.Tolerations) != 1 ||
+					podSpec.Tolerations[0].TolerationSeconds == nil ||
+					*podSpec.Tolerations[0].TolerationSeconds != 60 {
+					t.Fatalf("tolerations = %#v, want configured NoExecute toleration", podSpec.Tolerations)
+				}
+				if len(podSpec.TopologySpreadConstraints) != 1 {
+					t.Fatalf(
+						"topologySpreadConstraints = %#v, want one",
+						podSpec.TopologySpreadConstraints,
+					)
+				}
+				constraint := podSpec.TopologySpreadConstraints[0]
+				if constraint.LabelSelector == nil ||
+					!reflect.DeepEqual(constraint.LabelSelector.MatchLabels, SelectorLabels("qwen-chat")) {
+					t.Fatalf("topology selector = %#v, want runtime selector", constraint.LabelSelector)
+				}
+			},
+		},
 	}
 
 	for _, test := range tests {
@@ -588,6 +632,44 @@ func TestBuildRuntimeDeploymentVariants(t *testing.T) {
 			}
 			test.check(t, deployment)
 		})
+	}
+}
+
+func TestBuildRuntimePodDisruptionBudget(t *testing.T) {
+	t.Parallel()
+
+	md := testModelDeployment()
+	pdb, err := BuildRuntimePodDisruptionBudget(md)
+	if err != nil {
+		t.Fatalf("BuildRuntimePodDisruptionBudget() error = %v", err)
+	}
+	if pdb == nil {
+		t.Fatal("BuildRuntimePodDisruptionBudget() returned nil")
+	}
+	if pdb.Spec.MinAvailable == nil || pdb.Spec.MinAvailable.IntValue() != 1 {
+		t.Fatalf("minAvailable = %#v, want 1", pdb.Spec.MinAvailable)
+	}
+	if pdb.Spec.UnhealthyPodEvictionPolicy == nil ||
+		*pdb.Spec.UnhealthyPodEvictionPolicy != policyv1.AlwaysAllow {
+		t.Fatalf(
+			"unhealthyPodEvictionPolicy = %#v, want AlwaysAllow",
+			pdb.Spec.UnhealthyPodEvictionPolicy,
+		)
+	}
+	if pdb.Spec.Selector == nil ||
+		!reflect.DeepEqual(pdb.Spec.Selector.MatchLabels, SelectorLabels(md.Name)) {
+		t.Fatalf("selector = %#v, want runtime selector", pdb.Spec.Selector)
+	}
+	assertOwnerReference(t, pdb.OwnerReferences, "ModelDeployment", md.Name, md.UID)
+
+	disabled := false
+	md.Spec.Availability.PodDisruptionBudget.Enabled = &disabled
+	pdb, err = BuildRuntimePodDisruptionBudget(md)
+	if err != nil {
+		t.Fatalf("disabled BuildRuntimePodDisruptionBudget() error = %v", err)
+	}
+	if pdb != nil {
+		t.Fatalf("disabled PodDisruptionBudget = %#v, want nil", pdb)
 	}
 }
 
@@ -744,6 +826,12 @@ func TestBuildCacheDownloaderJob(t *testing.T) {
 
 	builder := testBuilder(t)
 	cache := testModelCache()
+	cache.Spec.Storage.NodeSelector = map[string]string{"inferops.dev/pool": "inference"}
+	cache.Spec.Storage.Tolerations = []v1alpha1.Toleration{{
+		Key:      "dedicated",
+		Operator: string(corev1.TolerationOpExists),
+		Effect:   string(corev1.TaintEffectNoSchedule),
+	}}
 	placement := testCachePlacement()
 	job, err := builder.BuildCacheDownloaderJob(cache, placement)
 	if err != nil {
@@ -759,6 +847,13 @@ func TestBuildCacheDownloaderJob(t *testing.T) {
 	}
 	if job.Spec.TTLSecondsAfterFinished == nil || *job.Spec.TTLSecondsAfterFinished != cacheTTLSecondsAfterFinished {
 		t.Errorf("TTL after finished = %v, want %d", job.Spec.TTLSecondsAfterFinished, cacheTTLSecondsAfterFinished)
+	}
+	if got := job.Spec.Template.Spec.NodeSelector["inferops.dev/pool"]; got != "inference" {
+		t.Fatalf("cache Job node selector = %q, want inference", got)
+	}
+	if len(job.Spec.Template.Spec.Tolerations) != 1 ||
+		job.Spec.Template.Spec.Tolerations[0].Key != "dedicated" {
+		t.Fatalf("cache Job tolerations = %#v, want dedicated", job.Spec.Template.Spec.Tolerations)
 	}
 	if job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != cacheActiveDeadlineSeconds {
 		t.Errorf("active deadline = %v, want %d", job.Spec.ActiveDeadlineSeconds, cacheActiveDeadlineSeconds)
@@ -1038,6 +1133,36 @@ func TestDownloaderImageChangesJobIdentityOnly(t *testing.T) {
 	}
 	if CacheJobHashFromJob(second) == CacheJobHashFromJob(first) {
 		t.Fatal("image upgrade did not change downloader Job identity")
+	}
+}
+
+func TestCacheSchedulingChangesJobIdentityOnly(t *testing.T) {
+	t.Parallel()
+
+	builder := testBuilder(t)
+	cache := testModelCache()
+	placement := testCachePlacement()
+	first, err := builder.BuildCacheDownloaderJob(cache, placement)
+	if err != nil {
+		t.Fatalf("first BuildCacheDownloaderJob() error = %v", err)
+	}
+
+	cache.Spec.Storage.NodeSelector = map[string]string{"inferops.dev/pool": "inference"}
+	cache.Spec.Storage.Tolerations = []v1alpha1.Toleration{{
+		Key:      "dedicated",
+		Operator: string(corev1.TolerationOpExists),
+		Effect:   string(corev1.TaintEffectNoSchedule),
+	}}
+	second, err := builder.BuildCacheDownloaderJob(cache, placement)
+	if err != nil {
+		t.Fatalf("second BuildCacheDownloaderJob() error = %v", err)
+	}
+
+	if got, want := CacheInputHashFromJob(second), CacheInputHashFromJob(first); got != want {
+		t.Fatalf("scheduling changed cache artifact identity from %q to %q", want, got)
+	}
+	if CacheJobHashFromJob(second) == CacheJobHashFromJob(first) {
+		t.Fatal("scheduling change did not change downloader Job identity")
 	}
 }
 

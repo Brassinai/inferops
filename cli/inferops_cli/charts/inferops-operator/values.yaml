@@ -5,6 +5,10 @@ image:
 
 replicaCount: 1
 
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
@@ -38,6 +42,14 @@ cache:
 scheduling:
   gpuNodeSelector: {}
   gpuTypeLabel: inferops.dev/gpu-type
+
+webhook:
+  enabled: true
+  port: 9443
+  certDir: /tmp/k8s-webhook-server/serving-certs
+  tls:
+    existingSecret: ""
+    caBundle: ""
 
 metrics:
   port: 8080

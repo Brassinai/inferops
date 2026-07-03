@@ -53,6 +53,10 @@ type ModelCacheStorage struct {
 	// +kubebuilder:validation:Required
 	Size     string `json:"size"`
 	NodeName string `json:"nodeName,omitempty"`
+	// NodeSelector and Tolerations keep node-local cache download jobs
+	// schedulable on the same constrained nodes as their runtime workloads.
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+	Tolerations  []Toleration      `json:"tolerations,omitempty"`
 	// +kubebuilder:validation:Pattern=^/
 	// +kubebuilder:validation:Required
 	Path string `json:"path"`
@@ -177,6 +181,7 @@ func (in *ModelCacheList) DeepCopyObject() runtime.Object {
 // DeepCopyInto copies the receiver, writing into out.
 func (in *ModelCacheSpec) DeepCopyInto(out *ModelCacheSpec) {
 	*out = *in
+	in.Storage.DeepCopyInto(&out.Storage)
 }
 
 // DeepCopy creates a copy.
@@ -214,6 +219,22 @@ func (in *ModelCacheStatus) DeepCopy() *ModelCacheStatus {
 // DeepCopyInto copies the receiver, writing into out.
 func (in *ModelCacheStorage) DeepCopyInto(out *ModelCacheStorage) {
 	*out = *in
+	if in.NodeSelector != nil {
+		out.NodeSelector = make(map[string]string, len(in.NodeSelector))
+		for key, value := range in.NodeSelector {
+			out.NodeSelector[key] = value
+		}
+	}
+	if in.Tolerations != nil {
+		out.Tolerations = make([]Toleration, len(in.Tolerations))
+		for i := range in.Tolerations {
+			out.Tolerations[i] = in.Tolerations[i]
+			if in.Tolerations[i].TolerationSeconds != nil {
+				value := *in.Tolerations[i].TolerationSeconds
+				out.Tolerations[i].TolerationSeconds = &value
+			}
+		}
+	}
 }
 
 // DeepCopy creates a copy.

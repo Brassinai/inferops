@@ -38,8 +38,17 @@ class HelmInstallerTest(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(len(commands), 2)
-        for command in commands:
+        self.assertEqual(len(commands), 3)
+        crd_command, operator_command, gateway_command = commands
+        self.assertEqual(crd_command[0], "kubectl")
+        self.assertIn("--server-side", crd_command)
+        self.assertIn("--field-manager=inferops-cli", crd_command)
+        self.assertIn("--kubeconfig", crd_command)
+        self.assertIn("--context", crd_command)
+        self.assertEqual(crd_command[-2], "--filename")
+        self.assertTrue(crd_command[-1].endswith("inferops-operator/crds"))
+
+        for command in (operator_command, gateway_command):
             self.assertEqual(command[:3], ["helm", "upgrade", "--install"])
             self.assertIn("--atomic", command)
             self.assertIn("--wait", command)
@@ -48,7 +57,6 @@ class HelmInstallerTest(unittest.TestCase):
             self.assertIn("--kube-context", command)
             self.assertIn("--values", command)
 
-        operator_command, gateway_command = commands
         self.assertIn("cache.root=/mnt/nvme/models", operator_command)
         self.assertIn("profile=homelab", operator_command)
         self.assertIn("tailscale.enabled=true", gateway_command)
@@ -75,8 +83,61 @@ class HelmInstallerTest(unittest.TestCase):
             )
 
         self.assertEqual(response["install"]["cachePath"], "/var/lib/inferops/models")
-        self.assertIn("profile=default", commands[0])
-        self.assertNotIn("tailscale.enabled=true", commands[1])
+        self.assertIn("profile=default", commands[1])
+        self.assertNotIn("tailscale.enabled=true", commands[2])
+        self.assertEqual(response["install"]["crds"]["status"], "applied")
+
+    def test_crd_apply_failure_stops_before_helm(self) -> None:
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            raise subprocess.CalledProcessError(
+                1, command, stderr="server-side apply conflict"
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            charts_dir = self._make_charts(Path(directory))
+            with self.assertRaisesRegex(CLIError, "CRD apply failed"):
+                HelmInstaller(runner=run).install(
+                    InstallRequest(
+                        cluster=ClusterTarget(namespace="inferops-system"),
+                        profile="default",
+                        charts_dir=str(charts_dir),
+                    )
+                )
+
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0][0], "kubectl")
+
+    def test_repeated_install_reapplies_crds_before_each_upgrade(self) -> None:
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            charts_dir = self._make_charts(Path(directory))
+            request = InstallRequest(
+                cluster=ClusterTarget(namespace="inferops-system"),
+                profile="default",
+                charts_dir=str(charts_dir),
+            )
+            installer = HelmInstaller(runner=run)
+            installer.install(request)
+            installer.install(request)
+
+        self.assertEqual(len(commands), 6)
+        self.assertEqual([command[0] for command in commands], [
+            "kubectl",
+            "helm",
+            "helm",
+            "kubectl",
+            "helm",
+            "helm",
+        ])
+        self.assertEqual(commands[:3], commands[3:])
 
     def test_rejects_unsafe_cache_roots_before_running_helm(self) -> None:
         for path in (
@@ -130,6 +191,8 @@ class HelmInstallerTest(unittest.TestCase):
 
     def test_reports_helm_stderr_without_exposing_command_arguments(self) -> None:
         def fail(command):
+            if command[0] == "kubectl":
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
             raise subprocess.CalledProcessError(
                 1, command, stderr="cluster unreachable"
             )
@@ -155,4 +218,10 @@ class HelmInstallerTest(unittest.TestCase):
             )
             if include_homelab_values:
                 (chart_dir / "values-homelab.yaml").write_text("{}\n")
+        crds_dir = root / "inferops-operator" / "crds"
+        crds_dir.mkdir()
+        (crds_dir / "modeldeployments.yaml").write_text(
+            "apiVersion: apiextensions.k8s.io/v1\n"
+            "kind: CustomResourceDefinition\n"
+        )
         return root

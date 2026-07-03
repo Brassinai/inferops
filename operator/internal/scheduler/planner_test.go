@@ -201,6 +201,43 @@ func TestCachePlannerRespectsNodeSelector(t *testing.T) {
 	}
 }
 
+func TestCachePlannerRespectsWorkloadScheduling(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	cache := testCache("cache-a")
+	cache.Spec.Storage.Size = "10Gi"
+	cache.Spec.Storage.NodeSelector = map[string]string{"inferops.dev/pool": "inference"}
+	cache.Spec.Storage.Tolerations = []v1alpha1.Toleration{{
+		Key:      "dedicated",
+		Operator: string(corev1.TolerationOpEqual),
+		Value:    "inference",
+		Effect:   string(corev1.TaintEffectNoSchedule),
+	}}
+	general := readyNode("general", "100Gi")
+	general.Labels = map[string]string{"inferops.dev/pool": "general"}
+	inference := readyNode("inference", "100Gi")
+	inference.Labels = map[string]string{"inferops.dev/pool": "inference"}
+	inference.Spec.Taints = []corev1.Taint{{
+		Key:    "dedicated",
+		Value:  "inference",
+		Effect: corev1.TaintEffectNoSchedule,
+	}}
+
+	placement, err := planner.Plan(cache, []corev1.Node{general, inference}, nil)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if placement.NodeName != inference.Name {
+		t.Fatalf("node = %q, want %q", placement.NodeName, inference.Name)
+	}
+
+	cache.Spec.Storage.Tolerations = nil
+	if _, err := planner.Plan(cache, []corev1.Node{general, inference}, nil); !errors.Is(err, ErrNoEligibleNode) {
+		t.Fatalf("Plan() error = %v, want ErrNoEligibleNode", err)
+	}
+}
+
 func TestCachePlannerRequiresConfiguredNodeResources(t *testing.T) {
 	t.Parallel()
 

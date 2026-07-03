@@ -109,7 +109,13 @@ func (b Builder) BuildCacheDownloaderJob(
 	if err != nil {
 		return nil, fmt.Errorf("compute cache input hash: %w", err)
 	}
-	jobHash := cacheJobHash(inputHash, secretRef, b.cacheDownloaderImage)
+	jobHash := cacheJobHash(
+		inputHash,
+		secretRef,
+		b.cacheDownloaderImage,
+		cache.Spec.Storage.NodeSelector,
+		cache.Spec.Storage.Tolerations,
+	)
 
 	destSubpath, err := b.cacheSubpath(placement.Path)
 	if err != nil {
@@ -176,15 +182,26 @@ func (b Builder) BuildCacheDownloaderJob(
 					AutomountServiceAccountToken: &automountServiceAccountToken,
 					EnableServiceLinks:           &enableServiceLinks,
 					RestartPolicy:                corev1.RestartPolicyNever,
-					NodeSelector: map[string]string{
-						corev1.LabelHostname: placement.NodeName,
-					},
-					Containers: []corev1.Container{container},
-					Volumes:    volumes,
+					NodeSelector: mergeCacheNodeSelector(
+						cache.Spec.Storage.NodeSelector,
+						placement.NodeName,
+					),
+					Tolerations: buildTolerations(cache.Spec.Storage.Tolerations),
+					Containers:  []corev1.Container{container},
+					Volumes:     volumes,
 				},
 			},
 		},
 	}, nil
+}
+
+func mergeCacheNodeSelector(input map[string]string, nodeName string) map[string]string {
+	result := copyStringMap(input)
+	if result == nil {
+		result = make(map[string]string, 1)
+	}
+	result[corev1.LabelHostname] = nodeName
+	return result
 }
 
 const downloaderCacheRootMount = "/cache"
@@ -388,11 +405,39 @@ func cacheInputHash(
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func cacheJobHash(inputHash, secretRef, downloaderImage string) string {
+func cacheJobHash(
+	inputHash, secretRef, downloaderImage string,
+	nodeSelector map[string]string,
+	tolerations []v1alpha1.Toleration,
+) string {
 	hash := sha256.New()
 	_, _ = hash.Write([]byte("inputHash=" + inputHash + "\n"))
 	_, _ = hash.Write([]byte("secretRef=" + secretRef + "\n"))
 	_, _ = hash.Write([]byte("downloaderImage=" + downloaderImage + "\n"))
+	selectorKeys := make([]string, 0, len(nodeSelector))
+	for key := range nodeSelector {
+		selectorKeys = append(selectorKeys, key)
+	}
+	sort.Strings(selectorKeys)
+	for _, key := range selectorKeys {
+		_, _ = hash.Write([]byte("nodeSelector." + key + "=" + nodeSelector[key] + "\n"))
+	}
+	for i := range tolerations {
+		seconds := ""
+		if tolerations[i].TolerationSeconds != nil {
+			seconds = fmt.Sprintf("%d", *tolerations[i].TolerationSeconds)
+		}
+		_, _ = fmt.Fprintf(
+			hash,
+			"toleration.%d=%s|%s|%s|%s|%s\n",
+			i,
+			tolerations[i].Key,
+			tolerations[i].Operator,
+			tolerations[i].Value,
+			tolerations[i].Effect,
+			seconds,
+		)
+	}
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
 }
 

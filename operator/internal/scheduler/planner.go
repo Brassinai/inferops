@@ -137,9 +137,12 @@ func (p *CachePlanner) Plan(
 		return nil, fmt.Errorf("storage size %q must be greater than zero", cache.Spec.Storage.Size)
 	}
 
-	candidates := p.filterNodes(nodes)
+	candidates := p.filterNodes(nodes, cache.Spec.Storage)
 	if len(candidates) == 0 {
-		return nil, fmt.Errorf("%w: no Ready, schedulable nodes match the cache node selector", ErrNoEligibleNode)
+		return nil, fmt.Errorf(
+			"%w: no Ready, schedulable nodes match the cache selectors and tolerations",
+			ErrNoEligibleNode,
+		)
 	}
 
 	pinnedNode := cache.Spec.Storage.NodeName
@@ -195,7 +198,10 @@ func (p *CachePlanner) PlanPath(cache *v1alpha1.ModelCache) (string, error) {
 	return cachePath, nil
 }
 
-func (p *CachePlanner) filterNodes(nodes []corev1.Node) []corev1.Node {
+func (p *CachePlanner) filterNodes(
+	nodes []corev1.Node,
+	storage v1alpha1.ModelCacheStorage,
+) []corev1.Node {
 	result := make([]corev1.Node, 0, len(nodes))
 	for i := range nodes {
 		if !IsNodeEligibleForCache(nodes[i]) {
@@ -204,12 +210,32 @@ func (p *CachePlanner) filterNodes(nodes []corev1.Node) []corev1.Node {
 		if !nodeMatchesSelector(nodes[i], p.config.NodeSelector) {
 			continue
 		}
+		if !nodeMatchesSelector(nodes[i], storage.NodeSelector) {
+			continue
+		}
+		if hasUntoleratedSchedulingTaint(nodes[i], storage.Tolerations) {
+			continue
+		}
 		if !nodeHasRequiredResources(nodes[i], p.config.RequiredResources) {
 			continue
 		}
 		result = append(result, nodes[i])
 	}
 	return result
+}
+
+func hasUntoleratedSchedulingTaint(node corev1.Node, tolerations []v1alpha1.Toleration) bool {
+	for i := range node.Spec.Taints {
+		taint := node.Spec.Taints[i]
+		if taint.Effect != corev1.TaintEffectNoSchedule &&
+			taint.Effect != corev1.TaintEffectNoExecute {
+			continue
+		}
+		if !isTaintTolerated(taint, tolerations) {
+			return true
+		}
+	}
+	return false
 }
 
 func nodeHasRequiredResources(node corev1.Node, required []corev1.ResourceName) bool {

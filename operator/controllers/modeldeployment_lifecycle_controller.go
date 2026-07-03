@@ -21,6 +21,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -166,7 +167,7 @@ func (r *ModelDeploymentController) reconcile(
 	}
 	deployment.Status = validated.Status
 	if deployment.Status.Phase == v1alpha1.ModelDeploymentPhaseFailed {
-		if _, err := r.deleteRuntimeDeployment(ctx, deployment); err != nil {
+		if _, err := r.deleteRuntimeWorkload(ctx, deployment); err != nil {
 			return ctrl.Result{}, err
 		}
 		reason := v1alpha1.ReasonSpecInvalid
@@ -190,7 +191,7 @@ func (r *ModelDeploymentController) reconcile(
 	}
 	if _, err := r.ensureService(ctx, deployment, modelRuntime); err != nil {
 		if errors.Is(err, errPermanentLifecycle) {
-			if _, deleteErr := r.deleteRuntimeDeployment(ctx, deployment); deleteErr != nil {
+			if _, deleteErr := r.deleteRuntimeWorkload(ctx, deployment); deleteErr != nil {
 				return ctrl.Result{}, deleteErr
 			}
 			return r.failDeployment(ctx, deployment, original, v1alpha1.ReasonRuntimeUnavailable, err.Error())
@@ -199,7 +200,7 @@ func (r *ModelDeploymentController) reconcile(
 	}
 	if _, err := r.ensureConfigMap(ctx, deployment, modelRuntime); err != nil {
 		if errors.Is(err, errPermanentLifecycle) {
-			if _, deleteErr := r.deleteRuntimeDeployment(ctx, deployment); deleteErr != nil {
+			if _, deleteErr := r.deleteRuntimeWorkload(ctx, deployment); deleteErr != nil {
 				return ctrl.Result{}, deleteErr
 			}
 			return r.failDeployment(ctx, deployment, original, v1alpha1.ReasonRuntimeUnavailable, err.Error())
@@ -211,7 +212,7 @@ func (r *ModelDeploymentController) reconcile(
 	cache, created, err := r.ensureModelCache(ctx, deployment)
 	if err != nil {
 		if errors.Is(err, errPermanentLifecycle) {
-			if _, deleteErr := r.deleteRuntimeDeployment(ctx, deployment); deleteErr != nil {
+			if _, deleteErr := r.deleteRuntimeWorkload(ctx, deployment); deleteErr != nil {
 				return ctrl.Result{}, deleteErr
 			}
 			return r.failDeployment(ctx, deployment, original, v1alpha1.ReasonCacheFailed, err.Error())
@@ -225,7 +226,7 @@ func (r *ModelDeploymentController) reconcile(
 
 	cacheResult := cachecontract.Lookup(cache)
 	if !cacheResult.Ready {
-		if _, err := r.deleteRuntimeDeployment(ctx, deployment); err != nil {
+		if _, err := r.deleteRuntimeWorkload(ctx, deployment); err != nil {
 			return ctrl.Result{}, err
 		}
 		deployment.Status.AssignedNode = ""
@@ -269,7 +270,7 @@ func (r *ModelDeploymentController) reconcile(
 	r.projectReadyCache(deployment, cacheResult)
 
 	if effectiveDesiredState(deployment) == v1alpha1.ActivationDesiredStateInactive {
-		deleted, err := r.deleteRuntimeDeployment(ctx, deployment)
+		deleted, err := r.deleteRuntimeWorkload(ctx, deployment)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -305,12 +306,16 @@ func (r *ModelDeploymentController) reconcile(
 	}
 
 	assignedNode := cacheResult.NodeName
+	var runtimeNode corev1.Node
 	if deployment.Spec.Resources.GPU != nil {
 		placement, err := r.reserveGPU(ctx, deployment, cacheResult.NodeName)
 		if err != nil {
 			return r.handleGPUCapacityError(ctx, deployment, original, err)
 		}
 		assignedNode = placement.NodeName
+		if err := r.client.Get(ctx, types.NamespacedName{Name: assignedNode}, &runtimeNode); err != nil {
+			return ctrl.Result{}, fmt.Errorf("get selected GPU node for preflight: %w", err)
+		}
 		deployment.Status.AssignedNode = assignedNode
 		deployment.Status.AssignedGPUs = nil
 		setDeploymentCondition(deployment, v1alpha1.ConditionGPUAssigned, metav1.ConditionTrue,
@@ -318,14 +323,13 @@ func (r *ModelDeploymentController) reconcile(
 			fmt.Sprintf("Reserved %d %s slot(s) on node %s; Kubernetes assigns physical devices",
 				effectiveGPUReservation(deployment), gpuResourceName(deployment), assignedNode))
 	} else {
-		var cacheNode corev1.Node
-		if err := r.client.Get(ctx, types.NamespacedName{Name: assignedNode}, &cacheNode); err != nil {
+		if err := r.client.Get(ctx, types.NamespacedName{Name: assignedNode}, &runtimeNode); err != nil {
 			if !apierrors.IsNotFound(err) {
 				return ctrl.Result{}, fmt.Errorf("get cache node for CPU activation: %w", err)
 			}
 		}
-		if cacheNode.Name == "" || !scheduler.IsNodeEligibleForCache(cacheNode) {
-			if _, err := r.deleteRuntimeDeployment(ctx, deployment); err != nil {
+		if runtimeNode.Name == "" || !scheduler.IsNodeEligibleForCache(runtimeNode) {
+			if _, err := r.deleteRuntimeWorkload(ctx, deployment); err != nil {
 				return ctrl.Result{}, err
 			}
 			deployment.Status.Phase = v1alpha1.ModelDeploymentPhaseWaitingForCapacity
@@ -342,6 +346,18 @@ func (r *ModelDeploymentController) reconcile(
 		status.RemoveCondition(&deployment.Status.Conditions, v1alpha1.ConditionGPUAssigned)
 	}
 
+	if err := scheduler.ValidateRuntimeNode(deployment, &runtimeNode); err != nil {
+		return r.handleRuntimePreflightError(ctx, deployment, original, err)
+	}
+	if _, err := r.ensurePodDisruptionBudget(ctx, deployment); err != nil {
+		if errors.Is(err, errPermanentLifecycle) {
+			if _, deleteErr := r.deleteRuntimeWorkload(ctx, deployment); deleteErr != nil {
+				return ctrl.Result{}, deleteErr
+			}
+			return r.failDeployment(ctx, deployment, original, v1alpha1.ReasonRuntimeUnavailable, err.Error())
+		}
+		return ctrl.Result{}, err
+	}
 	runtimeDeployment, created, err := r.ensureRuntimeDeployment(
 		ctx,
 		deployment,
@@ -353,7 +369,7 @@ func (r *ModelDeploymentController) reconcile(
 		if !errors.Is(err, errPermanentLifecycle) {
 			return ctrl.Result{}, err
 		}
-		if _, deleteErr := r.deleteRuntimeDeployment(ctx, deployment); deleteErr != nil {
+		if _, deleteErr := r.deleteRuntimeWorkload(ctx, deployment); deleteErr != nil {
 			return ctrl.Result{}, deleteErr
 		}
 		return r.failDeployment(ctx, deployment, original, v1alpha1.ReasonRuntimeUnavailable, err.Error())
@@ -369,6 +385,62 @@ func (r *ModelDeploymentController) reconcile(
 		}
 	}
 	return r.projectRuntimeDeployment(ctx, deployment, original, runtimeDeployment, created)
+}
+
+func (r *ModelDeploymentController) handleRuntimePreflightError(
+	ctx context.Context,
+	deployment, original *v1alpha1.ModelDeployment,
+	preflightErr error,
+) (ctrl.Result, error) {
+	if _, err := r.deleteRuntimeWorkload(ctx, deployment); err != nil {
+		return ctrl.Result{}, err
+	}
+	deployment.Status.AssignedNode = ""
+	deployment.Status.AssignedGPUs = nil
+	deployment.Status.Replicas = v1alpha1.ReplicaStatus{
+		Desired: effectiveRuntimeReplicas(deployment),
+	}
+	deployment.Status.Model.Loaded = false
+
+	if errors.Is(preflightErr, scheduler.ErrSchedulingConstraints) {
+		setRuntimeWaitingConditions(
+			deployment,
+			v1alpha1.ReasonSchedulingBlocked,
+			preflightErr.Error(),
+		)
+		return r.failDeployment(
+			ctx,
+			deployment,
+			original,
+			v1alpha1.ReasonSchedulingBlocked,
+			preflightErr.Error(),
+		)
+	}
+	if !errors.Is(preflightErr, scheduler.ErrInsufficientComputeCapacity) {
+		return ctrl.Result{}, preflightErr
+	}
+
+	setRuntimeWaitingConditions(
+		deployment,
+		v1alpha1.ReasonInsufficientCompute,
+		preflightErr.Error(),
+	)
+	if effectiveWhenFull(deployment) == v1alpha1.ActivationWhenFullQueue {
+		deployment.Status.Phase = v1alpha1.ModelDeploymentPhaseWaitingForCapacity
+		return r.patchDeploymentStatus(
+			ctx,
+			deployment,
+			original,
+			v1alpha1.ReasonInsufficientCompute,
+		)
+	}
+	return r.failDeployment(
+		ctx,
+		deployment,
+		original,
+		v1alpha1.ReasonInsufficientCompute,
+		preflightErr.Error(),
+	)
 }
 
 func (r *ModelDeploymentController) setStableIdentity(
@@ -408,9 +480,11 @@ func (r *ModelDeploymentController) ensureModelCache(
 		ModelRepo: deployment.Spec.Model.Repo,
 		Revision:  deployment.Spec.Model.Revision,
 		Storage: v1alpha1.ModelCacheStorage{
-			Type: "nodeLocal",
-			Size: size,
-			Path: cachePath,
+			Type:         "nodeLocal",
+			Size:         size,
+			Path:         cachePath,
+			NodeSelector: copyStringMap(deployment.Spec.Scheduling.NodeSelector),
+			Tolerations:  copyTolerations(deployment.Spec.Scheduling.Tolerations),
 		},
 		SecretRef: deployment.Spec.Secrets.HuggingFaceTokenSecretName,
 	}
@@ -596,18 +670,80 @@ func (r *ModelDeploymentController) ensureRuntimeDeployment(
 	return &existing, false, nil
 }
 
-func (r *ModelDeploymentController) deleteRuntimeDeployment(
+func (r *ModelDeploymentController) ensurePodDisruptionBudget(
 	ctx context.Context,
 	deployment *v1alpha1.ModelDeployment,
-) (bool, error) {
-	existing := &appsv1.Deployment{}
+) (*policyv1.PodDisruptionBudget, error) {
+	desired, err := resources.BuildRuntimePodDisruptionBudget(deployment)
+	if err != nil {
+		return nil, permanentLifecycleError(fmt.Errorf("build runtime PodDisruptionBudget: %w", err))
+	}
 	key := types.NamespacedName{
 		Namespace: deployment.Namespace,
 		Name:      templates.RuntimeServiceName(deployment.Name),
 	}
+	var existing policyv1.PodDisruptionBudget
+	if err := r.client.Get(ctx, key, &existing); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("get runtime PodDisruptionBudget: %w", err)
+		}
+		if desired == nil {
+			return nil, nil
+		}
+		if err := r.client.Create(ctx, desired); err != nil {
+			return nil, fmt.Errorf("create runtime PodDisruptionBudget: %w", err)
+		}
+		return desired, nil
+	}
+	if err := assertControlledBy(&existing, deployment); err != nil {
+		return nil, permanentLifecycleError(err)
+	}
+	if desired == nil {
+		if err := r.client.Delete(ctx, &existing); err != nil && !apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("delete disabled runtime PodDisruptionBudget: %w", err)
+		}
+		return nil, nil
+	}
+	before := existing.DeepCopy()
+	mergeLabels(&existing.Labels, desired.Labels)
+	existing.OwnerReferences = desired.OwnerReferences
+	existing.Spec = desired.Spec
+	if !reflect.DeepEqual(before, &existing) {
+		if err := r.client.Patch(ctx, &existing, client.MergeFrom(before)); err != nil {
+			return nil, fmt.Errorf("patch runtime PodDisruptionBudget: %w", err)
+		}
+	}
+	return &existing, nil
+}
+
+func (r *ModelDeploymentController) deleteRuntimeWorkload(
+	ctx context.Context,
+	deployment *v1alpha1.ModelDeployment,
+) (bool, error) {
+	deleted := false
+	pdb := &policyv1.PodDisruptionBudget{}
+	key := types.NamespacedName{
+		Namespace: deployment.Namespace,
+		Name:      templates.RuntimeServiceName(deployment.Name),
+	}
+	if err := r.client.Get(ctx, key, pdb); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("get runtime PodDisruptionBudget for deletion: %w", err)
+		}
+	} else {
+		if err := assertControlledBy(pdb, deployment); err != nil {
+			return false, err
+		}
+		if err := r.client.Delete(ctx, pdb); err != nil && !apierrors.IsNotFound(err) {
+			return false, fmt.Errorf("delete runtime PodDisruptionBudget: %w", err)
+		}
+		deleted = true
+	}
+
+	existing := &appsv1.Deployment{}
 	if err := r.client.Get(ctx, key, existing); err != nil {
 		if apierrors.IsNotFound(err) {
-			return false, nil
+			return deleted, nil
 		}
 		return false, fmt.Errorf("get runtime Deployment for deletion: %w", err)
 	}
@@ -760,7 +896,7 @@ func (r *ModelDeploymentController) handleGPUCapacityError(
 		!errors.Is(placementErr, scheduler.ErrInsufficientGPUCapacity) {
 		return ctrl.Result{}, placementErr
 	}
-	if _, err := r.deleteRuntimeDeployment(ctx, deployment); err != nil {
+	if _, err := r.deleteRuntimeWorkload(ctx, deployment); err != nil {
 		return ctrl.Result{}, err
 	}
 	deployment.Status.AssignedNode = ""
@@ -1102,6 +1238,32 @@ func containsLabels(existing, desired map[string]string) bool {
 	return true
 }
 
+func copyStringMap(input map[string]string) map[string]string {
+	if input == nil {
+		return nil
+	}
+	result := make(map[string]string, len(input))
+	for key, value := range input {
+		result[key] = value
+	}
+	return result
+}
+
+func copyTolerations(input []v1alpha1.Toleration) []v1alpha1.Toleration {
+	if input == nil {
+		return nil
+	}
+	result := make([]v1alpha1.Toleration, len(input))
+	for i := range input {
+		result[i] = input[i]
+		if input[i].TolerationSeconds != nil {
+			value := *input[i].TolerationSeconds
+			result[i].TolerationSeconds = &value
+		}
+	}
+	return result
+}
+
 func ensureStringMapValue(values *map[string]string, key, value string) {
 	if *values == nil {
 		*values = make(map[string]string)
@@ -1141,6 +1303,7 @@ func (r *ModelDeploymentController) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.ModelDeployment{}).
 		Owns(&appsv1.Deployment{}).
+		Owns(&policyv1.PodDisruptionBudget{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Watches(&v1alpha1.ModelCache{}, handler.EnqueueRequestsFromMapFunc(r.requestsForCache)).

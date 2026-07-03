@@ -33,8 +33,11 @@ Profiles:
 | `default` | Minimal operator + gateway |
 | `homelab` | Includes cache-path defaults and sensible resource defaults |
 
-The command uses repeatable `helm upgrade --install` operations with atomic
-waits. It forwards `--context` and `--kubeconfig` to Helm. Use
+The command first applies the packaged CRDs with server-side apply, then uses
+repeatable `helm upgrade --install` operations with atomic waits. This explicit
+CRD step is required because Helm does not upgrade files from a chart's
+`crds/` directory. It forwards `--context` and `--kubeconfig` to both
+`kubectl` and Helm. Use
 `--tailscale-hostname` only after installing and configuring the Tailscale
 Kubernetes Operator:
 
