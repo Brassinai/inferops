@@ -47,7 +47,7 @@ func TestReconcileValidInactiveDeployment(t *testing.T) {
 			Protocol:     "openai",
 			DefaultImage: "ghcr.io/inferops/nano-vllm:v0.1.0",
 			Port:         8000,
-			HealthPath:   "/health",
+			HealthPath:   "/live",
 		},
 	}
 
@@ -75,6 +75,13 @@ func TestReconcileValidInactiveDeployment(t *testing.T) {
 	}
 	if result.Runtime.Image() != "ghcr.io/inferops/nano-vllm:v0.1.0" {
 		t.Errorf("resolved runtime image = %q, want %q", result.Runtime.Image(), "ghcr.io/inferops/nano-vllm:v0.1.0")
+	}
+	effectiveRuntime := modelRuntimeFromResolved(md, result.Runtime)
+	if got := effectiveRuntime.Spec.HealthPath; got != "/live" {
+		t.Errorf("effective health path = %q, want /live", got)
+	}
+	if got := effectiveRuntime.Spec.ReadinessPath; got != "/live" {
+		t.Errorf("effective readiness path = %q, want /live", got)
 	}
 }
 

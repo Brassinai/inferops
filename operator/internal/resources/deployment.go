@@ -40,6 +40,17 @@ func (b Builder) BuildRuntimeDeployment(
 	if runtime == nil {
 		return nil, errors.New("model runtime is required")
 	}
+	protocol := strings.TrimSpace(runtime.Spec.Protocol)
+	if protocol == "" {
+		return nil, errors.New("runtime protocol is required")
+	}
+	if protocol != v1alpha1.ModelRuntimeProtocolOpenAI {
+		return nil, fmt.Errorf(
+			"runtime protocol %q is unsupported; expected %q",
+			protocol,
+			v1alpha1.ModelRuntimeProtocolOpenAI,
+		)
+	}
 	if err := validateModelDeploymentName(md.Name); err != nil {
 		return nil, err
 	}
@@ -82,19 +93,26 @@ func (b Builder) BuildRuntimeDeployment(
 		return nil, fmt.Errorf("runtime port %d must be between 1 and 65535", port)
 	}
 
-	readinessPath := runtime.Spec.ReadinessPath
-	if readinessPath == "" {
-		readinessPath = templates.RuntimeReadinessPath
-	}
 	healthPath := runtime.Spec.HealthPath
 	if healthPath == "" {
 		healthPath = templates.RuntimeHealthPath
+	}
+	readinessPath := runtime.Spec.ReadinessPath
+	if readinessPath == "" {
+		readinessPath = healthPath
+	}
+	metricsPath := runtime.Spec.MetricsPath
+	if metricsPath == "" {
+		metricsPath = templates.RuntimeMetricsPath
 	}
 	if !strings.HasPrefix(readinessPath, "/") {
 		return nil, fmt.Errorf("runtime readiness path %q must start with /", readinessPath)
 	}
 	if !strings.HasPrefix(healthPath, "/") {
 		return nil, fmt.Errorf("runtime health path %q must start with /", healthPath)
+	}
+	if !strings.HasPrefix(metricsPath, "/") {
+		return nil, fmt.Errorf("runtime metrics path %q must start with /", metricsPath)
 	}
 
 	containerResources, err := buildRuntimeResources(md.Spec.Resources)
@@ -227,6 +245,12 @@ func (b Builder) BuildRuntimeDeployment(
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: labels,
+					Annotations: map[string]string{
+						"inferops.dev/runtime-protocol": protocol,
+						"prometheus.io/scrape":          "true",
+						"prometheus.io/path":            metricsPath,
+						"prometheus.io/port":            strconv.FormatInt(int64(port), 10),
+					},
 				},
 				Spec: podSpec,
 			},

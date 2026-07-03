@@ -230,6 +230,18 @@ spec:
 
 Required: `engine`, `protocol`, `defaultImage`, `port`, `healthPath`. Optional: `readinessPath`, `metricsPath`, `command`, `args`, `env`. Secret values belong in referenced Secrets, never in `spec.env`.
 
+`protocol` is projected to runtime pods as the
+`inferops.dev/runtime-protocol` annotation. Health and readiness paths become
+Kubernetes probes. The metrics path becomes a `prometheus.io/path` annotation
+alongside scrape and port annotations. Runtime images must still implement
+those endpoints; use the [runtime conformance suite](runtime-conformance.md)
+before publishing an adapter.
+
+The only currently supported protocol value is `openai`. Unsupported values
+are rejected during admission and runtime resolution rather than being routed
+with accidental OpenAI semantics. Additional protocols require explicit
+gateway behavior before they can be accepted.
+
 Phases: `Pending`, `Ready`, `Unavailable`, `Failed`. The controller publishes a
 `Ready` condition with stable `RuntimeValidated` or `RuntimeInvalid` reasons.
 

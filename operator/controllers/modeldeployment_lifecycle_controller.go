@@ -185,10 +185,7 @@ func (r *ModelDeploymentController) reconcile(
 		return r.patchDeploymentStatus(ctx, deployment, original, reason)
 	}
 
-	modelRuntime, err := r.getModelRuntime(ctx, deployment)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
+	modelRuntime := modelRuntimeFromResolved(deployment, validated.Runtime)
 	if _, err := r.ensureService(ctx, deployment, modelRuntime); err != nil {
 		if errors.Is(err, errPermanentLifecycle) {
 			if _, deleteErr := r.deleteRuntimeWorkload(ctx, deployment); deleteErr != nil {
@@ -1144,16 +1141,29 @@ func (r *ModelDeploymentController) touchCacheLastUsed(ctx context.Context, cach
 	return nil
 }
 
-func (r *ModelDeploymentController) getModelRuntime(
-	ctx context.Context,
+func modelRuntimeFromResolved(
 	deployment *v1alpha1.ModelDeployment,
-) (*v1alpha1.ModelRuntime, error) {
-	var modelRuntime v1alpha1.ModelRuntime
-	key := types.NamespacedName{Namespace: deployment.Namespace, Name: deployment.Spec.Runtime.Ref}
-	if err := r.client.Get(ctx, key, &modelRuntime); err != nil {
-		return nil, fmt.Errorf("get resolved ModelRuntime: %w", err)
+	resolved inferopsruntime.ResolvedRuntime,
+) *v1alpha1.ModelRuntime {
+	spec := resolved.Spec()
+	return &v1alpha1.ModelRuntime{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      deployment.Spec.Runtime.Ref,
+			Namespace: deployment.Namespace,
+		},
+		Spec: v1alpha1.ModelRuntimeSpec{
+			Engine:        spec.Engine,
+			Protocol:      spec.Protocol,
+			DefaultImage:  spec.Image,
+			Port:          spec.Port,
+			HealthPath:    spec.HealthPath,
+			ReadinessPath: spec.ReadinessPath,
+			MetricsPath:   spec.MetricsPath,
+			Command:       spec.Command,
+			Args:          spec.Args,
+			Env:           spec.Env,
+		},
 	}
-	return &modelRuntime, nil
 }
 
 func effectiveDesiredState(deployment *v1alpha1.ModelDeployment) v1alpha1.ActivationDesiredState {

@@ -47,6 +47,16 @@ spec:
               value: kubernetes
             - name: INFEROPS_GATEWAY_SYNC_INTERVAL
               value: {{ .Values.discovery.syncInterval | quote }}
+            {{- if .Values.auth.enabled }}
+            - name: INFEROPS_GATEWAY_AUTH_TOKEN_FILE
+              value: {{ printf "%s/%s" .Values.auth.mountPath .Values.auth.secretKey | quote }}
+            {{- end }}
+          {{- if .Values.auth.enabled }}
+          volumeMounts:
+            - name: gateway-auth
+              mountPath: {{ .Values.auth.mountPath | quote }}
+              readOnly: true
+          {{- end }}
           livenessProbe:
             httpGet:
               path: {{ .Values.probes.livenessPath }}
@@ -67,6 +77,16 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+      {{- if .Values.auth.enabled }}
+      volumes:
+        - name: gateway-auth
+          secret:
+            secretName: {{ required "auth.secretName is required when auth.enabled is true" .Values.auth.secretName | quote }}
+            defaultMode: 0444
+            items:
+              - key: {{ required "auth.secretKey is required when auth.enabled is true" .Values.auth.secretKey | quote }}
+                path: {{ .Values.auth.secretKey | quote }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -18,6 +18,14 @@ discovery:
   # The gateway rejects values below one second.
   syncInterval: 5s
 
+auth:
+  enabled: false
+  # Name of an existing Secret in the release namespace.
+  secretName: ""
+  # The key contains one bearer token per line.
+  secretKey: token
+  mountPath: /var/run/secrets/inferops-gateway-auth
+
 podDisruptionBudget:
   enabled: true
   minAvailable: 1

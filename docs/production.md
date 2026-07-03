@@ -29,7 +29,7 @@ The operator needs:
 The gateway needs:
 
 - Read `ModelDeployment` and `Service`
-- Read referenced `Secret` for auth tokens
+- Receive the referenced auth `Secret` through a read-only projected volume
 
 Neither component needs cluster-admin. Keep roles namespace-scoped where possible.
 
@@ -70,6 +70,10 @@ Watch these:
 | Activation failures | `inferops_activation_failures_total` |
 | Cache failures | `inferops_cache_download_failures_total` |
 | Request latency / errors | Gateway metrics |
+| Gateway request count | `inferops_gateway_requests_total` |
+| Gateway request latency | `inferops_gateway_request_duration_seconds` |
+| Gateway active requests | `inferops_gateway_active_requests` |
+| Gateway upstream failures | `inferops_gateway_upstream_errors_total` |
 | Runtime readiness | Engine `/health` |
 
 ## Upgrades

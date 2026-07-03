@@ -19,7 +19,7 @@ PYTHON ?= $(if $(wildcard $(LOCAL_PYTHON)),$(LOCAL_PYTHON),$(SYSTEM_PYTHON))
 GO_FILES := $(shell find . -type f -name '*.go' -not -path './vendor/*' -not -path './.git/*' | sort)
 CHARTS := $(sort $(dir $(wildcard deploy/helm/*/Chart.yaml)))
 
-.PHONY: help setup tools-check fmt fmt-check test vet python-check python-test python-package \
+.PHONY: help setup tools-check fmt fmt-check test vet python-check python-test python-package runtime-conformance runtime-conformance-matrix \
 	model-downloader-build model-downloader-test helm-lint helm-template yaml-check schema-check verify
 
 help:
@@ -34,6 +34,8 @@ help:
 		'  python-check   Parse Python source files' \
 		'  python-test    Run Python unit tests' \
 		'  python-package Build the CLI source distribution and wheel' \
+		'  runtime-conformance Validate a running runtime; requires RUNTIME_BASE_URL and RUNTIME_MODEL' \
+		'  runtime-conformance-matrix Validate live vLLM and SGLang release candidates' \
 		'  model-downloader-build Build the cache downloader container image' \
 		'  model-downloader-test  Run cache downloader unit tests' \
 		'  helm-lint      Lint all Helm charts' \
@@ -96,6 +98,27 @@ python-package:
 	@mkdir -p .verify/dist
 	$(PYTHON) -m build --no-isolation cli --outdir .verify/dist
 
+runtime-conformance:
+	@test -n "$(RUNTIME_BASE_URL)" || { echo "error: RUNTIME_BASE_URL is required"; exit 1; }
+	@test -n "$(RUNTIME_MODEL)" || { echo "error: RUNTIME_MODEL is required"; exit 1; }
+	$(PYTHON) scripts/runtime_conformance.py \
+		--base-url "$(RUNTIME_BASE_URL)" \
+		--model "$(RUNTIME_MODEL)" \
+		$(RUNTIME_CONFORMANCE_ARGS)
+
+runtime-conformance-matrix:
+	@test -n "$(VLLM_BASE_URL)" || { echo "error: VLLM_BASE_URL is required"; exit 1; }
+	@test -n "$(VLLM_MODEL)" || { echo "error: VLLM_MODEL is required"; exit 1; }
+	@test -n "$(SGLANG_BASE_URL)" || { echo "error: SGLANG_BASE_URL is required"; exit 1; }
+	@test -n "$(SGLANG_MODEL)" || { echo "error: SGLANG_MODEL is required"; exit 1; }
+	$(PYTHON) scripts/runtime_conformance.py \
+		--base-url "$(VLLM_BASE_URL)" \
+		--model "$(VLLM_MODEL)"
+	$(PYTHON) scripts/runtime_conformance.py \
+		--base-url "$(SGLANG_BASE_URL)" \
+		--model "$(SGLANG_MODEL)" \
+		--readiness-path /health_generate
+
 model-downloader-build:
 	$(DOCKER) build \
 		--file runtimes/model-downloader/Dockerfile \
@@ -144,6 +167,11 @@ helm-lint:
 		echo "error: operator chart accepted an impossible PodDisruptionBudget"; \
 		exit 1; \
 	fi
+	@if $(HELM) template invalid deploy/helm/inferops-gateway \
+		--set auth.enabled=true >/dev/null 2>&1; then \
+		echo "error: gateway chart accepted auth without a Secret name"; \
+		exit 1; \
+	fi
 	@$(HELM) template inferops-operator-ha deploy/helm/inferops-operator \
 		--set replicaCount=2 >/dev/null
 
@@ -167,6 +195,10 @@ helm-template:
 		--set tailscale.enabled=true \
 		--set-string tailscale.hostname=inferops \
 		> .verify/helm/inferops-gateway-homelab.yaml
+	@$(HELM) template inferops-gateway-auth deploy/helm/inferops-gateway \
+		--set auth.enabled=true \
+		--set-string auth.secretName=inferops-gateway-token \
+		> .verify/helm/inferops-gateway-auth.yaml
 	@runtime_count=$$(grep -c '^kind: ModelRuntime$$' .verify/helm/inferops-operator.yaml); \
 	[ "$$runtime_count" -eq 4 ] || { \
 		echo "error: operator chart rendered $$runtime_count packaged runtimes, want 4"; \
@@ -177,6 +209,8 @@ helm-template:
 	@grep -q 'profile: "homelab"' .verify/helm/inferops-operator-homelab.yaml
 	@grep -q 'gpu.required: "true"' .verify/helm/inferops-operator-homelab.yaml
 	@grep -q 'gpu.required: "false"' .verify/helm/inferops-operator.yaml
+	@grep -q 'INFEROPS_GATEWAY_AUTH_TOKEN_FILE' .verify/helm/inferops-gateway-auth.yaml
+	@grep -q 'secretName: "inferops-gateway-token"' .verify/helm/inferops-gateway-auth.yaml
 	@grep -q '^kind: ValidatingWebhookConfiguration$$' .verify/helm/inferops-operator.yaml
 	@test "$$(grep -c '^kind: PodDisruptionBudget$$' .verify/helm/inferops-operator.yaml)" -eq 1
 	@test "$$(grep -c '^kind: PodDisruptionBudget$$' .verify/helm/inferops-gateway.yaml)" -eq 1

@@ -84,6 +84,13 @@ func resolveAgainstRuntime(deployment *v1alpha1.ModelDeployment, runtime *v1alph
 	if runtime.Spec.Protocol == "" {
 		return ResolvedRuntime{}, errors.New("runtime protocol is required")
 	}
+	if runtime.Spec.Protocol != v1alpha1.ModelRuntimeProtocolOpenAI {
+		return ResolvedRuntime{}, fmt.Errorf(
+			"runtime protocol %q is unsupported; expected %q",
+			runtime.Spec.Protocol,
+			v1alpha1.ModelRuntimeProtocolOpenAI,
+		)
+	}
 
 	image := deployment.Spec.Runtime.Image
 	if image == "" {

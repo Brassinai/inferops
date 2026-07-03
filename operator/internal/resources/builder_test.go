@@ -104,6 +104,7 @@ func testModelRuntime() *v1alpha1.ModelRuntime {
 			Port:          8000,
 			HealthPath:    "/health",
 			ReadinessPath: "/ready",
+			MetricsPath:   "/prometheus",
 			Command:       []string{"/opt/inferops/entrypoint.sh"},
 			Args:          []string{"--served-by=inferops"},
 			Env: map[string]string{
@@ -415,6 +416,18 @@ func TestBuildRuntimeDeployment(t *testing.T) {
 			t.Errorf("pod label %q = %q, want %q", key, deployment.Spec.Template.Labels[key], value)
 		}
 	}
+	if got, want := deployment.Spec.Template.Annotations["prometheus.io/path"], runtime.Spec.MetricsPath; got != want {
+		t.Errorf("metrics path annotation = %q, want %q", got, want)
+	}
+	if got, want := deployment.Spec.Template.Annotations["prometheus.io/port"], "8000"; got != want {
+		t.Errorf("metrics port annotation = %q, want %q", got, want)
+	}
+	if got := deployment.Spec.Template.Annotations["prometheus.io/scrape"]; got != "true" {
+		t.Errorf("metrics scrape annotation = %q, want true", got)
+	}
+	if got, want := deployment.Spec.Template.Annotations["inferops.dev/runtime-protocol"], runtime.Spec.Protocol; got != want {
+		t.Errorf("runtime protocol annotation = %q, want %q", got, want)
+	}
 
 	podSpec := deployment.Spec.Template.Spec
 	if podSpec.AutomountServiceAccountToken == nil || *podSpec.AutomountServiceAccountToken {
@@ -565,6 +578,22 @@ func TestBuildRuntimeDeploymentVariants(t *testing.T) {
 			check: func(t *testing.T, deployment *appsv1.Deployment) {
 				if got, want := deployment.Spec.Template.Spec.Containers[0].Image, "ghcr.io/inferops/custom-runtime:v1.2.3"; got != want {
 					t.Fatalf("image = %q, want %q", got, want)
+				}
+			},
+		},
+		{
+			name: "readiness defaults to declared health path",
+			mutate: func(_ *v1alpha1.ModelDeployment, runtime *v1alpha1.ModelRuntime) {
+				runtime.Spec.HealthPath = "/live"
+				runtime.Spec.ReadinessPath = ""
+			},
+			check: func(t *testing.T, deployment *appsv1.Deployment) {
+				container := deployment.Spec.Template.Spec.Containers[0]
+				if got := container.ReadinessProbe.HTTPGet.Path; got != "/live" {
+					t.Fatalf("readiness path = %q, want /live", got)
+				}
+				if got := container.StartupProbe.HTTPGet.Path; got != "/live" {
+					t.Fatalf("startup path = %q, want /live", got)
 				}
 			},
 		},
@@ -736,6 +765,15 @@ func TestBuildRuntimeDeploymentRejectsInvalidInput(t *testing.T) {
 				runtime.Spec.Env[templates.EnvModelPath] = "/untrusted"
 			},
 			wantErr: "managed by InferOps",
+		},
+		{
+			name:      "unsupported runtime protocol",
+			cacheNode: "gpu-node-1",
+			cachePath: testCachePath,
+			mutate: func(_ *v1alpha1.ModelDeployment, runtime *v1alpha1.ModelRuntime) {
+				runtime.Spec.Protocol = "grpc"
+			},
+			wantErr: "unsupported",
 		},
 		{
 			name:      "invalid drain timeout",

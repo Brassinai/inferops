@@ -122,6 +122,7 @@ func TestMemoryRegistryRejectsUnsafeRoutePrefixes(t *testing.T) {
 	tests := []Backend{
 		{Name: "qwen", RoutePrefix: "/", State: StateInactive},
 		{Name: "qwen", RoutePrefix: "/readyz", State: StateInactive},
+		{Name: "qwen", RoutePrefix: "/metrics", State: StateInactive},
 		{Name: "qwen", RoutePrefix: "/models/../readyz", State: StateInactive},
 		{Name: "qwen", RoutePrefix: "/models/qwen%2fother", State: StateInactive},
 		{Name: "qwen", RoutePrefix: "/models/qwen?other", State: StateInactive},

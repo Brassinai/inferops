@@ -26,6 +26,16 @@ docker build \
 
 Override `SGLANG_IMAGE` only with a tested immutable version or digest.
 
+After starting the image on a GPU node, run the shared contract with SGLang's
+stronger readiness endpoint:
+
+```bash
+make runtime-conformance \
+  RUNTIME_BASE_URL=http://127.0.0.1:8000 \
+  RUNTIME_MODEL=<served-model-name> \
+  RUNTIME_CONFORMANCE_ARGS="--readiness-path /health_generate"
+```
+
 ## CPU support
 
 There is intentionally no generic SGLang CPU image in this repository.
