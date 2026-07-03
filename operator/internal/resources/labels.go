@@ -1,6 +1,7 @@
 package resources
 
 import (
+	"github.com/brassinai/inferops/internal/runtimecontract"
 	v1alpha1 "github.com/brassinai/inferops/operator/api/v1alpha1"
 	"github.com/brassinai/inferops/operator/internal/templates"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -12,7 +13,7 @@ const (
 	LabelName            = "app.kubernetes.io/name"
 	LabelManagedBy       = "app.kubernetes.io/managed-by"
 	LabelComponent       = "app.kubernetes.io/component"
-	LabelModelDeployment = "inferops.dev/modeldeployment"
+	LabelModelDeployment = runtimecontract.ModelDeploymentLabel
 	LabelModelCache      = "inferops.dev/modelcache"
 )
 

@@ -23,3 +23,11 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 app.kubernetes.io/name: {{ include "inferops-gateway.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
+
+{{- define "inferops-gateway.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create -}}
+{{- default (include "inferops-gateway.fullname" .) .Values.serviceAccount.name -}}
+{{- else -}}
+{{- required "serviceAccount.name is required when serviceAccount.create is false" .Values.serviceAccount.name -}}
+{{- end -}}
+{{- end -}}

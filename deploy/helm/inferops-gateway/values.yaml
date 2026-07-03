@@ -5,6 +5,19 @@ image:
 
 replicaCount: 1
 
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  create: true
+
+discovery:
+  # Bounds how long a Kubernetes lifecycle or Service change can remain unseen.
+  # The gateway rejects values below one second.
+  syncInterval: 5s
+
 podDisruptionBudget:
   enabled: true
   minAvailable: 1

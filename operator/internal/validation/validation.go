@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/brassinai/inferops/internal/routingpath"
 	v1alpha1 "github.com/brassinai/inferops/operator/api/v1alpha1"
 	"github.com/brassinai/inferops/operator/internal/paths"
 	"github.com/brassinai/inferops/operator/internal/resources"
@@ -136,8 +137,10 @@ func ValidateModelDeployment(deployment v1alpha1.ModelDeployment) error {
 	if err := validatePositiveQuantity(deployment.Spec.Cache.Size, "spec.cache.size"); err != nil {
 		return err
 	}
-	if deployment.Spec.Routing.Path != "" && !strings.HasPrefix(deployment.Spec.Routing.Path, "/") {
-		return errors.New("spec.routing.path must start with /")
+	if deployment.Spec.Routing.Path != "" {
+		if _, err := routingpath.Normalize(deployment.Spec.Routing.Path); err != nil {
+			return fmt.Errorf("spec.routing.path: %w", err)
+		}
 	}
 	if err := validateScheduling(deployment.Spec.Scheduling); err != nil {
 		return err

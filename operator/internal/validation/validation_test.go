@@ -64,6 +64,18 @@ func TestValidateModelDeployment(t *testing.T) {
 		{name: "mutable runtime image", mutate: func(d *v1alpha1.ModelDeployment) {
 			d.Spec.Runtime.Image = "ghcr.io/inferops/runtime:latest"
 		}, wantErr: true},
+		{name: "valid custom route", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Routing.Path = "/inference/qwen"
+		}},
+		{name: "non-canonical custom route", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Routing.Path = "/models/../readyz"
+		}, wantErr: true},
+		{name: "reserved custom route", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Routing.Path = "/healthz/model"
+		}, wantErr: true},
+		{name: "escaped custom route", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Routing.Path = "/models/qwen%2fother"
+		}, wantErr: true},
 		{name: "invalid node selector", mutate: func(d *v1alpha1.ModelDeployment) {
 			d.Spec.Scheduling.NodeSelector = map[string]string{"not a key": "value"}
 		}, wantErr: true},

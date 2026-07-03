@@ -69,12 +69,16 @@ For a `ModelDeployment` named `<name>` in namespace `<namespace>`:
 - The gateway route prefix defaults to `/models/<name>`.
 - OpenAI-compatible requests use `/models/<name>/v1/...`; the gateway removes
   `/models/<name>` and forwards `/v1/...` to `<name>-runtime:8000`.
+- The gateway admits traffic only after the current deployment conditions,
+  Service contract, and at least one non-terminating ready EndpointSlice
+  endpoint agree.
 - `status.serviceName` and `status.endpoint` report the resolved names. The
   endpoint remains stable while the model is inactive, waiting, or failed,
   although requests may return an unavailable response.
 
-`spec.routing.path` may override the route prefix, but the default convention
-is the interoperability contract all lanes must support.
+`spec.routing.path` may override the route prefix with a canonical,
+non-reserved path, but the default convention is the interoperability contract
+all lanes must support.
 
 ## Runtime Abstraction
 
