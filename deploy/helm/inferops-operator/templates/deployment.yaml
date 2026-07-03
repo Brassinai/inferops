@@ -1,9 +1,18 @@
-{{- if ne (int .Values.replicaCount) 1 }}
-{{- fail "replicaCount must be 1 until the operator implements leader election" }}
-{{- end }}
 {{- $cacheRoot := required "cache.root is required" .Values.cache.root }}
 {{- if or (not (isAbs $cacheRoot)) (eq $cacheRoot "/") (ne (clean $cacheRoot) $cacheRoot) }}
 {{- fail "cache.root must be a clean absolute path other than /" }}
+{{- end }}
+{{- if .Values.webhook.enabled }}
+{{- $webhookCertDir := required "webhook.certDir is required when webhook.enabled is true" .Values.webhook.certDir }}
+{{- if or (not (isAbs $webhookCertDir)) (ne (clean $webhookCertDir) $webhookCertDir) }}
+{{- fail "webhook.certDir must be a clean absolute path" }}
+{{- end }}
+{{- if or (lt (int .Values.webhook.port) 1) (gt (int .Values.webhook.port) 65535) }}
+{{- fail "webhook.port must be between 1 and 65535" }}
+{{- end }}
+{{- if and .Values.webhook.tls.existingSecret (not .Values.webhook.tls.caBundle) }}
+{{- fail "webhook.tls.caBundle is required when webhook.tls.existingSecret is set" }}
+{{- end }}
 {{- end }}
 apiVersion: apps/v1
 kind: Deployment
@@ -45,22 +54,48 @@ spec:
               value: {{ .Values.cache.root | quote }}
             - name: INFEROPS_CACHE_DOWNLOADER_IMAGE
               value: {{ .Values.cache.downloaderImage | quote }}
+            - name: INFEROPS_DEFAULT_CACHE_SIZE
+              value: {{ .Values.cache.defaultSize | quote }}
             - name: INFEROPS_CACHE_CAPACITY_ANNOTATION
               value: {{ .Values.cache.capacityAnnotation | quote }}
             - name: INFEROPS_CACHE_NODE_SELECTOR
               value: {{ include "inferops-operator.cacheNodeSelector" . | quote }}
             - name: INFEROPS_CACHE_REQUIRED_RESOURCES
               value: {{ join "," .Values.cache.requiredNodeResources | quote }}
+            - name: INFEROPS_CACHE_PENDING_REQUEUE
+              value: {{ .Values.cache.pendingRequeueInterval | quote }}
+            - name: INFEROPS_CACHE_DOWNLOAD_REQUEUE
+              value: {{ .Values.cache.downloadRequeueInterval | quote }}
+            - name: INFEROPS_GPU_NODE_SELECTOR
+              value: {{ include "inferops-operator.gpuNodeSelector" . | quote }}
+            - name: INFEROPS_GPU_TYPE_LABEL
+              value: {{ .Values.scheduling.gpuTypeLabel | quote }}
+            - name: INFEROPS_WEBHOOK_ENABLED
+              value: {{ .Values.webhook.enabled | quote }}
+            - name: INFEROPS_WEBHOOK_PORT
+              value: {{ .Values.webhook.port | quote }}
+            - name: INFEROPS_WEBHOOK_CERT_DIR
+              value: {{ .Values.webhook.certDir | quote }}
             - name: INFEROPS_HEALTH_ADDR
               value: ":{{ .Values.probes.port }}"
+            - name: INFEROPS_METRICS_ADDR
+              value: ":{{ .Values.metrics.port }}"
             - name: INFEROPS_OPERATOR_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
           ports:
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
             - name: health
               containerPort: {{ .Values.probes.port }}
               protocol: TCP
+            {{- if .Values.webhook.enabled }}
+            - name: webhook
+              containerPort: {{ .Values.webhook.port }}
+              protocol: TCP
+            {{- end }}
           livenessProbe:
             httpGet:
               path: {{ .Values.probes.livenessPath }}
@@ -81,6 +116,18 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.webhook.enabled }}
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: {{ .Values.webhook.certDir }}
+              readOnly: true
+          {{- end }}
+      {{- if .Values.webhook.enabled }}
+      volumes:
+        - name: webhook-certs
+          secret:
+            secretName: {{ include "inferops-operator.webhookSecretName" . }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .errors import ExitCode, run_with_cli_errors
 from .kube import LogsRequest, build_cluster_target, resolve_client
+from .lifecycle import parse_positive_integer
 from .options import add_cluster_options
 from .output import CommandResult, emit_result
 
@@ -13,12 +14,12 @@ def register(subcommands) -> None:
     parser = subcommands.add_parser(
         "logs",
         help="Show deployment logs.",
-        description="Show placeholder deployment logs through the Kubernetes client boundary.",
+        description="Show logs from the deployment's current runtime Pod.",
     )
     parser.add_argument("name", help="Deployment name.")
     parser.add_argument(
         "--tail",
-        type=int,
+        type=parse_positive_integer,
         default=20,
         help="Maximum number of log lines to print. Defaults to 20.",
     )
@@ -37,7 +38,7 @@ def run(args, client=None) -> int:
         emit_result(
             args.output,
             CommandResult(
-                summary=f"Log placeholder fetched for {args.name} in namespace {cluster.namespace}.",
+                summary=f"Logs for {args.name} in namespace {cluster.namespace}.",
                 payload=response,
                 details=tuple(response["lines"]),
             ),

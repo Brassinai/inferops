@@ -13,6 +13,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -24,9 +25,9 @@ const (
 	shutdownGraceBuffer = 30 * time.Second
 )
 
-// BuildRuntimeDeployment returns a deterministic Deployment for a ModelDeployment.
-// Active deployments require a ready node-local cache placement. Inactive
-// deployments retain a zero-replica workload without creating runtime pods.
+// BuildRuntimeDeployment returns a deterministic runtime Deployment. Active
+// deployments require a ready node-local cache placement. The lifecycle
+// controller does not persist the zero-replica form for inactive models.
 func (b Builder) BuildRuntimeDeployment(
 	md *v1alpha1.ModelDeployment,
 	runtime *v1alpha1.ModelRuntime,
@@ -126,6 +127,12 @@ func (b Builder) BuildRuntimeDeployment(
 		Resources: containerResources,
 		SecurityContext: &corev1.SecurityContext{
 			AllowPrivilegeEscalation: boolPointer(false),
+			Capabilities: &corev1.Capabilities{
+				Drop: []corev1.Capability{"ALL"},
+			},
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: corev1.SeccompProfileTypeRuntimeDefault,
+			},
 		},
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
@@ -177,13 +184,25 @@ func (b Builder) BuildRuntimeDeployment(
 		}
 	}
 	automountServiceAccountToken := false
+	enableServiceLinks := false
 	podSpec := corev1.PodSpec{
 		AutomountServiceAccountToken:  &automountServiceAccountToken,
+		EnableServiceLinks:            &enableServiceLinks,
 		TerminationGracePeriodSeconds: &terminationGracePeriodSeconds,
 		Containers:                    []corev1.Container{container},
 		Volumes:                       volumes,
+		NodeSelector:                  copyStringMap(md.Spec.Scheduling.NodeSelector),
+		Tolerations:                   buildTolerations(md.Spec.Scheduling.Tolerations),
+		TopologySpreadConstraints:     buildTopologySpreadConstraints(md),
 	}
 	if cacheNode != "" {
+		if hostname, found := podSpec.NodeSelector[corev1.LabelHostname]; found && hostname != cacheNode {
+			return nil, fmt.Errorf(
+				"spec.scheduling.nodeSelector requires node %q but the model cache is ready on node %q",
+				hostname,
+				cacheNode,
+			)
+		}
 		podSpec.Affinity = &corev1.Affinity{
 			NodeAffinity: NodeAffinityForCacheNode(cacheNode),
 		}
@@ -213,6 +232,132 @@ func (b Builder) BuildRuntimeDeployment(
 			},
 		},
 	}, nil
+}
+
+// BuildRuntimePodDisruptionBudget returns disruption protection for an active
+// runtime. A nil result means protection was explicitly disabled.
+func BuildRuntimePodDisruptionBudget(
+	md *v1alpha1.ModelDeployment,
+) (*policyv1.PodDisruptionBudget, error) {
+	if md == nil {
+		return nil, errors.New("model deployment is required")
+	}
+	if err := validateModelDeploymentName(md.Name); err != nil {
+		return nil, err
+	}
+	if !podDisruptionBudgetEnabled(md) {
+		return nil, nil
+	}
+
+	replicas := md.Spec.Scaling.MinReplicas
+	if replicas < 1 {
+		replicas = 1
+	}
+	minAvailable := replicas - 1
+	if minAvailable < 1 {
+		minAvailable = 1
+	}
+	if configured := md.Spec.Availability.PodDisruptionBudget.MinAvailable; configured != nil {
+		if *configured < 0 {
+			return nil, errors.New("PodDisruptionBudget minAvailable must not be negative")
+		}
+		if *configured > replicas {
+			return nil, fmt.Errorf(
+				"PodDisruptionBudget minAvailable %d must not exceed runtime replicas %d",
+				*configured,
+				replicas,
+			)
+		}
+		minAvailable = *configured
+	}
+	minAvailableValue := intstr.FromInt32(minAvailable)
+	return &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            templates.RuntimeServiceName(md.Name),
+			Namespace:       md.Namespace,
+			Labels:          BaseLabels(md.Name),
+			OwnerReferences: []metav1.OwnerReference{OwnerReferenceForModelDeployment(md)},
+		},
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			MinAvailable: &minAvailableValue,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: SelectorLabels(md.Name),
+			},
+			UnhealthyPodEvictionPolicy: unhealthyPodEvictionPolicyPointer(
+				policyv1.AlwaysAllow,
+			),
+		},
+	}, nil
+}
+
+func podDisruptionBudgetEnabled(md *v1alpha1.ModelDeployment) bool {
+	enabled := md.Spec.Availability.PodDisruptionBudget.Enabled
+	return enabled == nil || *enabled
+}
+
+func buildTolerations(input []v1alpha1.Toleration) []corev1.Toleration {
+	if len(input) == 0 {
+		return nil
+	}
+	result := make([]corev1.Toleration, len(input))
+	for i := range input {
+		operator := corev1.TolerationOperator(input[i].Operator)
+		if operator == "" {
+			operator = corev1.TolerationOpEqual
+		}
+		result[i] = corev1.Toleration{
+			Key:               input[i].Key,
+			Operator:          operator,
+			Value:             input[i].Value,
+			Effect:            corev1.TaintEffect(input[i].Effect),
+			TolerationSeconds: copyInt64Pointer(input[i].TolerationSeconds),
+		}
+	}
+	return result
+}
+
+func buildTopologySpreadConstraints(md *v1alpha1.ModelDeployment) []corev1.TopologySpreadConstraint {
+	input := md.Spec.Scheduling.TopologySpreadConstraints
+	if len(input) == 0 {
+		return nil
+	}
+	result := make([]corev1.TopologySpreadConstraint, len(input))
+	for i := range input {
+		result[i] = corev1.TopologySpreadConstraint{
+			MaxSkew:           input[i].MaxSkew,
+			TopologyKey:       input[i].TopologyKey,
+			WhenUnsatisfiable: corev1.UnsatisfiableConstraintAction(input[i].WhenUnsatisfiable),
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: SelectorLabels(md.Name),
+			},
+		}
+	}
+	return result
+}
+
+func copyStringMap(input map[string]string) map[string]string {
+	if input == nil {
+		return nil
+	}
+	result := make(map[string]string, len(input))
+	for key, value := range input {
+		result[key] = value
+	}
+	return result
+}
+
+func copyInt64Pointer(input *int64) *int64 {
+	if input == nil {
+		return nil
+	}
+	value := *input
+	return &value
+}
+
+func unhealthyPodEvictionPolicyPointer(
+	policy policyv1.UnhealthyPodEvictionPolicyType,
+) *policyv1.UnhealthyPodEvictionPolicyType {
+	return &policy
 }
 
 func imagePullPolicy(image string) corev1.PullPolicy {

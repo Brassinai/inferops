@@ -1,11 +1,16 @@
 package templates
 
+import (
+	"github.com/brassinai/inferops/internal/routingpath"
+	"github.com/brassinai/inferops/internal/runtimecontract"
+)
+
 // RuntimeContainerName is the stable container name for managed runtime pods.
 const RuntimeContainerName = "runtime"
 
 const (
 	// RuntimeServiceSuffix is appended to a ModelDeployment name for its stable Service.
-	RuntimeServiceSuffix = "-runtime"
+	RuntimeServiceSuffix = runtimecontract.ServiceSuffix
 	// RuntimeHTTPPort is the default container and Service target port.
 	RuntimeHTTPPort int32 = 8000
 	// RuntimeHealthPath is used for process liveness checks.
@@ -15,7 +20,7 @@ const (
 	// RuntimeMetricsPath exposes Prometheus metrics.
 	RuntimeMetricsPath = "/metrics"
 	// GatewayModelPathPrefix is the stable per-model route prefix.
-	GatewayModelPathPrefix = "/models/"
+	GatewayModelPathPrefix = routingpath.DefaultModelPrefix
 	// OpenAIPathPrefix is the path exposed by OpenAI-compatible runtimes.
 	OpenAIPathPrefix = "/v1"
 
@@ -39,7 +44,7 @@ const (
 	// RuntimeModelMountPath is the stable in-container path for prepared model files.
 	RuntimeModelMountPath = "/models/model"
 	// HTTPPortName is the canonical name for the runtime HTTP port.
-	HTTPPortName = "http"
+	HTTPPortName = runtimecontract.HTTPPortName
 	// DefaultGPUVendor is the default GPU vendor resource name prefix.
 	DefaultGPUVendor = "nvidia"
 	// CacheDownloaderContainerName is the container name for cache download Jobs.
@@ -59,12 +64,12 @@ const (
 
 // RuntimeServiceName returns the stable runtime Service name for a ModelDeployment.
 func RuntimeServiceName(modelDeploymentName string) string {
-	return modelDeploymentName + RuntimeServiceSuffix
+	return runtimecontract.ServiceName(modelDeploymentName)
 }
 
 // GatewayModelPath returns the stable gateway base path for a ModelDeployment.
 func GatewayModelPath(modelDeploymentName string) string {
-	return GatewayModelPathPrefix + modelDeploymentName
+	return routingpath.DefaultModelRoute(modelDeploymentName)
 }
 
 // GatewayOpenAIBasePath returns the stable OpenAI-compatible gateway base path.

@@ -1,6 +1,7 @@
 GO ?= go
 GOFMT ?= gofmt
 HELM ?= helm
+DOCKER ?= docker
 
 GO_VERSION ?= 1.22
 PYTHON_VERSION ?= 3.10
@@ -19,7 +20,7 @@ GO_FILES := $(shell find . -type f -name '*.go' -not -path './vendor/*' -not -pa
 CHARTS := $(sort $(dir $(wildcard deploy/helm/*/Chart.yaml)))
 
 .PHONY: help setup tools-check fmt fmt-check test vet python-check python-test python-package \
-	helm-lint helm-template yaml-check schema-check verify
+	model-downloader-build model-downloader-test helm-lint helm-template yaml-check schema-check verify
 
 help:
 	@printf '%s\n' \
@@ -33,6 +34,8 @@ help:
 		'  python-check   Parse Python source files' \
 		'  python-test    Run Python unit tests' \
 		'  python-package Build the CLI source distribution and wheel' \
+		'  model-downloader-build Build the cache downloader container image' \
+		'  model-downloader-test  Run cache downloader unit tests' \
 		'  helm-lint      Lint all Helm charts' \
 		'  helm-template  Render all Helm charts' \
 		'  yaml-check     Parse checked-in YAML files' \
@@ -93,6 +96,15 @@ python-package:
 	@mkdir -p .verify/dist
 	$(PYTHON) -m build --no-isolation cli --outdir .verify/dist
 
+model-downloader-build:
+	$(DOCKER) build \
+		--file runtimes/model-downloader/Dockerfile \
+		--tag inferops/model-downloader:dev \
+		.
+
+model-downloader-test:
+	PYTHONPATH=sdk/python:cli $(PYTHON) -m unittest tests.python.test_model_downloader
+
 helm-lint:
 	@for crd in deploy/manifests/crds/*.yaml; do \
 		chart_crd="deploy/helm/inferops-operator/crds/$$(basename "$$crd")"; \
@@ -113,11 +125,6 @@ helm-lint:
 	@$(HELM) lint deploy/helm/inferops-runtime \
 		--values deploy/helm/inferops-runtime/values-cpu.yaml
 	@if $(HELM) template invalid deploy/helm/inferops-operator \
-		--set replicaCount=2 >/dev/null 2>&1; then \
-		echo "error: operator chart accepted multiple replicas without leader election"; \
-		exit 1; \
-	fi
-	@if $(HELM) template invalid deploy/helm/inferops-operator \
 		--set-string cache.root=relative/path >/dev/null 2>&1; then \
 		echo "error: operator chart accepted an unsafe cache root"; \
 		exit 1; \
@@ -127,6 +134,18 @@ helm-lint:
 		echo "error: operator chart accepted an unpinned diagnostics image"; \
 		exit 1; \
 	fi
+	@if $(HELM) template invalid deploy/helm/inferops-operator \
+		--set-string webhook.certDir=relative/path >/dev/null 2>&1; then \
+		echo "error: operator chart accepted an invalid webhook certificate directory"; \
+		exit 1; \
+	fi
+	@if $(HELM) template invalid deploy/helm/inferops-operator \
+		--set podDisruptionBudget.minAvailable=2 >/dev/null 2>&1; then \
+		echo "error: operator chart accepted an impossible PodDisruptionBudget"; \
+		exit 1; \
+	fi
+	@$(HELM) template inferops-operator-ha deploy/helm/inferops-operator \
+		--set replicaCount=2 >/dev/null
 
 helm-template:
 	@rm -rf .verify/helm
@@ -158,6 +177,9 @@ helm-template:
 	@grep -q 'profile: "homelab"' .verify/helm/inferops-operator-homelab.yaml
 	@grep -q 'gpu.required: "true"' .verify/helm/inferops-operator-homelab.yaml
 	@grep -q 'gpu.required: "false"' .verify/helm/inferops-operator.yaml
+	@grep -q '^kind: ValidatingWebhookConfiguration$$' .verify/helm/inferops-operator.yaml
+	@test "$$(grep -c '^kind: PodDisruptionBudget$$' .verify/helm/inferops-operator.yaml)" -eq 1
+	@test "$$(grep -c '^kind: PodDisruptionBudget$$' .verify/helm/inferops-gateway.yaml)" -eq 1
 	@! grep -q 'tailscale.com/hostname' .verify/helm/inferops-gateway-homelab.yaml || { \
 		echo "error: Tailscale Ingress hostname must be configured through spec.tls.hosts"; \
 		exit 1; \

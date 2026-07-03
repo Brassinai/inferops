@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 import time
@@ -26,14 +27,17 @@ from .diagnostic_helpers import (
 )
 from .errors import CLIError, NotFoundError
 from .kube import (
+    ActivationRequest,
     CacheDeleteRequest,
     ClusterTarget,
+    DeactivationRequest,
     DeployRequest,
     DoctorRequest,
     InstallRequest,
     KubernetesClient,
     LogsRequest,
     NamedRequest,
+    StatusRequest,
 )
 
 
@@ -177,37 +181,105 @@ class LiveKubernetesClient(KubernetesClient):
             )
         return {"deployments": deployments}
 
-    def activate(self, request: NamedRequest) -> dict[str, Any]:
-        """Set desiredState to Active."""
+    def activate(self, request: ActivationRequest) -> dict[str, Any]:
+        """Set desiredState to Active and observe the resulting status."""
         deployment = self._patch_activation(
-            request.name, self._cluster.namespace, "Active"
+            request.name,
+            request.cluster.namespace,
+            "Active",
+            when_full=request.when_full,
         )
-        return {
-            "deployment": _summarize_deployment(deployment),
-        }
+        return self._lifecycle_response(
+            deployment,
+            operation="activate",
+            wait=request.wait,
+            timeout_seconds=request.timeout_seconds,
+            poll_interval_seconds=request.poll_interval_seconds,
+            on_transition=request.on_transition,
+        )
 
-    def deactivate(self, request: NamedRequest) -> dict[str, Any]:
-        """Set desiredState to Inactive."""
+    def deactivate(self, request: DeactivationRequest) -> dict[str, Any]:
+        """Set desiredState to Inactive and observe the resulting status."""
         deployment = self._patch_activation(
-            request.name, self._cluster.namespace, "Inactive"
+            request.name, request.cluster.namespace, "Inactive"
         )
-        return {
-            "deployment": _summarize_deployment(deployment),
-        }
+        return self._lifecycle_response(
+            deployment,
+            operation="deactivate",
+            wait=request.wait,
+            timeout_seconds=request.timeout_seconds,
+            poll_interval_seconds=request.poll_interval_seconds,
+            on_transition=request.on_transition,
+        )
 
-    def status(self, request: NamedRequest) -> dict[str, Any]:
+    def status(self, request: StatusRequest) -> dict[str, Any]:
         """Fetch one ModelDeployment status."""
-        deployment = self._get_modeldeployment(request.name, self._cluster.namespace)
+        deployment = self._get_modeldeployment(
+            request.name, request.cluster.namespace
+        )
+        if request.watch:
+            summary = _summarize_deployment(deployment)
+            operation = (
+                "activate"
+                if summary["desiredState"] == "Active"
+                else "deactivate"
+            )
+            response = self._lifecycle_response(
+                deployment,
+                operation=operation,
+                wait=True,
+                timeout_seconds=request.timeout_seconds,
+                poll_interval_seconds=request.poll_interval_seconds,
+                on_transition=request.on_transition,
+            )
+            response["operation"] = "status"
+            return response
         return {
             "deployment": _summarize_deployment(deployment),
         }
+
+    def models(self, cluster: ClusterTarget) -> dict[str, Any]:
+        """List ModelDeployments without returning Secret references."""
+        deployments = self._list_modeldeployments(cluster.namespace)
+        return {
+            "models": sorted(
+                (_summarize_deployment(item) for item in deployments),
+                key=lambda item: item["name"],
+            )
+        }
+
+    def endpoints(self, cluster: ClusterTarget) -> dict[str, Any]:
+        """List routing-enabled ModelDeployment endpoints."""
+        deployments = self._list_modeldeployments(cluster.namespace)
+        endpoints: list[dict[str, Any]] = []
+        for deployment in deployments:
+            spec = deployment.get("spec", {})
+            routing = spec.get("routing", {})
+            if routing.get("enabled", True) is False:
+                continue
+            summary = _summarize_deployment(deployment)
+            endpoints.append(
+                {
+                    "name": summary["name"],
+                    "namespace": summary["namespace"],
+                    "phase": summary["phase"],
+                    "ready": _ready_condition(_current_conditions(summary)),
+                    "endpoint": summary["endpoint"]
+                    or _routing_endpoint(summary["name"], routing),
+                    "serviceName": summary["serviceName"]
+                    or f"{summary['name']}-runtime",
+                }
+            )
+        return {"endpoints": sorted(endpoints, key=lambda item: item["name"])}
 
     def logs(self, request: LogsRequest) -> dict[str, Any]:
         """Fetch logs from the first runtime pod for a deployment."""
         from kubernetes.client.rest import ApiException
 
-        namespace = self._cluster.namespace
-        label_selector = f"app.kubernetes.io/name={request.name}-runtime"
+        namespace = request.cluster.namespace
+        deployment = self._get_modeldeployment(request.name, namespace)
+        deployment_name = deployment["metadata"]["name"]
+        label_selector = f"inferops.dev/modeldeployment={deployment_name}"
         try:
             pods = self._core_v1_api.list_namespaced_pod(
                 namespace=namespace,
@@ -221,11 +293,12 @@ class LiveKubernetesClient(KubernetesClient):
         if not pods or not pods.items:
             raise NotFoundError(f"no runtime pods found for {request.name}")
 
-        pod_name = pods.items[0].metadata.name
+        pod_name = _select_runtime_pod(pods.items).metadata.name
         try:
             log_response = self._core_v1_api.read_namespaced_pod_log(
                 name=pod_name,
                 namespace=namespace,
+                container="runtime",
                 tail_lines=request.tail,
             )
         except ApiException as exc:
@@ -235,7 +308,8 @@ class LiveKubernetesClient(KubernetesClient):
 
         lines = log_response.splitlines() if log_response else []
         return {
-            "deployment": {"name": request.name, "namespace": namespace},
+            "deployment": {"name": deployment_name, "namespace": namespace},
+            "pod": pod_name,
             "tail": request.tail,
             "lines": lines,
         }
@@ -532,6 +606,7 @@ class LiveKubernetesClient(KubernetesClient):
         return {
             "deployment": _summarize_deployment(deployment),
             "deleted": True,
+            "cachePreserved": True,
         }
 
     def doctor(self, request: DoctorRequest) -> dict[str, Any]:
@@ -1411,6 +1486,20 @@ class LiveKubernetesClient(KubernetesClient):
                 return False
             _raise_cli_error(exc)
 
+    def _list_modeldeployments(self, namespace: str) -> list[dict[str, Any]]:
+        from kubernetes.client.rest import ApiException
+
+        try:
+            response = self._custom_objects_api.list_namespaced_custom_object(
+                group="inference.inferops.dev",
+                version="v1alpha1",
+                namespace=namespace,
+                plural="modeldeployments",
+            )
+        except ApiException as exc:
+            _raise_cli_error(exc)
+        return list(response.get("items", []))
+
     def _get_modeldeployment(self, name: str, namespace: str) -> dict[str, Any]:
         from kubernetes.client.rest import ApiException
 
@@ -1428,11 +1517,18 @@ class LiveKubernetesClient(KubernetesClient):
             _raise_cli_error(exc)
 
     def _patch_activation(
-        self, name: str, namespace: str, desired_state: str
+        self,
+        name: str,
+        namespace: str,
+        desired_state: str,
+        when_full: str | None = None,
     ) -> dict[str, Any]:
         from kubernetes.client.rest import ApiException
 
-        body = {"spec": {"activation": {"desiredState": desired_state}}}
+        activation = {"desiredState": desired_state}
+        if when_full is not None:
+            activation["whenFull"] = when_full
+        body = {"spec": {"activation": activation}}
         try:
             return self._custom_objects_api.patch_namespaced_custom_object(
                 group="inference.inferops.dev",
@@ -1446,6 +1542,70 @@ class LiveKubernetesClient(KubernetesClient):
             if _is_not_found(exc):
                 raise NotFoundError(f"deployment not found: {name}")
             _raise_cli_error(exc)
+
+    def _lifecycle_response(
+        self,
+        deployment: dict[str, Any],
+        *,
+        operation: str,
+        wait: bool,
+        timeout_seconds: float,
+        poll_interval_seconds: float,
+        on_transition: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        summary = _summarize_deployment(deployment)
+        response: dict[str, Any] = {
+            "deployment": summary,
+            "operation": operation,
+            "outcome": "requested",
+            "transitions": [],
+        }
+        if not wait:
+            return response
+
+        name = summary["name"]
+        namespace = summary["namespace"]
+        target_generation = deployment.get("metadata", {}).get("generation", 0)
+        deadline = time.monotonic() + timeout_seconds
+        current = deployment
+        transitions: list[dict[str, Any]] = []
+        previous_transition: tuple[str, str, str] | None = None
+
+        while True:
+            summary = _summarize_deployment(current)
+            fresh = _status_is_fresh(current, target_generation)
+            if fresh:
+                transition = _status_transition(summary)
+                transition_key = (
+                    transition["phase"],
+                    transition.get("reason", ""),
+                    transition.get("message", ""),
+                )
+                if transition_key != previous_transition:
+                    transitions.append(transition)
+                    previous_transition = transition_key
+                    if on_transition is not None:
+                        on_transition(transition)
+
+                outcome = _lifecycle_outcome(operation, summary)
+                if outcome is not None:
+                    return {
+                        "deployment": summary,
+                        "operation": operation,
+                        "outcome": outcome,
+                        "transitions": transitions,
+                    }
+
+            if time.monotonic() >= deadline:
+                return {
+                    "deployment": summary,
+                    "operation": operation,
+                    "outcome": "timeout",
+                    "transitions": transitions,
+                }
+
+            time.sleep(poll_interval_seconds)
+            current = self._get_modeldeployment(name, namespace)
 
 
 def _clean_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -1475,10 +1635,184 @@ def _summarize_deployment(deployment: dict[str, Any]) -> dict[str, Any]:
     """Build a CLI-safe summary of a ModelDeployment."""
     status = deployment.get("status", {})
     spec = deployment.get("spec", {})
+    metadata = deployment.get("metadata", {})
+    activation = spec.get("activation", {})
+    conditions = [
+        {
+            key: condition[key]
+            for key in (
+                "type",
+                "status",
+                "observedGeneration",
+                "lastTransitionTime",
+                "reason",
+                "message",
+            )
+            if key in condition
+        }
+        for condition in status.get("conditions", [])
+    ]
     return {
-        "name": deployment["metadata"]["name"],
-        "namespace": deployment["metadata"]["namespace"],
+        "name": metadata["name"],
+        "namespace": metadata.get("namespace", "default"),
         "phase": status.get("phase", "Unknown"),
+        "desiredState": activation.get("desiredState", "Inactive"),
+        "whenFull": activation.get("whenFull", "Queue"),
         "runtime": spec.get("runtime", {}).get("ref", ""),
         "model": spec.get("model", {}).get("repo", ""),
+        "endpoint": status.get("endpoint", ""),
+        "serviceName": status.get("serviceName", ""),
+        "assignedNode": status.get("assignedNode", ""),
+        "assignedGPUs": list(status.get("assignedGPUs", [])),
+        "cache": {
+            key: value
+            for key, value in status.get("cache", {}).items()
+            if key in {"state", "nodeName", "path"}
+        },
+        "replicas": {
+            key: value
+            for key, value in status.get("replicas", {}).items()
+            if key in {"desired", "ready"}
+        },
+        "modelLoaded": bool(status.get("model", {}).get("loaded", False)),
+        "observedGeneration": status.get("observedGeneration", 0),
+        "generation": metadata.get("generation", 0),
+        "conditions": conditions,
     }
+
+
+def _status_is_fresh(
+    deployment: dict[str, Any], target_generation: int | str
+) -> bool:
+    """Return whether status reflects the activation patch generation."""
+    metadata_generation = deployment.get("metadata", {}).get(
+        "generation", target_generation
+    )
+    observed_generation = deployment.get("status", {}).get(
+        "observedGeneration", 0
+    )
+    try:
+        required = max(int(target_generation or 0), int(metadata_generation or 0))
+        return required == 0 or int(observed_generation or 0) >= required
+    except (TypeError, ValueError):
+        return False
+
+
+def _lifecycle_outcome(
+    operation: str, summary: dict[str, Any]
+) -> str | None:
+    phase = summary["phase"]
+    expected_state = "Active" if operation == "activate" else "Inactive"
+    if summary["desiredState"] != expected_state:
+        return "superseded"
+    if phase == "Failed":
+        return (
+            "rejected"
+            if _is_rejected(_current_conditions(summary))
+            else "failed"
+        )
+
+    if operation == "activate":
+        if phase == "Active":
+            return "active"
+        if (
+            phase in {"WaitingForCapacity", "WaitingForGPU"}
+            and summary["whenFull"] == "Queue"
+        ):
+            return "waiting"
+        return None
+
+    if (
+        summary["desiredState"] == "Inactive"
+        and phase in {"Pending", "Cached"}
+    ):
+        return "inactive"
+    return None
+
+
+def _status_transition(summary: dict[str, Any]) -> dict[str, Any]:
+    condition = _actionable_condition(_current_conditions(summary))
+    transition: dict[str, Any] = {
+        "phase": summary["phase"],
+        "observedGeneration": summary["observedGeneration"],
+    }
+    if condition:
+        if condition.get("reason"):
+            transition["reason"] = condition["reason"]
+        if condition.get("message"):
+            transition["message"] = condition["message"]
+    return transition
+
+
+def _current_conditions(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    generation = summary.get("generation", 0)
+    current: list[dict[str, Any]] = []
+    for condition in summary["conditions"]:
+        observed = condition.get("observedGeneration")
+        if observed is None:
+            current.append(condition)
+            continue
+        try:
+            if int(observed) >= int(generation or 0):
+                current.append(condition)
+        except (TypeError, ValueError):
+            continue
+    return current
+
+
+def _actionable_condition(conditions: list[dict[str, Any]]) -> dict[str, Any]:
+    for condition in reversed(conditions):
+        if condition.get("status") == "False" and (
+            condition.get("reason") or condition.get("message")
+        ):
+            return condition
+    for condition in reversed(conditions):
+        if condition.get("type") == "Ready":
+            return condition
+    return {}
+
+
+def _is_rejected(conditions: list[dict[str, Any]]) -> bool:
+    for condition in conditions:
+        reason_and_message = " ".join(
+            str(condition.get(key, "")) for key in ("reason", "message")
+        ).lower()
+        if "reject" in reason_and_message:
+            return True
+    return False
+
+
+def _ready_condition(conditions: list[dict[str, Any]]) -> bool | None:
+    for condition in conditions:
+        if condition.get("type") != "Ready":
+            continue
+        if condition.get("status") == "True":
+            return True
+        if condition.get("status") == "False":
+            return False
+    return None
+
+
+def _routing_endpoint(name: str, routing: dict[str, Any]) -> str:
+    path = (routing.get("path") or f"/models/{name}").rstrip("/")
+    if routing.get("openAICompatible", True) and not path.endswith("/v1"):
+        return f"{path}/v1"
+    return path
+
+
+def _select_runtime_pod(pods: list[Any]) -> Any:
+    """Choose a live runtime Pod deterministically during rollouts."""
+    non_terminating = [
+        pod
+        for pod in pods
+        if getattr(pod.metadata, "deletion_timestamp", None) is None
+    ]
+    candidates = non_terminating or pods
+    return max(
+        candidates,
+        key=lambda pod: (
+            getattr(getattr(pod, "status", None), "phase", "") == "Running",
+            str(getattr(pod.metadata, "creation_timestamp", "") or ""),
+            pod.metadata.name,
+        ),
+    )

@@ -13,7 +13,7 @@ def register(subcommands) -> None:
     parser = subcommands.add_parser(
         "delete",
         help="Delete a deployment.",
-        description="Delete a deployment through the Kubernetes workflow placeholder.",
+        description="Delete a ModelDeployment and managed runtime resources. Model caches are preserved.",
     )
     parser.add_argument("name", help="Deployment name.")
     add_cluster_options(parser)
@@ -30,7 +30,10 @@ def run(args, client=None) -> int:
         emit_result(
             args.output,
             CommandResult(
-                summary=f"Delete placeholder recorded for {deployment['name']} in namespace {deployment['namespace']}.",
+                summary=(
+                    f"Deleted {deployment['name']} from namespace "
+                    f"{deployment['namespace']}; its model cache was preserved."
+                ),
                 payload=response,
             ),
         )

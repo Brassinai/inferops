@@ -39,3 +39,23 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- join "," $pairs -}}
 {{- end -}}
+
+{{- define "inferops-operator.gpuNodeSelector" -}}
+{{- $pairs := list -}}
+{{- range $key, $value := .Values.scheduling.gpuNodeSelector -}}
+{{- $pairs = append $pairs (printf "%s=%s" $key $value) -}}
+{{- end -}}
+{{- join "," $pairs -}}
+{{- end -}}
+
+{{- define "inferops-operator.webhookServiceName" -}}
+{{- printf "%s-webhook" (include "inferops-operator.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "inferops-operator.webhookSecretName" -}}
+{{- if .Values.webhook.tls.existingSecret -}}
+{{- .Values.webhook.tls.existingSecret -}}
+{{- else -}}
+{{- printf "%s-webhook-certs" (include "inferops-operator.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}

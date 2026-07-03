@@ -201,6 +201,43 @@ func TestCachePlannerRespectsNodeSelector(t *testing.T) {
 	}
 }
 
+func TestCachePlannerRespectsWorkloadScheduling(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	cache := testCache("cache-a")
+	cache.Spec.Storage.Size = "10Gi"
+	cache.Spec.Storage.NodeSelector = map[string]string{"inferops.dev/pool": "inference"}
+	cache.Spec.Storage.Tolerations = []v1alpha1.Toleration{{
+		Key:      "dedicated",
+		Operator: string(corev1.TolerationOpEqual),
+		Value:    "inference",
+		Effect:   string(corev1.TaintEffectNoSchedule),
+	}}
+	general := readyNode("general", "100Gi")
+	general.Labels = map[string]string{"inferops.dev/pool": "general"}
+	inference := readyNode("inference", "100Gi")
+	inference.Labels = map[string]string{"inferops.dev/pool": "inference"}
+	inference.Spec.Taints = []corev1.Taint{{
+		Key:    "dedicated",
+		Value:  "inference",
+		Effect: corev1.TaintEffectNoSchedule,
+	}}
+
+	placement, err := planner.Plan(cache, []corev1.Node{general, inference}, nil)
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if placement.NodeName != inference.Name {
+		t.Fatalf("node = %q, want %q", placement.NodeName, inference.Name)
+	}
+
+	cache.Spec.Storage.Tolerations = nil
+	if _, err := planner.Plan(cache, []corev1.Node{general, inference}, nil); !errors.Is(err, ErrNoEligibleNode) {
+		t.Fatalf("Plan() error = %v, want ErrNoEligibleNode", err)
+	}
+}
+
 func TestCachePlannerRequiresConfiguredNodeResources(t *testing.T) {
 	t.Parallel()
 
@@ -280,6 +317,35 @@ func TestCachePlannerPrefersExistingReadyCopy(t *testing.T) {
 	}
 	if placement.NodeName != "gpu-node-2" {
 		t.Errorf("node = %q, want gpu-node-2 (existing ready copy)", placement.NodeName)
+	}
+}
+
+func TestCachePlannerPrefersReadyCopyFromAnotherCache(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	cache := testCache("qwen-chat")
+	existing := *testCache("existing-copy")
+	existing.Status = v1alpha1.ModelCacheStatus{
+		Phase:        v1alpha1.ModelCachePhaseReady,
+		NodeName:     "gpu-node-2",
+		Path:         existing.Spec.Storage.Path,
+		ReservedSize: existing.Spec.Storage.Size,
+		Conditions: []v1alpha1.Condition{{
+			Type: v1alpha1.CacheConditionReady, Status: metav1.ConditionTrue,
+		}},
+	}
+	nodes := []corev1.Node{
+		readyNode("gpu-node-1", "1000Gi"),
+		readyNode("gpu-node-2", "500Gi"),
+	}
+
+	placement, err := planner.Plan(cache, nodes, []v1alpha1.ModelCache{existing})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if placement.NodeName != "gpu-node-2" {
+		t.Errorf("node = %q, want gpu-node-2 with an existing ready repo/revision copy", placement.NodeName)
 	}
 }
 

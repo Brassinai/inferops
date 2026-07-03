@@ -33,3 +33,22 @@ func TestHandler(t *testing.T) {
 		})
 	}
 }
+
+func TestHandlerWithReadiness(t *testing.T) {
+	t.Parallel()
+	ready := false
+	handler := HandlerWithReadiness(func() bool { return ready })
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("not-ready status = %d, want %d", response.Code, http.StatusServiceUnavailable)
+	}
+
+	ready = true
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("ready status = %d, want %d", response.Code, http.StatusOK)
+	}
+}

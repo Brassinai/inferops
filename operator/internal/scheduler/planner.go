@@ -137,9 +137,12 @@ func (p *CachePlanner) Plan(
 		return nil, fmt.Errorf("storage size %q must be greater than zero", cache.Spec.Storage.Size)
 	}
 
-	candidates := p.filterNodes(nodes)
+	candidates := p.filterNodes(nodes, cache.Spec.Storage)
 	if len(candidates) == 0 {
-		return nil, fmt.Errorf("%w: no Ready, schedulable nodes match the cache node selector", ErrNoEligibleNode)
+		return nil, fmt.Errorf(
+			"%w: no Ready, schedulable nodes match the cache selectors and tolerations",
+			ErrNoEligibleNode,
+		)
 	}
 
 	pinnedNode := cache.Spec.Storage.NodeName
@@ -159,10 +162,11 @@ func (p *CachePlanner) Plan(
 
 	reserved := reservedBytesByNode(caches, string(cache.UID))
 	conflicts := conflictingNodesForPath(caches, string(cache.UID), cachePath)
+	nodesWithReadyCopy := collectReadyCopyNodes(cache, caches)
 	if pinnedNode != "" && conflicts[pinnedNode] {
 		return nil, fmt.Errorf("%w: path %q on pinned node %q", ErrCachePathConflict, cachePath, pinnedNode)
 	}
-	ranked := rankNodes(cache, candidates, reserved, conflicts, p.config.CapacityAnnotation)
+	ranked := rankNodes(cache, candidates, reserved, conflicts, nodesWithReadyCopy, p.config.CapacityAnnotation)
 	if len(ranked) == 0 {
 		if pinnedNode != "" {
 			return nil, fmt.Errorf("%w: pinned node %q cannot reserve %s", ErrInsufficientCacheCapacity, pinnedNode, size.String())
@@ -194,7 +198,10 @@ func (p *CachePlanner) PlanPath(cache *v1alpha1.ModelCache) (string, error) {
 	return cachePath, nil
 }
 
-func (p *CachePlanner) filterNodes(nodes []corev1.Node) []corev1.Node {
+func (p *CachePlanner) filterNodes(
+	nodes []corev1.Node,
+	storage v1alpha1.ModelCacheStorage,
+) []corev1.Node {
 	result := make([]corev1.Node, 0, len(nodes))
 	for i := range nodes {
 		if !IsNodeEligibleForCache(nodes[i]) {
@@ -203,12 +210,32 @@ func (p *CachePlanner) filterNodes(nodes []corev1.Node) []corev1.Node {
 		if !nodeMatchesSelector(nodes[i], p.config.NodeSelector) {
 			continue
 		}
+		if !nodeMatchesSelector(nodes[i], storage.NodeSelector) {
+			continue
+		}
+		if hasUntoleratedSchedulingTaint(nodes[i], storage.Tolerations) {
+			continue
+		}
 		if !nodeHasRequiredResources(nodes[i], p.config.RequiredResources) {
 			continue
 		}
 		result = append(result, nodes[i])
 	}
 	return result
+}
+
+func hasUntoleratedSchedulingTaint(node corev1.Node, tolerations []v1alpha1.Toleration) bool {
+	for i := range node.Spec.Taints {
+		taint := node.Spec.Taints[i]
+		if taint.Effect != corev1.TaintEffectNoSchedule &&
+			taint.Effect != corev1.TaintEffectNoExecute {
+			continue
+		}
+		if !isTaintTolerated(taint, tolerations) {
+			return true
+		}
+	}
+	return false
 }
 
 func nodeHasRequiredResources(node corev1.Node, required []corev1.ResourceName) bool {
@@ -329,11 +356,29 @@ type rankedNode struct {
 	FreeCapacity         int64
 }
 
+func collectReadyCopyNodes(requested *v1alpha1.ModelCache, caches []v1alpha1.ModelCache) map[string]bool {
+	nodes := make(map[string]bool)
+	requestedRevision := EffectiveRevision(requested)
+	for i := range caches {
+		cache := &caches[i]
+		if cache.Status.NodeName == "" ||
+			cache.Status.Phase != v1alpha1.ModelCachePhaseReady ||
+			!cacheConditionTrue(cache.Status.Conditions, v1alpha1.CacheConditionReady) ||
+			cache.Spec.ModelRepo != requested.Spec.ModelRepo ||
+			EffectiveRevision(cache) != requestedRevision {
+			continue
+		}
+		nodes[cache.Status.NodeName] = true
+	}
+	return nodes
+}
+
 func rankNodes(
 	cache *v1alpha1.ModelCache,
 	nodes []corev1.Node,
 	reserved map[string]int64,
 	conflicts map[string]bool,
+	readyCopyNodes map[string]bool,
 	capacityAnnotation string,
 ) []rankedNode {
 	requested, err := resource.ParseQuantity(cache.Spec.Storage.Size)
@@ -357,9 +402,10 @@ func rankNodes(
 			continue
 		}
 
-		hasExistingPlacement := cache.Status.NodeName == nodes[i].Name &&
+		hasExistingPlacement := (cache.Status.NodeName == nodes[i].Name &&
 			cache.Status.Path == cache.Spec.Storage.Path &&
-			cache.Status.Phase != v1alpha1.ModelCachePhaseFailed
+			cache.Status.Phase != v1alpha1.ModelCachePhaseFailed) ||
+			readyCopyNodes[nodes[i].Name]
 		ranked = append(ranked, rankedNode{
 			Node:                 nodes[i],
 			Capacity:             capacity,

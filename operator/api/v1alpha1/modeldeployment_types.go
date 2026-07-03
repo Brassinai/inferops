@@ -28,13 +28,15 @@ type ModelDeploymentSpec struct {
 	// +kubebuilder:validation:Required
 	Model ModelSpec `json:"model"`
 	// +kubebuilder:validation:Required
-	Runtime    RuntimeSpec          `json:"runtime"`
-	Resources  ResourceRequirements `json:"resources,omitempty"`
-	Activation ActivationSpec       `json:"activation,omitempty"`
-	Scaling    ScalingSpec          `json:"scaling,omitempty"`
-	Routing    RoutingSpec          `json:"routing,omitempty"`
-	Cache      CacheSpec            `json:"cache,omitempty"`
-	Secrets    SecretReferences     `json:"secrets,omitempty"`
+	Runtime      RuntimeSpec          `json:"runtime"`
+	Resources    ResourceRequirements `json:"resources,omitempty"`
+	Activation   ActivationSpec       `json:"activation,omitempty"`
+	Scaling      ScalingSpec          `json:"scaling,omitempty"`
+	Routing      RoutingSpec          `json:"routing,omitempty"`
+	Cache        CacheSpec            `json:"cache,omitempty"`
+	Secrets      SecretReferences     `json:"secrets,omitempty"`
+	Scheduling   SchedulingSpec       `json:"scheduling,omitempty"`
+	Availability AvailabilitySpec     `json:"availability,omitempty"`
 }
 
 // ModelDeploymentStatus reports observed deployment state.
@@ -63,6 +65,17 @@ const (
 	ConditionSecretsReady = "SecretsReady"
 	// ConditionCacheReady indicates that the model cache is ready for use.
 	ConditionCacheReady = "CacheReady"
+	// ConditionGPUAssigned indicates that node-level whole-GPU capacity is
+	// reserved. It does not claim a physical device UUID.
+	ConditionGPUAssigned = "GPUAssigned"
+	// ConditionRuntimeReady indicates that the managed runtime Deployment has
+	// its desired number of ready replicas.
+	ConditionRuntimeReady = "RuntimeReady"
+	// ConditionModelLoaded mirrors runtime readiness for model consumers.
+	ConditionModelLoaded = "ModelLoaded"
+	// ConditionRoutingReady indicates whether the stable Service may receive
+	// traffic from the gateway.
+	ConditionRoutingReady = "RoutingReady"
 	// ConditionReady aggregates the overall readiness of the deployment.
 	ConditionReady = "Ready"
 )
@@ -77,6 +90,23 @@ const (
 	ReasonSecretRequired      = "SecretRequired"
 	ReasonInvalidCachePath    = "InvalidCachePath"
 	ReasonInvalidDrainTimeout = "InvalidDrainTimeout"
+	ReasonCachePending        = "CachePending"
+	ReasonCacheDownloading    = "CacheDownloading"
+	ReasonCacheVerified       = "CacheVerified"
+	ReasonCacheFailed         = "CacheFailed"
+	ReasonInactive            = "Inactive"
+	ReasonGPUCapacityReserved = "GPUCapacityReserved"
+	ReasonWaitingForCapacity  = "WaitingForCapacity"
+	ReasonWaitingForGPU       = "WaitingForGPU"
+	ReasonInsufficientGPU     = "InsufficientGPUCapacity"
+	ReasonInsufficientCompute = "InsufficientComputeCapacity"
+	ReasonSchedulingBlocked   = "SchedulingConstraintsUnsatisfied"
+	ReasonReplacementPending  = "ReplacementNotImplemented"
+	ReasonRuntimeCreating     = "RuntimeCreating"
+	ReasonRuntimeReady        = "RuntimeReady"
+	ReasonRuntimeUnavailable  = "RuntimeUnavailable"
+	ReasonRouteEnabled        = "RouteEnabled"
+	ReasonRouteDisabled       = "RouteDisabled"
 )
 
 // ModelDeploymentPhase is the observed lifecycle phase of a model deployment.
@@ -191,6 +221,49 @@ type SecretReferences struct {
 	HuggingFaceTokenSecretName string `json:"huggingFaceTokenSecretName,omitempty"`
 }
 
+// SchedulingSpec controls placement constraints for runtime pods. InferOps
+// combines these constraints with the node affinity required by node-local
+// model caches.
+type SchedulingSpec struct {
+	NodeSelector              map[string]string          `json:"nodeSelector,omitempty"`
+	Tolerations               []Toleration               `json:"tolerations,omitempty"`
+	TopologySpreadConstraints []TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
+}
+
+// Toleration is the supported subset of a Kubernetes pod toleration.
+type Toleration struct {
+	Key      string `json:"key,omitempty"`
+	Operator string `json:"operator,omitempty"`
+	Value    string `json:"value,omitempty"`
+	Effect   string `json:"effect,omitempty"`
+	// +kubebuilder:validation:Minimum=0
+	TolerationSeconds *int64 `json:"tolerationSeconds,omitempty"`
+}
+
+// TopologySpreadConstraint distributes runtime pods across a node topology.
+// The operator supplies the label selector for the managed runtime pods.
+type TopologySpreadConstraint struct {
+	// +kubebuilder:validation:Minimum=1
+	MaxSkew int32 `json:"maxSkew"`
+	// +kubebuilder:validation:Required
+	TopologyKey string `json:"topologyKey"`
+	// +kubebuilder:validation:Enum=DoNotSchedule;ScheduleAnyway
+	WhenUnsatisfiable string `json:"whenUnsatisfiable"`
+}
+
+// AvailabilitySpec controls disruption protection for runtime pods.
+type AvailabilitySpec struct {
+	PodDisruptionBudget PodDisruptionBudgetSpec `json:"podDisruptionBudget,omitempty"`
+}
+
+// PodDisruptionBudgetSpec configures the managed runtime PodDisruptionBudget.
+// Protection is enabled by default when enabled is omitted.
+type PodDisruptionBudgetSpec struct {
+	Enabled *bool `json:"enabled,omitempty"`
+	// +kubebuilder:validation:Minimum=0
+	MinAvailable *int32 `json:"minAvailable,omitempty"`
+}
+
 // ModelCacheSummary reports the cache selected for a deployment.
 type ModelCacheSummary struct {
 	State    string `json:"state,omitempty"`
@@ -294,6 +367,37 @@ func (in *ModelDeploymentSpec) DeepCopyInto(out *ModelDeploymentSpec) {
 	if in.Resources.GPU != nil {
 		out.Resources.GPU = new(GPUResourceRequest)
 		*out.Resources.GPU = *in.Resources.GPU
+	}
+	if in.Scheduling.NodeSelector != nil {
+		out.Scheduling.NodeSelector = make(map[string]string, len(in.Scheduling.NodeSelector))
+		for key, value := range in.Scheduling.NodeSelector {
+			out.Scheduling.NodeSelector[key] = value
+		}
+	}
+	if in.Scheduling.Tolerations != nil {
+		out.Scheduling.Tolerations = make([]Toleration, len(in.Scheduling.Tolerations))
+		for i := range in.Scheduling.Tolerations {
+			out.Scheduling.Tolerations[i] = in.Scheduling.Tolerations[i]
+			if in.Scheduling.Tolerations[i].TolerationSeconds != nil {
+				value := *in.Scheduling.Tolerations[i].TolerationSeconds
+				out.Scheduling.Tolerations[i].TolerationSeconds = &value
+			}
+		}
+	}
+	if in.Scheduling.TopologySpreadConstraints != nil {
+		out.Scheduling.TopologySpreadConstraints = make(
+			[]TopologySpreadConstraint,
+			len(in.Scheduling.TopologySpreadConstraints),
+		)
+		copy(out.Scheduling.TopologySpreadConstraints, in.Scheduling.TopologySpreadConstraints)
+	}
+	if in.Availability.PodDisruptionBudget.Enabled != nil {
+		value := *in.Availability.PodDisruptionBudget.Enabled
+		out.Availability.PodDisruptionBudget.Enabled = &value
+	}
+	if in.Availability.PodDisruptionBudget.MinAvailable != nil {
+		value := *in.Availability.PodDisruptionBudget.MinAvailable
+		out.Availability.PodDisruptionBudget.MinAvailable = &value
 	}
 }
 

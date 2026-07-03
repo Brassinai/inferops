@@ -1,0 +1,121 @@
+{{- if .Values.webhook.enabled }}
+{{- $fullname := include "inferops-operator.fullname" . }}
+{{- $serviceName := include "inferops-operator.webhookServiceName" . }}
+{{- $secretName := include "inferops-operator.webhookSecretName" . }}
+{{- $existing := dict }}
+{{- if not .Values.webhook.tls.existingSecret }}
+{{- $existing = lookup "v1" "Secret" .Release.Namespace $secretName }}
+{{- end }}
+{{- $caCert := "" }}
+{{- $tlsCert := "" }}
+{{- $tlsKey := "" }}
+{{- if .Values.webhook.tls.existingSecret }}
+{{- $caCert = required "webhook.tls.caBundle is required when webhook.tls.existingSecret is set" .Values.webhook.tls.caBundle }}
+{{- else if and $existing $existing.data (index $existing.data "ca.crt") (index $existing.data "tls.crt") (index $existing.data "tls.key") }}
+{{- $caCert = index $existing.data "ca.crt" | b64dec }}
+{{- $tlsCert = index $existing.data "tls.crt" | b64dec }}
+{{- $tlsKey = index $existing.data "tls.key" | b64dec }}
+{{- else }}
+{{- $ca := genCA (printf "%s-ca" $fullname) 3650 }}
+{{- $caCert = $ca.Cert }}
+{{- $dnsNames := list $serviceName (printf "%s.%s" $serviceName .Release.Namespace) (printf "%s.%s.svc" $serviceName .Release.Namespace) }}
+{{- $cert := genSignedCert $serviceName nil $dnsNames 3650 $ca }}
+{{- $tlsCert = $cert.Cert }}
+{{- $tlsKey = $cert.Key }}
+{{- end }}
+{{- if not .Values.webhook.tls.existingSecret }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inferops-operator.labels" . | nindent 4 }}
+type: kubernetes.io/tls
+data:
+  ca.crt: {{ $caCert | b64enc | quote }}
+  tls.crt: {{ $tlsCert | b64enc | quote }}
+  tls.key: {{ $tlsKey | b64enc | quote }}
+---
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $serviceName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inferops-operator.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "inferops-operator.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: https
+      port: 443
+      targetPort: webhook
+      protocol: TCP
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "inferops-operator.labels" . | nindent 4 }}
+webhooks:
+  - name: modeldeployments.inference.inferops.dev
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 5
+    clientConfig:
+      service:
+        name: {{ $serviceName }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-inference-inferops-dev-v1alpha1-modeldeployment
+        port: 443
+      caBundle: {{ $caCert | b64enc | quote }}
+    rules:
+      - apiGroups: [inference.inferops.dev]
+        apiVersions: [v1alpha1]
+        operations: [CREATE, UPDATE]
+        resources: [modeldeployments]
+        scope: Namespaced
+  - name: modelruntimes.inference.inferops.dev
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 5
+    clientConfig:
+      service:
+        name: {{ $serviceName }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-inference-inferops-dev-v1alpha1-modelruntime
+        port: 443
+      caBundle: {{ $caCert | b64enc | quote }}
+    rules:
+      - apiGroups: [inference.inferops.dev]
+        apiVersions: [v1alpha1]
+        operations: [CREATE, UPDATE]
+        resources: [modelruntimes]
+        scope: Namespaced
+  - name: modelcaches.inference.inferops.dev
+    admissionReviewVersions: [v1]
+    sideEffects: None
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    timeoutSeconds: 5
+    clientConfig:
+      service:
+        name: {{ $serviceName }}
+        namespace: {{ .Release.Namespace }}
+        path: /validate-inference-inferops-dev-v1alpha1-modelcache
+        port: 443
+      caBundle: {{ $caCert | b64enc | quote }}
+    rules:
+      - apiGroups: [inference.inferops.dev]
+        apiVersions: [v1alpha1]
+        operations: [CREATE, UPDATE]
+        resources: [modelcaches]
+        scope: Namespaced
+{{- end }}

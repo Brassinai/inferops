@@ -145,7 +145,9 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, deployment *v
 	}
 
 	// Secret checks.
-	if setSecretsReady(observed) && deployment.Spec.Model.Source == "huggingface" {
+	if setSecretsReady(observed) &&
+		deployment.Spec.Model.Source == "huggingface" &&
+		deployment.Spec.Secrets.HuggingFaceTokenSecretName != "" {
 		r.recorder.Eventf(deployment, "Normal", events.ReasonSecretsAvailable,
 			"HuggingFace token secret %q is referenced", deployment.Spec.Secrets.HuggingFaceTokenSecretName)
 	}
@@ -242,7 +244,7 @@ func setSecretsReady(s *v1alpha1.ModelDeploymentStatus) bool {
 		Type:    v1alpha1.ConditionSecretsReady,
 		Status:  metav1.ConditionTrue,
 		Reason:  v1alpha1.ReasonSecretsAvailable,
-		Message: "Required secrets are referenced",
+		Message: "Credential references are valid",
 	})
 }
 

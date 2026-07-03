@@ -12,6 +12,7 @@ from inferops import build_manifests
 from .app_loader import load_app
 from .errors import ExitCode, run_with_cli_errors
 from .kube import DeployRequest, build_cluster_target, resolve_client
+from .lifecycle import ACTIVATION_POLICIES
 from .options import add_cluster_options
 from .output import CommandResult, emit_result
 from .state import load_state, save_state
@@ -32,6 +33,7 @@ def register(subcommands) -> None:
     )
     parser.add_argument(
         "--when-full",
+        choices=ACTIVATION_POLICIES,
         help="Optional replacement policy to use with --activate.",
     )
     add_cluster_options(parser)

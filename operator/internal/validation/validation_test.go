@@ -44,6 +44,7 @@ func TestValidateModelDeployment(t *testing.T) {
 			d.Spec.Runtime.GPUMemoryUtilization = 0.85
 		}, wantErr: true},
 		{name: "missing model repo", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Model.Repo = "" }, wantErr: true},
+		{name: "unsupported model source", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Model.Source = "s3" }, wantErr: true},
 		{name: "missing runtime ref", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Runtime.Ref = "" }, wantErr: true},
 		{name: "invalid runtime ref", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Runtime.Ref = "Not Valid" }, wantErr: true},
 		{name: "invalid cpu quantity", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Resources.CPU = "many" }, wantErr: true},
@@ -59,6 +60,38 @@ func TestValidateModelDeployment(t *testing.T) {
 			d.Spec.Activation.DesiredState = v1alpha1.ActivationDesiredStateActive
 			d.Spec.Scaling.MinReplicas = 0
 			d.Spec.Scaling.MaxReplicas = 0
+		}, wantErr: true},
+		{name: "mutable runtime image", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Runtime.Image = "ghcr.io/inferops/runtime:latest"
+		}, wantErr: true},
+		{name: "valid custom route", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Routing.Path = "/inference/qwen"
+		}},
+		{name: "non-canonical custom route", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Routing.Path = "/models/../readyz"
+		}, wantErr: true},
+		{name: "reserved custom route", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Routing.Path = "/healthz/model"
+		}, wantErr: true},
+		{name: "escaped custom route", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Routing.Path = "/models/qwen%2fother"
+		}, wantErr: true},
+		{name: "invalid node selector", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Scheduling.NodeSelector = map[string]string{"not a key": "value"}
+		}, wantErr: true},
+		{name: "invalid toleration", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Scheduling.Tolerations = []v1alpha1.Toleration{{Operator: "Equal"}}
+		}, wantErr: true},
+		{name: "invalid topology spread", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Scheduling.TopologySpreadConstraints = []v1alpha1.TopologySpreadConstraint{{
+				MaxSkew:           0,
+				TopologyKey:       "topology.kubernetes.io/zone",
+				WhenUnsatisfiable: "ScheduleAnyway",
+			}}
+		}, wantErr: true},
+		{name: "PDB exceeds replicas", mutate: func(d *v1alpha1.ModelDeployment) {
+			minAvailable := int32(2)
+			d.Spec.Availability.PodDisruptionBudget.MinAvailable = &minAvailable
 		}, wantErr: true},
 	}
 
@@ -85,7 +118,7 @@ func TestValidateModelRuntime(t *testing.T) {
 		Spec: v1alpha1.ModelRuntimeSpec{
 			Engine:       "nano-vllm",
 			Protocol:     "openai",
-			DefaultImage: "ghcr.io/inferops/nano-vllm:latest",
+			DefaultImage: "ghcr.io/inferops/nano-vllm:v0.1.0",
 			Port:         8000,
 			HealthPath:   "/health",
 		},
@@ -105,6 +138,15 @@ func TestValidateModelRuntime(t *testing.T) {
 		{name: "invalid port zero", mutate: func(r *v1alpha1.ModelRuntime) { r.Spec.Port = 0 }, wantErr: true},
 		{name: "invalid port too high", mutate: func(r *v1alpha1.ModelRuntime) { r.Spec.Port = 70000 }, wantErr: true},
 		{name: "missing healthPath", mutate: func(r *v1alpha1.ModelRuntime) { r.Spec.HealthPath = "" }, wantErr: true},
+		{name: "mutable image", mutate: func(r *v1alpha1.ModelRuntime) {
+			r.Spec.DefaultImage = "ghcr.io/inferops/nano-vllm:latest"
+		}, wantErr: true},
+		{name: "invalid health path", mutate: func(r *v1alpha1.ModelRuntime) {
+			r.Spec.HealthPath = "health"
+		}, wantErr: true},
+		{name: "invalid environment name", mutate: func(r *v1alpha1.ModelRuntime) {
+			r.Spec.Env = map[string]string{"NOT VALID": "value"}
+		}, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -147,6 +189,15 @@ func TestValidateModelCache(t *testing.T) {
 		{name: "missing storage type", mutate: func(c *v1alpha1.ModelCache) { c.Spec.Storage.Type = "" }, wantErr: true},
 		{name: "missing storage size", mutate: func(c *v1alpha1.ModelCache) { c.Spec.Storage.Size = "" }, wantErr: true},
 		{name: "missing storage path", mutate: func(c *v1alpha1.ModelCache) { c.Spec.Storage.Path = "" }, wantErr: true},
+		{name: "relative storage path", mutate: func(c *v1alpha1.ModelCache) {
+			c.Spec.Storage.Path = "models/qwen"
+		}, wantErr: true},
+		{name: "invalid storage node selector", mutate: func(c *v1alpha1.ModelCache) {
+			c.Spec.Storage.NodeSelector = map[string]string{"not a key": "value"}
+		}, wantErr: true},
+		{name: "invalid storage toleration", mutate: func(c *v1alpha1.ModelCache) {
+			c.Spec.Storage.Tolerations = []v1alpha1.Toleration{{Operator: "Sometimes"}}
+		}, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -264,12 +315,10 @@ func TestReconciliationValidator(t *testing.T) {
 			wantReason: v1alpha1.ReasonInvalidCachePath,
 		},
 		{
-			name: "missing huggingface token secret",
+			name: "public huggingface model without token secret",
 			mutate: func(d *v1alpha1.ModelDeployment) {
 				d.Spec.Secrets.HuggingFaceTokenSecretName = ""
 			},
-			wantErr:    true,
-			wantReason: v1alpha1.ReasonSecretRequired,
 		},
 		{
 			name: "invalid huggingface token secret name",
@@ -278,13 +327,6 @@ func TestReconciliationValidator(t *testing.T) {
 			},
 			wantErr:    true,
 			wantReason: v1alpha1.ReasonSecretRequired,
-		},
-		{
-			name: "non-huggingface source does not require secret",
-			mutate: func(d *v1alpha1.ModelDeployment) {
-				d.Spec.Model.Source = "s3"
-				d.Spec.Secrets.HuggingFaceTokenSecretName = ""
-			},
 		},
 	}
 

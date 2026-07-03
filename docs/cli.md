@@ -33,8 +33,11 @@ Profiles:
 | `default` | Minimal operator + gateway |
 | `homelab` | Includes cache-path defaults and sensible resource defaults |
 
-The command uses repeatable `helm upgrade --install` operations with atomic
-waits. It forwards `--context` and `--kubeconfig` to Helm. Use
+The command first applies the packaged CRDs with server-side apply, then uses
+repeatable `helm upgrade --install` operations with atomic waits. This explicit
+CRD step is required because Helm does not upgrade files from a chart's
+`crds/` directory. It forwards `--context` and `--kubeconfig` to both
+`kubectl` and Helm. Use
 `--tailscale-hostname` only after installing and configuring the Tailscale
 Kubernetes Operator:
 
@@ -57,9 +60,10 @@ chart; the operator chart also exposes the `modelRuntimes` map and
 `cache.downloaderImage`.
 
 Set `rbac.create=false` when cluster-scoped RBAC is provisioned separately.
-The supplied ClusterRole deliberately excludes Secret reads: model download
-credentials are referenced by name from downloader Jobs and resolved by
-Kubernetes rather than read into operator memory.
+The supplied ClusterRole grants only `get` on Secrets. The cache controller
+checks that a same-namespace referenced Secret contains the required key, but
+never logs or copies its value; the downloader Job receives the value through
+`secretKeyRef`.
 
 The install profile does not choose the engine for every model. Each
 deployment selects a registered runtime and independently declares whether it
@@ -119,9 +123,22 @@ Start runtime and route traffic.
 
 ```bash
 inferops activate qwen-chat
+inferops activate qwen-chat --when-full Reject
+inferops activate qwen-chat --when-full ReplaceOldest
 ```
 
-If no GPU slot is free and `whenFull=Queue`, the deployment waits at `WaitingForGPU`.
+Activation waits up to five minutes for the operator to observe the new
+generation. Use `--timeout 10m` to change that limit or `--no-wait` to return
+after the Kubernetes patch is accepted. The command reports `active`,
+`waiting`, `rejected`, or `failed`; waiting is an accepted queued request,
+while rejection and failure exit nonzero. It reports `superseded` if another
+writer changes the desired state during the wait and `timeout` if no stable
+outcome is observed before the deadline; both exit nonzero.
+
+The existing `whenFull` policy is preserved unless `--when-full` is supplied.
+Replacement is never inferred: select `ReplaceOldest` or
+`ReplaceLowestPriority` explicitly to authorize replacement. If no GPU slot is
+free with `Queue`, the deployment reports `WaitingForGPU` and remains queued.
 
 ### deactivate
 
@@ -131,12 +148,40 @@ Drain traffic, stop runtime, release GPU. Cache is kept.
 inferops deactivate qwen-chat
 ```
 
+Deactivation watches `Draining` and `Deactivating` transitions by default.
+Once the runtime has released capacity, the inactive deployment normally
+settles at `Cached`. `--timeout` and `--no-wait` behave as they do for
+activation.
+
 ### status
 
 Show current phase, conditions, and assigned node.
 
 ```bash
 inferops status qwen-chat
+inferops status qwen-chat --watch --timeout 10m
+```
+
+Status output is a safe summary of the ModelDeployment. It includes observed
+conditions, placement, replica state, cache state, and the endpoint, but never
+returns the `spec.secrets` field or Kubernetes Secret objects.
+
+### models
+
+List ModelDeployments in the selected namespace:
+
+```bash
+inferops models
+inferops models --output json
+```
+
+### endpoints
+
+List stable routes for routing-enabled ModelDeployments, including endpoints
+that are currently unavailable because their model is inactive or waiting:
+
+```bash
+inferops endpoints
 ```
 
 ### logs
@@ -150,13 +195,15 @@ inferops logs qwen-chat --tail 100
 
 ### delete
 
-Remove the deployment and its managed Service.
+Remove the deployment and its managed runtime resources.
 
 ```bash
 inferops delete qwen-chat
 ```
 
-Cache is not deleted. Use `cache delete` to remove cache.
+The command reports `cachePreserved: true`: deleting a deployment does not
+delete its `ModelCache` or node files. Use the separate `cache delete` command
+when cache removal is intentional.
 
 ### doctor
 

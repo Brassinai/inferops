@@ -182,6 +182,64 @@ spec:
                   properties:
                     huggingFaceTokenSecretName:
                       type: string
+                scheduling:
+                  type: object
+                  properties:
+                    nodeSelector:
+                      type: object
+                      additionalProperties:
+                        type: string
+                    tolerations:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          key:
+                            type: string
+                          operator:
+                            type: string
+                            enum: [Equal, Exists]
+                          value:
+                            type: string
+                          effect:
+                            type: string
+                            enum: [NoSchedule, PreferNoSchedule, NoExecute]
+                          tolerationSeconds:
+                            type: integer
+                            format: int64
+                            minimum: 0
+                    topologySpreadConstraints:
+                      type: array
+                      items:
+                        type: object
+                        required:
+                          - maxSkew
+                          - topologyKey
+                          - whenUnsatisfiable
+                        properties:
+                          maxSkew:
+                            type: integer
+                            format: int32
+                            minimum: 1
+                          topologyKey:
+                            type: string
+                            minLength: 1
+                          whenUnsatisfiable:
+                            type: string
+                            enum: [DoNotSchedule, ScheduleAnyway]
+                availability:
+                  type: object
+                  properties:
+                    podDisruptionBudget:
+                      type: object
+                      properties:
+                        enabled:
+                          type: boolean
+                          default: true
+                        minAvailable:
+                          type: integer
+                          format: int32
+                          minimum: 0
             status:
               type: object
               properties:

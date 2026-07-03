@@ -85,8 +85,12 @@ Use the CLI for common deployment operations:
 ```bash
 inferops deploy app.py
 inferops generate app.py
+inferops activate support-bot
 inferops status support-bot
+inferops models
+inferops endpoints
 inferops logs support-bot
+inferops deactivate support-bot
 inferops delete support-bot
 ```
 
@@ -129,6 +133,7 @@ kubectl apply -f modeldeployment.yaml
 - [SDK reference](docs/sdk.md)
 - [CRD reference](docs/crds.md)
 - [Production notes](docs/production.md)
+- [Backup and disaster recovery](docs/disaster-recovery.md)
 
 ## Development
 

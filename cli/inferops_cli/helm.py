@@ -17,6 +17,7 @@ from .kube import InstallRequest
 DEFAULT_CACHE_ROOT = "/var/lib/inferops/models"
 DEFAULT_RELEASES = ("inferops-operator", "inferops-gateway")
 DEFAULT_TIMEOUT = "5m"
+CRD_FIELD_MANAGER = "inferops-cli"
 TAILSCALE_HOSTNAME = re.compile(r"^[a-z](?:[a-z0-9-]*[a-z])?$")
 
 CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
@@ -38,6 +39,20 @@ class HelmInstaller:
         if request.tailscale_hostname:
             _validate_tailscale_hostname(request.tailscale_hostname)
         charts_dir = _resolve_charts_dir(request.charts_dir)
+        crds_dir = charts_dir / "inferops-operator" / "crds"
+        if not crds_dir.is_dir() or not any(crds_dir.glob("*.yaml")):
+            raise CLIError(f"operator CRDs not found: {crds_dir}")
+
+        crd_command = _build_crd_apply_command(crds_dir, request)
+        try:
+            crd_result = self._runner(crd_command)
+        except FileNotFoundError as exc:
+            raise CLIError(
+                "kubectl executable not found; install kubectl before installing InferOps"
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or "unknown kubectl error").strip()
+            raise CLIError(f"InferOps CRD apply failed: {detail}") from exc
 
         releases = []
         for release_name in DEFAULT_RELEASES:
@@ -92,9 +107,34 @@ class HelmInstaller:
                 "cachePath": cache_root,
                 "tailscaleHostname": request.tailscale_hostname,
                 "resources": resources,
+                "crds": {
+                    "status": "applied",
+                    "output": crd_result.stdout.strip(),
+                },
                 "releases": releases,
             },
         }
+
+
+def _build_crd_apply_command(
+    crds_dir: Path,
+    request: InstallRequest,
+) -> list[str]:
+    command = ["kubectl"]
+    if request.cluster.kubeconfig:
+        command.extend(("--kubeconfig", request.cluster.kubeconfig))
+    if request.cluster.context:
+        command.extend(("--context", request.cluster.context))
+    command.extend(
+        (
+            "apply",
+            "--server-side",
+            f"--field-manager={CRD_FIELD_MANAGER}",
+            "--filename",
+            str(crds_dir),
+        )
+    )
+    return command
 
 
 def _build_upgrade_command(

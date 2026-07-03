@@ -22,9 +22,11 @@ inferops install --profile homelab \
   --cache-path /var/lib/inferops/models
 ```
 
-The equivalent lower-level Helm commands are:
+The equivalent lower-level commands are:
 
 ```bash
+kubectl apply --server-side -f ./deploy/manifests/crds
+
 helm upgrade --install inferops-operator ./deploy/helm/inferops-operator \
   --namespace default \
   --values ./deploy/helm/inferops-operator/values-homelab.yaml

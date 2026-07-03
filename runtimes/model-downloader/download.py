@@ -19,7 +19,6 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import NoReturn
 
 MANIFEST_NAME = ".inferops-cache.json"
 
@@ -27,6 +26,7 @@ MANIFEST_NAME = ".inferops-cache.json"
 @dataclass(frozen=True)
 class CacheManifest:
     repo: str
+    requested_revision: str
     revision: str
     source: str
     byte_size: int
@@ -67,7 +67,7 @@ def main() -> int:
     if manifest_path.exists():
         try:
             existing = json.loads(manifest_path.read_text())
-            if existing.get("input_hash") == args.input_hash and existing.get("revision") == args.revision:
+            if manifest_matches(existing, args):
                 print(f"cache already complete: {dest_path}")
                 return 0
         except Exception:
@@ -81,14 +81,15 @@ def main() -> int:
     staging_path.mkdir(parents=True, exist_ok=True)
 
     try:
-        byte_size = download_source(args, staging_path)
+        byte_size, resolved_revision = download_source(args, staging_path)
 
         # Write the marker inside staging, then publish the whole completed
         # directory with one atomic rename. A crash can therefore expose either
         # no destination or a destination containing its completion marker.
         manifest = CacheManifest(
             repo=args.repo,
-            revision=args.revision,
+            requested_revision=args.revision,
+            revision=resolved_revision,
             source=args.source,
             byte_size=byte_size,
             completed_at=datetime.now(timezone.utc).isoformat(),
@@ -108,28 +109,53 @@ def main() -> int:
         return 1
 
 
-def download_source(args: argparse.Namespace, staging_path: Path) -> int:
+def manifest_matches(existing: object, args: argparse.Namespace) -> bool:
+    if not isinstance(existing, dict):
+        return False
+    byte_size = existing.get("byte_size")
+    return (
+        existing.get("repo") == args.repo
+        and existing.get("source") == args.source
+        and existing.get("input_hash") == args.input_hash
+        and isinstance(existing.get("revision"), str)
+        and bool(existing["revision"])
+        and existing.get("requested_revision", args.revision) == args.revision
+        and isinstance(byte_size, int)
+        and not isinstance(byte_size, bool)
+        and byte_size >= 0
+        and isinstance(existing.get("completed_at"), str)
+        and bool(existing["completed_at"])
+    )
+
+
+def download_source(args: argparse.Namespace, staging_path: Path) -> tuple[int, str]:
     if args.source == "huggingface":
         return download_huggingface(args.repo, args.revision, staging_path)
     raise ValueError(f"unsupported source: {args.source}")
 
 
-def download_huggingface(repo: str, revision: str, staging_path: Path) -> int:
+def download_huggingface(
+    repo: str, revision: str, staging_path: Path
+) -> tuple[int, str]:
     """Download a Hugging Face repository revision using huggingface_hub."""
     try:
-        from huggingface_hub import snapshot_download  # type: ignore
+        from huggingface_hub import HfApi, snapshot_download  # type: ignore
     except ImportError as exc:
         raise RuntimeError("huggingface_hub is not installed") from exc
 
     token = os.environ.get("HF_TOKEN") or None
+    model_info = HfApi(token=token).model_info(repo_id=repo, revision=revision)
+    resolved_revision = model_info.sha
+    if not resolved_revision:
+        raise RuntimeError(f"Hugging Face did not resolve revision {revision!r}")
     downloaded = snapshot_download(
         repo_id=repo,
-        revision=revision,
+        revision=resolved_revision,
         local_dir=str(staging_path),
         local_dir_use_symlinks=False,
         token=token,
     )
-    return total_size(Path(downloaded))
+    return total_size(Path(downloaded)), resolved_revision
 
 
 def total_size(path: Path) -> int:

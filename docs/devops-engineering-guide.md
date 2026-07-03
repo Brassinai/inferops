@@ -23,9 +23,9 @@ GPU host
   -> OpenAI-compatible request
 ```
 
-I kept it honest about the current repo state: the CRDs and charts exist, but
-the operator/gateway reconciliation is still early, so the tutorial shows what
-we manually create today and what the operator should eventually automate.
+I kept it honest about the current repo state: the CRDs, charts, and gateway
+routing exist, but some operator automation is still early, so the tutorial
+shows both the manual Kubernetes shape and what the operator owns.
 
 That honesty is part of the point of the tutorial. It should help a reader or
 contributor understand the landscape of the project before touching code. If
@@ -671,7 +671,7 @@ volumes, and resource requests.
 
 ## Step 12: Add A Simple Gateway Manually
 
-The final InferOps gateway should accept:
+The InferOps gateway accepts:
 
 ```txt
 /models/qwen-chat/v1/chat/completions
@@ -683,8 +683,8 @@ and forward it to:
 qwen-chat-runtime.inferops.svc.cluster.local:8000/v1/chat/completions
 ```
 
-Until the gateway implementation grows full routing behavior, we can use a
-small NGINX Deployment to understand the networking shape.
+The following small NGINX Deployment remains a useful way to understand and
+debug the networking shape without discovery or lifecycle filtering.
 
 Create a reverse proxy config:
 
@@ -802,9 +802,9 @@ curl
   -> nano-vLLM pod
 ```
 
-The real gateway should eventually discover active `ModelDeployment` objects
-and route only to ready runtime Services. The manual NGINX proxy is here to make
-the network path concrete.
+The packaged gateway discovers active `ModelDeployment`, Service, and
+EndpointSlice objects and routes only to ready runtime endpoints. The manual
+NGINX proxy is here to make the network path concrete.
 
 ## Step 13: Expose The Gateway With Tailscale
 
@@ -975,10 +975,11 @@ Check it:
 kubectl get deploy,svc -n inferops -l app.kubernetes.io/name=inferops-gateway
 ```
 
-At the time this guide was written, the Go gateway package is still a bootstrap
-boundary. The manual NGINX gateway above is the practical routing example. The
-InferOps gateway chart is the future packaging target for the real gateway
-binary.
+The Go gateway discovers `ModelDeployment`, runtime Service, and EndpointSlice
+objects in its namespace. It routes only current, ready `Active` deployments
+with ready endpoints and immediately rejects newly admitted requests after
+observing a drain transition. The manual NGINX gateway above remains useful as
+a transparent debugging example.
 
 ## Step 16: Install The Operator Chart
 
@@ -1196,8 +1197,9 @@ resources:
 The platform needs clear rules for whole-GPU placement, CPU-only placement,
 node-local cache placement, and what happens when capacity is full.
 
-If you want to work on the gateway, start from the manual NGINX proxy section.
-The real gateway should discover active `ModelDeployment` objects and forward:
+If you want to work on the gateway, compare the manual NGINX proxy section with
+the discovery and proxy packages. The gateway discovers active
+`ModelDeployment` objects and forwards:
 
 ```txt
 /models/qwen-chat/v1/chat/completions
@@ -1209,7 +1211,7 @@ to:
 qwen-chat-runtime.inferops.svc.cluster.local:8000/v1/chat/completions
 ```
 
-It should avoid routing to inactive, failed, draining, or unready runtimes.
+It avoids routing to inactive, failed, draining, or unready runtimes.
 
 If you want to work on Helm, start from the difference between the manual
 runtime manifest and `deploy/helm/inferops-runtime`. The chart should grow the

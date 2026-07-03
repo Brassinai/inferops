@@ -58,6 +58,13 @@ const (
 	ModelRuntimePhaseFailed      ModelRuntimePhase = "Failed"
 )
 
+// Stable ModelRuntime condition and Event reasons.
+const (
+	RuntimeConditionReady  = "Ready"
+	RuntimeReasonValidated = "RuntimeValidated"
+	RuntimeReasonInvalid   = "RuntimeInvalid"
+)
+
 // ModelRuntimeList contains a list of ModelRuntime.
 type ModelRuntimeList struct {
 	metav1.TypeMeta `json:",inline"`

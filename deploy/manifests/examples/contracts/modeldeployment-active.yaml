@@ -42,12 +42,10 @@ status:
   endpoint: /models/qwen-active/v1
   serviceName: qwen-active-runtime
   assignedNode: gpu-node-1
-  assignedGPUs:
-    - GPU-fixture
   cache:
     state: Ready
     nodeName: gpu-node-1
-    path: /var/lib/inferops/models/qwen-active
+    path: /var/lib/inferops/models/default/qwen-active-5a1de7866f87-cache
   replicas:
     desired: 1
     ready: 1
@@ -67,3 +65,15 @@ status:
       lastTransitionTime: "2026-06-11T09:10:00Z"
       reason: RouteEnabled
       message: Gateway route is enabled.
+    - type: GPUAssigned
+      status: "True"
+      observedGeneration: 1
+      lastTransitionTime: "2026-06-11T09:10:00Z"
+      reason: GPUCapacityReserved
+      message: Node-level GPU capacity is reserved; Kubernetes assigns the physical device.
+    - type: RuntimeReady
+      status: "True"
+      observedGeneration: 1
+      lastTransitionTime: "2026-06-11T09:10:00Z"
+      reason: RuntimeReady
+      message: Runtime has the desired ready replicas.
