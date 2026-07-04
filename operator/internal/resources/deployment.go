@@ -21,8 +21,9 @@ import (
 )
 
 const (
-	defaultDrainTimeout = 5 * time.Minute
-	shutdownGraceBuffer = 30 * time.Second
+	defaultDrainTimeout            = 5 * time.Minute
+	shutdownGraceBuffer            = 30 * time.Second
+	runtimeProgressDeadlineSeconds = int32(600)
 )
 
 // BuildRuntimeDeployment returns a deterministic runtime Deployment. Active
@@ -201,6 +202,7 @@ func (b Builder) BuildRuntimeDeployment(
 			replicas = 1
 		}
 	}
+	progressDeadlineSeconds := runtimeProgressDeadlineSeconds
 	automountServiceAccountToken := false
 	enableServiceLinks := false
 	podSpec := corev1.PodSpec{
@@ -235,7 +237,8 @@ func (b Builder) BuildRuntimeDeployment(
 			OwnerReferences: []metav1.OwnerReference{OwnerReferenceForModelDeployment(md)},
 		},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: &replicas,
+			Replicas:                &replicas,
+			ProgressDeadlineSeconds: &progressDeadlineSeconds,
 			Strategy: appsv1.DeploymentStrategy{
 				Type: appsv1.RecreateDeploymentStrategyType,
 			},
@@ -554,5 +557,10 @@ func terminationGracePeriod(drainTimeout string) (int64, error) {
 	if timeout > time.Duration(1<<63-1)-shutdownGraceBuffer {
 		return 0, errors.New("drain timeout is too large")
 	}
-	return int64((timeout + shutdownGraceBuffer) / time.Second), nil
+	gracePeriod := timeout + shutdownGraceBuffer
+	seconds := gracePeriod / time.Second
+	if gracePeriod%time.Second != 0 {
+		seconds++
+	}
+	return int64(seconds), nil
 }

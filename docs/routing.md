@@ -13,6 +13,17 @@ new requests as soon as discovery observes `Draining`. Inactive, waiting,
 activating, draining, and failed models remain addressable at their stable route
 but receive an explicit lifecycle response.
 
+At drain start the operator also removes the stable runtime Service selector.
+This retains the Service and ClusterIP while EndpointSlice reconciliation
+withdraws the runtime endpoints, providing a second fail-closed barrier if a
+gateway instance is briefly serving an older discovery snapshot. The selector
+is restored before reactivation.
+
+Keep `spec.activation.drainTimeout` longer than the configured gateway
+`discovery.syncInterval`. The defaults are five minutes and five seconds,
+respectively, leaving ample time for every healthy gateway replica to observe
+`Draining` before the in-flight grace period ends.
+
 Custom `spec.routing.path` values are allowed, but every lane must support the
 default `/models/<deployment-name>` convention. Streaming responses must not be
 buffered.

@@ -120,6 +120,8 @@ chart's `podDisruptionBudget` values after accepting the availability impact.
 
 - GPU slicing is not supported.
 - No hosted InferOps control plane; all components run in-cluster.
-- Replacement and rollback are not implemented until MVP-108; replacement
-  policy values fail safely instead of evicting a model.
+- Single-GPU replacement has unavoidable downtime while the current runtime
+  releases the GPU and the replacement becomes ready. Activation failures
+  trigger a best-effort rollback whose outcome is reported in status and
+  Events; operators must intervene when rollback also fails.
 - Advanced autoscaling and dashboard are not in month one.

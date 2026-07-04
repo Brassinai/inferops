@@ -428,6 +428,14 @@ func TestBuildRuntimeDeployment(t *testing.T) {
 	if got, want := deployment.Spec.Template.Annotations["inferops.dev/runtime-protocol"], runtime.Spec.Protocol; got != want {
 		t.Errorf("runtime protocol annotation = %q, want %q", got, want)
 	}
+	if deployment.Spec.ProgressDeadlineSeconds == nil ||
+		*deployment.Spec.ProgressDeadlineSeconds != runtimeProgressDeadlineSeconds {
+		t.Errorf(
+			"progress deadline = %v, want %d",
+			deployment.Spec.ProgressDeadlineSeconds,
+			runtimeProgressDeadlineSeconds,
+		)
+	}
 
 	podSpec := deployment.Spec.Template.Spec
 	if podSpec.AutomountServiceAccountToken == nil || *podSpec.AutomountServiceAccountToken {
@@ -1230,6 +1238,18 @@ func TestCacheVolumeAndNodeAffinityHelpers(t *testing.T) {
 	}, "gpu-node-1")
 	if affinity := NodeAffinityForCacheNode(""); affinity != nil {
 		t.Fatalf("NodeAffinityForCacheNode(\"\") = %#v, want nil", affinity)
+	}
+}
+
+func TestTerminationGracePeriodRoundsUpFractionalTimeout(t *testing.T) {
+	t.Parallel()
+
+	seconds, err := terminationGracePeriod("500ms")
+	if err != nil {
+		t.Fatalf("terminationGracePeriod() error = %v", err)
+	}
+	if seconds != 31 {
+		t.Fatalf("termination grace period = %d, want 31", seconds)
 	}
 }
 

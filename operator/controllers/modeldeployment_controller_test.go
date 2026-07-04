@@ -85,6 +85,67 @@ func TestReconcileValidInactiveDeployment(t *testing.T) {
 	}
 }
 
+func TestReconcileRetriesOperationalFailureAfterSpecChange(t *testing.T) {
+	t.Parallel()
+
+	md := &v1alpha1.ModelDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "qwen-chat", Namespace: "default", Generation: 2,
+		},
+		Spec: v1alpha1.ModelDeploymentSpec{
+			Model:   v1alpha1.ModelSpec{Repo: "Qwen/Qwen2.5-7B-Instruct"},
+			Runtime: v1alpha1.RuntimeSpec{Ref: "nano-vllm"},
+			Resources: v1alpha1.ResourceRequirements{
+				CPU: "4", Memory: "16Gi",
+				GPU: &v1alpha1.GPUResourceRequest{Count: 1},
+			},
+			Activation: v1alpha1.ActivationSpec{
+				DesiredState: v1alpha1.ActivationDesiredStateActive,
+				WhenFull:     v1alpha1.ActivationWhenFullQueue,
+			},
+			Scaling: v1alpha1.ScalingSpec{MaxReplicas: 1},
+		},
+		Status: v1alpha1.ModelDeploymentStatus{
+			ObservedGeneration: 1,
+			Phase:              v1alpha1.ModelDeploymentPhaseFailed,
+			Conditions: []v1alpha1.Condition{{
+				Type:   v1alpha1.ConditionReady,
+				Status: metav1.ConditionFalse,
+				Reason: v1alpha1.ReasonRuntimeUnavailable,
+			}},
+		},
+	}
+	rt := &v1alpha1.ModelRuntime{
+		ObjectMeta: metav1.ObjectMeta{Name: "nano-vllm", Namespace: "default"},
+		Spec: v1alpha1.ModelRuntimeSpec{
+			Engine:       "nano-vllm",
+			Protocol:     "openai",
+			DefaultImage: "ghcr.io/inferops/nano-vllm:v0.1.0",
+			Port:         8000,
+			HealthPath:   "/health",
+		},
+	}
+	reconciler := newTestReconciler(rt, &events.FakeRecorder{})
+
+	result, err := reconciler.Reconcile(context.Background(), md)
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.Status.Phase != v1alpha1.ModelDeploymentPhasePending {
+		t.Fatalf("phase = %q, want Pending after a new spec generation", result.Status.Phase)
+	}
+
+	md.Generation = 1
+	md.Status.ObservedGeneration = 1
+	result, err = reconciler.Reconcile(context.Background(), md)
+	if err != nil {
+		t.Fatalf("same-generation Reconcile() error = %v", err)
+	}
+	if result.Status.Phase != v1alpha1.ModelDeploymentPhaseFailed {
+		t.Fatalf("same-generation phase = %q, want Failed", result.Status.Phase)
+	}
+}
+
 func TestReconcileBlocksOnInvalidSpec(t *testing.T) {
 	t.Parallel()
 

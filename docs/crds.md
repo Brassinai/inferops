@@ -91,11 +91,19 @@ spec:
 | `ReplaceOldest` | Evict oldest active model |
 | `ReplaceLowestPriority` | Evict lowest-priority active model |
 
-`Queue` and `Reject` are implemented by the activation controller.
-`ReplaceOldest` and `ReplaceLowestPriority` remain explicit API values but
-produce `ReplacementNotImplemented` until the drain, replacement, and rollback
-workflow is installed. They never silently degrade to `Queue` or evict a
-workload without that workflow.
+Replacement is never implicit. `ReplaceOldest` selects the active compatible
+single-GPU deployment in the same namespace with the earliest `Ready`
+transition.
+`ReplaceLowestPriority` selects the lowest-priority compatible deployment only
+when its priority is lower than the incoming deployment; age and name provide
+deterministic tie breakers. Both policies require one replica requesting one
+GPU. The incoming cache must be ready before the current runtime is drained.
+
+Single-GPU replacement has unavoidable downtime: InferOps must release the
+only GPU before it can start and verify the replacement runtime. If activation
+fails or the runtime Deployment exceeds its explicit 10-minute progress
+deadline, the operator attempts to restore the displaced runtime and reports
+whether that rollback succeeded. `Queue` and `Reject` never replace a workload.
 
 ### Phases
 
@@ -125,8 +133,15 @@ workload without that workflow.
 | `GPUAssigned` | Node-level whole-GPU capacity is reserved; this does not assert a physical GPU UUID |
 | `RuntimeReady` | Managed runtime has its desired ready replicas |
 | `ModelLoaded` | Runtime readiness indicates that the model can receive traffic |
+| `Replacement` | Explicit replacement progress, success, or rollback outcome |
 
 Stable `reason` values are machine-readable; `message` is for operators. `observedGeneration` must match `metadata.generation` for freshness.
+
+`status.drainStartedAt` anchors the bounded drain grace period.
+`status.replacement` records the replacement phase and UID-qualified target or
+requester reference so a controller restart can safely resume the transaction.
+Its `requestGeneration` prevents a destructive transaction from continuing
+against a spec that changed after target selection.
 
 ### Validation reason codes
 
@@ -143,6 +158,10 @@ Stable `reason` values are machine-readable; `message` is for operators. `observ
 | `InsufficientComputeCapacity` | The selected cache node cannot fit the aggregate runtime CPU or memory request in its allocatable capacity |
 | `SchedulingConstraintsUnsatisfied` | The selected cache node does not match the requested labels or has an untolerated scheduling taint |
 | `RuntimeCreating` / `RuntimeReady` | Runtime Deployment lifecycle |
+| `DrainStarted` / `DeactivationStarted` / `DrainComplete` | Bounded drain and runtime removal |
+| `ReplacementStarted` / `ReplacementActivating` / `ReplacementSucceeded` | Successful explicit replacement |
+| `ReplacementCanceled` | A new spec generation withdrew or changed an in-progress replacement request |
+| `ReplacementActivationFailed` / `ReplacementRollbackStarted` / `ReplacementRolledBack` / `ReplacementRollbackFailed` | Failed activation and rollback outcome |
 
 Hugging Face credentials are optional. Public repositories work without a
 Secret; private repositories reference `secrets.huggingFaceTokenSecretName`,

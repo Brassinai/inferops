@@ -166,21 +166,82 @@ func (r *ModelDeploymentController) reconcile(
 		return ctrl.Result{}, err
 	}
 	deployment.Status = validated.Status
-	if deployment.Status.Phase == v1alpha1.ModelDeploymentPhaseFailed {
+	if original.Status.Phase == v1alpha1.ModelDeploymentPhaseFailed &&
+		deployment.Status.Phase == v1alpha1.ModelDeploymentPhasePending &&
+		deployment.Generation > original.Status.ObservedGeneration {
+		deployment.Status.Replacement = nil
+		status.RemoveCondition(&deployment.Status.Conditions, v1alpha1.ConditionReplacement)
+	}
+	if deployment.Status.Phase == v1alpha1.ModelDeploymentPhaseFailed &&
+		!retryableOperationalFailure(deployment.Status) {
+		blockedByValidation := validationBlocked(deployment.Status)
+		if blockedByValidation &&
+			deployment.Status.Replacement != nil &&
+			deployment.Status.Replacement.Target != nil {
+			if err := r.releaseReplacementTarget(
+				ctx,
+				deployment.Status.Replacement.Target,
+				deployment,
+			); err != nil {
+				return ctrl.Result{}, err
+			}
+			deployment.Status.Replacement = nil
+			status.RemoveCondition(
+				&deployment.Status.Conditions,
+				v1alpha1.ConditionReplacement,
+			)
+		}
+		if err := r.detachRuntimeService(ctx, deployment); err != nil {
+			return ctrl.Result{}, err
+		}
 		if _, err := r.deleteRuntimeWorkload(ctx, deployment); err != nil {
 			return ctrl.Result{}, err
 		}
-		reason := v1alpha1.ReasonSpecInvalid
+		reason := v1alpha1.ReasonRuntimeUnavailable
+		message := "Deployment is in a terminal failure state"
 		if ready, found := status.FindCondition(deployment.Status.Conditions, v1alpha1.ConditionReady); found {
-			reason = ready.Reason
+			if ready.Reason != "" {
+				reason = ready.Reason
+			}
+			if ready.Message != "" {
+				message = ready.Message
+			}
 		}
 		deployment.Status.AssignedNode = ""
 		deployment.Status.AssignedGPUs = nil
 		deployment.Status.Replicas = v1alpha1.ReplicaStatus{}
 		deployment.Status.Model.Loaded = false
-		setDeploymentCondition(deployment, v1alpha1.ConditionCacheReady, metav1.ConditionUnknown,
-			reason, "Cache lifecycle is blocked by deployment validation")
-		setRuntimeWaitingConditions(deployment, reason, "Runtime lifecycle is blocked by deployment validation")
+		if blockedByValidation {
+			setDeploymentCondition(
+				deployment,
+				v1alpha1.ConditionCacheReady,
+				metav1.ConditionUnknown,
+				reason,
+				"Cache lifecycle is blocked by deployment validation",
+			)
+			message = "Runtime lifecycle is blocked by deployment validation"
+		}
+		if deployment.Spec.Resources.GPU != nil {
+			setDeploymentCondition(
+				deployment,
+				v1alpha1.ConditionGPUAssigned,
+				metav1.ConditionFalse,
+				reason,
+				message,
+			)
+		} else {
+			status.RemoveCondition(&deployment.Status.Conditions, v1alpha1.ConditionGPUAssigned)
+		}
+		setDeploymentCondition(deployment, v1alpha1.ConditionRuntimeReady, metav1.ConditionFalse, reason, message)
+		setDeploymentCondition(deployment, v1alpha1.ConditionModelLoaded, metav1.ConditionFalse, reason, message)
+		setDeploymentCondition(
+			deployment,
+			v1alpha1.ConditionRoutingReady,
+			metav1.ConditionFalse,
+			v1alpha1.ReasonRouteDisabled,
+			message,
+		)
+		setReadyFalse(&deployment.Status, reason, message)
 		deployment.Status.Phase = v1alpha1.ModelDeploymentPhaseFailed
 		return r.patchDeploymentStatus(ctx, deployment, original, reason)
 	}
@@ -223,6 +284,21 @@ func (r *ModelDeploymentController) reconcile(
 
 	cacheResult := cachecontract.Lookup(cache)
 	if !cacheResult.Ready {
+		if deployment.Status.Replacement != nil &&
+			deployment.Status.Replacement.Target != nil {
+			if err := r.releaseReplacementTarget(
+				ctx,
+				deployment.Status.Replacement.Target,
+				deployment,
+			); err != nil {
+				return ctrl.Result{}, err
+			}
+			deployment.Status.Replacement = nil
+			status.RemoveCondition(
+				&deployment.Status.Conditions,
+				v1alpha1.ConditionReplacement,
+			)
+		}
 		if _, err := r.deleteRuntimeWorkload(ctx, deployment); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -266,41 +342,17 @@ func (r *ModelDeploymentController) reconcile(
 	}
 	r.projectReadyCache(deployment, cacheResult)
 
-	if effectiveDesiredState(deployment) == v1alpha1.ActivationDesiredStateInactive {
-		deleted, err := r.deleteRuntimeWorkload(ctx, deployment)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if original.Status.Phase == v1alpha1.ModelDeploymentPhaseActive ||
-			original.Status.Phase == v1alpha1.ModelDeploymentPhaseActivating {
-			if err := r.touchCacheLastUsed(ctx, cache); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		deployment.Status.Phase = v1alpha1.ModelDeploymentPhaseCached
-		deployment.Status.AssignedNode = ""
-		deployment.Status.AssignedGPUs = nil
-		deployment.Status.Replicas = v1alpha1.ReplicaStatus{}
-		deployment.Status.Model.Loaded = false
-		if deployment.Spec.Resources.GPU != nil {
-			setDeploymentCondition(deployment, v1alpha1.ConditionGPUAssigned, metav1.ConditionFalse,
-				v1alpha1.ReasonInactive, "Inactive deployment does not reserve GPU capacity")
-		} else {
-			status.RemoveCondition(&deployment.Status.Conditions, v1alpha1.ConditionGPUAssigned)
-		}
-		setDeploymentCondition(deployment, v1alpha1.ConditionRuntimeReady, metav1.ConditionFalse,
-			v1alpha1.ReasonInactive, "Runtime is not created while the deployment is inactive")
-		setDeploymentCondition(deployment, v1alpha1.ConditionModelLoaded, metav1.ConditionFalse,
-			v1alpha1.ReasonInactive, "Model is cached and inactive")
-		setDeploymentCondition(deployment, v1alpha1.ConditionRoutingReady, metav1.ConditionFalse,
-			v1alpha1.ReasonRouteDisabled, "Gateway routing remains disabled while inactive")
-		setReadyFalse(&deployment.Status, v1alpha1.ReasonInactive, "Model is cached and inactive")
-		reason := ""
-		if deleted || original.Status.Phase != v1alpha1.ModelDeploymentPhaseCached {
-			reason = v1alpha1.ReasonInactive
-		}
-		return r.patchDeploymentStatus(ctx, deployment, original, reason)
+	if handled, result, err := r.reconcileReplacementParticipant(ctx, deployment, original, cache); handled {
+		return result, err
 	}
+	if handled, result, err := r.reconcileReplacementRequester(ctx, deployment, original); handled {
+		return result, err
+	}
+
+	if effectiveDesiredState(deployment) == v1alpha1.ActivationDesiredStateInactive {
+		return r.reconcileDeactivation(ctx, deployment, original, cache, v1alpha1.ReasonInactive)
+	}
+	deployment.Status.DrainStartedAt = nil
 
 	assignedNode := cacheResult.NodeName
 	var runtimeNode corev1.Node
@@ -382,6 +434,14 @@ func (r *ModelDeploymentController) reconcile(
 		}
 	}
 	return r.projectRuntimeDeployment(ctx, deployment, original, runtimeDeployment, created)
+}
+
+func retryableOperationalFailure(deploymentStatus v1alpha1.ModelDeploymentStatus) bool {
+	ready, found := status.FindCondition(
+		deploymentStatus.Conditions,
+		v1alpha1.ConditionReady,
+	)
+	return found && ready.Reason == v1alpha1.ReasonCacheFailed
 }
 
 func (r *ModelDeploymentController) handleRuntimePreflightError(
@@ -549,6 +609,13 @@ func (r *ModelDeploymentController) ensureService(
 	if err != nil {
 		return nil, permanentLifecycleError(fmt.Errorf("build runtime Service: %w", err))
 	}
+	if runtimeServiceShouldDetach(deployment) {
+		// Removing the selector keeps the stable ClusterIP while preventing a
+		// stale gateway discovery snapshot from opening new runtime connections.
+		// Existing connections continue through kube-proxy conntrack during the
+		// configured drain grace period.
+		desired.Spec.Selector = nil
+	}
 	var existing corev1.Service
 	key := types.NamespacedName{Namespace: desired.Namespace, Name: desired.Name}
 	if err := r.client.Get(ctx, key, &existing); err != nil {
@@ -575,6 +642,53 @@ func (r *ModelDeploymentController) ensureService(
 		}
 	}
 	return &existing, nil
+}
+
+func runtimeServiceShouldDetach(deployment *v1alpha1.ModelDeployment) bool {
+	if effectiveDesiredState(deployment) != v1alpha1.ActivationDesiredStateActive {
+		return true
+	}
+	switch deployment.Status.Phase {
+	case v1alpha1.ModelDeploymentPhaseDraining,
+		v1alpha1.ModelDeploymentPhaseDeactivating,
+		v1alpha1.ModelDeploymentPhaseFailed:
+		return true
+	}
+	replacement := deployment.Status.Replacement
+	return replacement != nil &&
+		replacement.RequestedBy != nil &&
+		replacement.Phase != v1alpha1.ReplacementPhaseRollingBack
+}
+
+func (r *ModelDeploymentController) detachRuntimeService(
+	ctx context.Context,
+	deployment *v1alpha1.ModelDeployment,
+) error {
+	var service corev1.Service
+	key := types.NamespacedName{
+		Namespace: deployment.Namespace,
+		Name:      templates.RuntimeServiceName(deployment.Name),
+	}
+	if err := r.client.Get(ctx, key, &service); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get runtime Service for endpoint withdrawal: %w", err)
+	}
+	if err := assertControlledBy(&service, deployment); err != nil {
+		// Never mutate a Service that another controller or user owns. Runtime
+		// deletion still removes InferOps-owned endpoints from that Service.
+		return nil
+	}
+	if len(service.Spec.Selector) == 0 {
+		return nil
+	}
+	before := service.DeepCopy()
+	service.Spec.Selector = nil
+	if err := r.client.Patch(ctx, &service, client.MergeFrom(before)); err != nil {
+		return fmt.Errorf("withdraw runtime Service endpoints: %w", err)
+	}
+	return nil
 }
 
 func (r *ModelDeploymentController) ensureConfigMap(
@@ -747,6 +861,9 @@ func (r *ModelDeploymentController) deleteRuntimeWorkload(
 	if err := assertControlledBy(existing, deployment); err != nil {
 		return false, err
 	}
+	if err := r.detachRuntimeService(ctx, deployment); err != nil {
+		return false, err
+	}
 	if err := r.client.Delete(ctx, existing, client.PropagationPolicy(metav1.DeletePropagationForeground)); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return false, fmt.Errorf("delete runtime Deployment: %w", err)
@@ -800,15 +917,50 @@ func (r *ModelDeploymentController) gpuAllocations(
 	}
 	allocations := make([]scheduler.GPUAllocation, 0)
 	reservedDeployments := make(map[types.NamespacedName]struct{})
+	handoffTargets := make(map[types.NamespacedName]types.UID)
 	for i := range deployments.Items {
 		deployment := &deployments.Items[i]
+		replacement := deployment.Status.Replacement
+		if replacement == nil ||
+			replacement.Target == nil ||
+			replacement.Target.UID == "" ||
+			deployment.Status.AssignedNode == "" ||
+			deployment.Spec.Resources.GPU == nil ||
+			!replacementReservesGPUHandoff(replacement) {
+			continue
+		}
+		handoffTargets[types.NamespacedName{
+			Namespace: replacement.Target.Namespace,
+			Name:      replacement.Target.Name,
+		}] = replacement.Target.UID
+	}
+	for i := range deployments.Items {
+		deployment := &deployments.Items[i]
+		key := types.NamespacedName{Namespace: deployment.Namespace, Name: deployment.Name}
+		if targetUID, isHandoffTarget := handoffTargets[key]; isHandoffTarget && deployment.UID == targetUID {
+			reservedDeployments[key] = struct{}{}
+			continue
+		}
 		if deployment.Namespace == self.Namespace && deployment.Name == self.Name {
+			continue
+		}
+		if deployment.Status.Replacement != nil &&
+			deployment.Status.Replacement.Target != nil &&
+			deployment.Status.Replacement.Phase == v1alpha1.ReplacementPhaseRollingBack &&
+			deployment.Status.Replacement.Target.Namespace == self.Namespace &&
+			deployment.Status.Replacement.Target.Name == self.Name &&
+			deployment.Status.Replacement.Target.UID == self.UID {
+			// The rollback target consumes the requester's protected handoff;
+			// every unrelated deployment must continue to count it as occupied.
 			continue
 		}
 		if deployment.Spec.Resources.GPU == nil ||
 			deployment.Status.AssignedNode == "" ||
 			(deployment.Status.Phase != v1alpha1.ModelDeploymentPhaseActivating &&
-				deployment.Status.Phase != v1alpha1.ModelDeploymentPhaseActive) {
+				deployment.Status.Phase != v1alpha1.ModelDeploymentPhaseActive &&
+				(deployment.Status.Replacement == nil ||
+					deployment.Status.Replacement.Target == nil ||
+					!replacementReservesGPUHandoff(deployment.Status.Replacement))) {
 			continue
 		}
 		allocations = append(allocations, scheduler.GPUAllocation{
@@ -816,10 +968,7 @@ func (r *ModelDeploymentController) gpuAllocations(
 			ResourceName: gpuResourceName(deployment),
 			Count:        effectiveGPUReservation(deployment),
 		})
-		reservedDeployments[types.NamespacedName{
-			Namespace: deployment.Namespace,
-			Name:      deployment.Name,
-		}] = struct{}{}
+		reservedDeployments[key] = struct{}{}
 	}
 	var runtimeDeployments appsv1.DeploymentList
 	if err := r.client.List(ctx, &runtimeDeployments, client.MatchingLabels{
@@ -834,6 +983,13 @@ func (r *ModelDeploymentController) gpuAllocations(
 		if modelName == "" ||
 			key == (types.NamespacedName{Namespace: self.Namespace, Name: self.Name}) {
 			continue
+		}
+		if targetUID, isHandoffTarget := handoffTargets[key]; isHandoffTarget {
+			controller := metav1.GetControllerOf(runtimeDeployment)
+			if controller != nil && controller.UID == targetUID {
+				reservedDeployments[key] = struct{}{}
+				continue
+			}
 		}
 		if _, alreadyReserved := reservedDeployments[key]; alreadyReserved {
 			continue
@@ -865,6 +1021,20 @@ func (r *ModelDeploymentController) gpuAllocations(
 	return allocations, nil
 }
 
+func replacementReservesGPUHandoff(replacement *v1alpha1.ReplacementStatus) bool {
+	if replacement == nil || replacement.Target == nil {
+		return false
+	}
+	switch replacement.Phase {
+	case v1alpha1.ReplacementPhaseDraining,
+		v1alpha1.ReplacementPhaseActivating,
+		v1alpha1.ReplacementPhaseRollingBack:
+		return true
+	default:
+		return false
+	}
+}
+
 func requiredHostname(affinity *corev1.Affinity) string {
 	if affinity == nil ||
 		affinity.NodeAffinity == nil ||
@@ -893,6 +1063,16 @@ func (r *ModelDeploymentController) handleGPUCapacityError(
 		!errors.Is(placementErr, scheduler.ErrInsufficientGPUCapacity) {
 		return ctrl.Result{}, placementErr
 	}
+	if deployment.Status.Replacement != nil &&
+		deployment.Status.Replacement.Target != nil &&
+		deployment.Status.Replacement.Phase == v1alpha1.ReplacementPhaseActivating {
+		return r.beginReplacementRollback(
+			ctx,
+			deployment,
+			original,
+			"reserved replacement GPU handoff became unavailable: "+placementErr.Error(),
+		)
+	}
 	if _, err := r.deleteRuntimeWorkload(ctx, deployment); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -914,16 +1094,11 @@ func (r *ModelDeploymentController) handleGPUCapacityError(
 		setDeploymentCondition(deployment, v1alpha1.ConditionGPUAssigned, metav1.ConditionFalse,
 			v1alpha1.ReasonInsufficientGPU, placementErr.Error())
 		return r.failDeployment(ctx, deployment, original, v1alpha1.ReasonInsufficientGPU, placementErr.Error())
+	case v1alpha1.ActivationWhenFullReplaceOldest,
+		v1alpha1.ActivationWhenFullReplaceLowestPriority:
+		return r.startReplacement(ctx, deployment, original, placementErr)
 	default:
-		setDeploymentCondition(deployment, v1alpha1.ConditionGPUAssigned, metav1.ConditionFalse,
-			v1alpha1.ReasonReplacementPending, placementErr.Error())
-		return r.failDeployment(
-			ctx,
-			deployment,
-			original,
-			v1alpha1.ReasonReplacementPending,
-			"GPU replacement policies require the explicit replacement workflow",
-		)
+		return ctrl.Result{}, fmt.Errorf("unsupported activation policy %q", effectiveWhenFull(deployment))
 	}
 }
 
@@ -959,9 +1134,24 @@ func (r *ModelDeploymentController) projectRuntimeDeployment(
 			Reason:  v1alpha1.ReasonRuntimeReady,
 			Message: "Runtime is accepting traffic",
 		})
+		eventReason := v1alpha1.ReasonRuntimeReady
+		if deployment.Status.Replacement != nil &&
+			deployment.Status.Replacement.Target != nil &&
+			deployment.Status.Replacement.Phase == v1alpha1.ReplacementPhaseActivating {
+			deployment.Status.Replacement.Phase = v1alpha1.ReplacementPhaseSucceeded
+			deployment.Status.Replacement.Message = "Replacement runtime is ready and receiving traffic"
+			setDeploymentCondition(
+				deployment,
+				v1alpha1.ConditionReplacement,
+				metav1.ConditionTrue,
+				v1alpha1.ReasonReplacementSucceeded,
+				deployment.Status.Replacement.Message,
+			)
+			eventReason = v1alpha1.ReasonReplacementSucceeded
+		}
 		observeDuration := original.Status.Phase != v1alpha1.ModelDeploymentPhaseActive &&
 			!runtimeDeployment.CreationTimestamp.IsZero()
-		result, err := r.patchDeploymentStatus(ctx, deployment, original, v1alpha1.ReasonRuntimeReady)
+		result, err := r.patchDeploymentStatus(ctx, deployment, original, eventReason)
 		if err == nil && !result.Requeue && observeDuration {
 			duration := time.Since(runtimeDeployment.CreationTimestamp.Time)
 			if duration >= 0 {
@@ -969,6 +1159,23 @@ func (r *ModelDeploymentController) projectRuntimeDeployment(
 			}
 		}
 		return result, err
+	}
+	if message, failed := runtimeActivationFailure(runtimeDeployment); failed {
+		if message == "" {
+			message = "Kubernetes reported that the runtime Deployment could not make progress"
+		}
+		if deployment.Status.Replacement != nil &&
+			deployment.Status.Replacement.Target != nil &&
+			deployment.Status.Replacement.Phase == v1alpha1.ReplacementPhaseActivating {
+			return r.beginReplacementRollback(ctx, deployment, original, message)
+		}
+		return r.failDeployment(
+			ctx,
+			deployment,
+			original,
+			v1alpha1.ReasonRuntimeUnavailable,
+			message,
+		)
 	}
 
 	deployment.Status.Phase = v1alpha1.ModelDeploymentPhaseActivating
@@ -1035,6 +1242,9 @@ func (r *ModelDeploymentController) failDeployment(
 	deployment, original *v1alpha1.ModelDeployment,
 	reason, message string,
 ) (ctrl.Result, error) {
+	if err := r.detachRuntimeService(ctx, deployment); err != nil {
+		return ctrl.Result{}, err
+	}
 	deployment.Status.Phase = v1alpha1.ModelDeploymentPhaseFailed
 	deployment.Status.Model.Loaded = false
 	setDeploymentCondition(deployment, v1alpha1.ConditionReady, metav1.ConditionFalse, reason, message)
@@ -1071,7 +1281,9 @@ func (r *ModelDeploymentController) patchDeploymentStatus(
 			message = ready.Message
 		}
 		eventType := corev1.EventTypeNormal
-		if deployment.Status.Phase == v1alpha1.ModelDeploymentPhaseFailed {
+		if deployment.Status.Phase == v1alpha1.ModelDeploymentPhaseFailed ||
+			eventReason == v1alpha1.ReasonReplacementActivationFailed ||
+			eventReason == v1alpha1.ReasonReplacementRollbackFailed {
 			eventType = corev1.EventTypeWarning
 			r.metrics.IncFailure("modeldeployment", eventReason)
 		}
@@ -1122,7 +1334,9 @@ func deploymentRequeueResult(phase v1alpha1.ModelDeploymentPhase) ctrl.Result {
 		v1alpha1.ModelDeploymentPhaseWaitingForGPU:
 		return ctrl.Result{RequeueAfter: waitingRequeueAfter}
 	case v1alpha1.ModelDeploymentPhaseDownloading,
-		v1alpha1.ModelDeploymentPhaseActivating:
+		v1alpha1.ModelDeploymentPhaseActivating,
+		v1alpha1.ModelDeploymentPhaseDraining,
+		v1alpha1.ModelDeploymentPhaseDeactivating:
 		return ctrl.Result{RequeueAfter: deploymentRequeueAfter}
 	default:
 		return ctrl.Result{}
@@ -1312,6 +1526,10 @@ func (g kubernetesRuntimeGetter) GetRuntime(
 func (r *ModelDeploymentController) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.ModelDeployment{}).
+		Watches(
+			&v1alpha1.ModelDeployment{},
+			handler.EnqueueRequestsFromMapFunc(r.requestsForReplacementParticipant),
+		).
 		Owns(&appsv1.Deployment{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
 		Owns(&corev1.Service{}).
@@ -1321,6 +1539,32 @@ func (r *ModelDeploymentController) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(r.requestsForNode)).
 		WithOptions(controller.Options{MaxConcurrentReconciles: 1}).
 		Complete(r)
+}
+
+func (r *ModelDeploymentController) requestsForReplacementParticipant(
+	_ context.Context,
+	object client.Object,
+) []reconcile.Request {
+	deployment, ok := object.(*v1alpha1.ModelDeployment)
+	if !ok || deployment.Status.Replacement == nil {
+		return nil
+	}
+	references := []*v1alpha1.ReplacementReference{
+		deployment.Status.Replacement.Target,
+		deployment.Status.Replacement.RequestedBy,
+	}
+	requests := make([]reconcile.Request, 0, len(references))
+	for _, reference := range references {
+		if reference == nil ||
+			(reference.Namespace == deployment.Namespace && reference.Name == deployment.Name) {
+			continue
+		}
+		requests = append(requests, reconcile.Request{NamespacedName: types.NamespacedName{
+			Namespace: reference.Namespace,
+			Name:      reference.Name,
+		}})
+	}
+	return requests
 }
 
 func (r *ModelDeploymentController) requestsForCache(

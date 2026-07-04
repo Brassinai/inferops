@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import unittest
 
 from inferops_cli import activate, delete, endpoints, models
-from inferops_cli.k8s_client import LiveKubernetesClient
+from inferops_cli.k8s_client import LiveKubernetesClient, _summarize_deployment
 from inferops_cli.kube import ActivationRequest, ClusterTarget, LogsRequest
 from tests.python.fake_kube_client import FakeKubernetesClient
 
@@ -113,6 +113,31 @@ class FakeOperationalCommandsTest(unittest.TestCase):
             "generation": 1,
             "conditions": [],
         }
+
+    def test_status_summary_exposes_replacement_without_secret_references(self) -> None:
+        resource = deployment(phase="Draining")
+        resource["status"]["drainStartedAt"] = "2026-07-04T12:00:00Z"
+        resource["status"]["replacement"] = {
+            "phase": "Draining",
+            "requestGeneration": 7,
+            "target": {
+                "namespace": "team-a",
+                "name": "old-model",
+                "uid": "old-model-uid",
+                "token": "must-not-be-returned",
+            },
+            "startedAt": "2026-07-04T12:00:00Z",
+            "message": "draining old-model",
+            "internalField": "must-not-be-returned",
+        }
+
+        summary = _summarize_deployment(resource)
+
+        self.assertEqual(summary["replacement"]["phase"], "Draining")
+        self.assertEqual(summary["replacement"]["requestGeneration"], 7)
+        self.assertNotIn("internalField", summary["replacement"])
+        self.assertNotIn("token", summary["replacement"]["target"])
+        self.assertNotIn("secrets", summary)
 
     def test_activate_reports_active_and_explicit_replacement_policy(self) -> None:
         stdout, _, code = self._run(

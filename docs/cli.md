@@ -139,6 +139,10 @@ The existing `whenFull` policy is preserved unless `--when-full` is supplied.
 Replacement is never inferred: select `ReplaceOldest` or
 `ReplaceLowestPriority` explicitly to authorize replacement. If no GPU slot is
 free with `Queue`, the deployment reports `WaitingForGPU` and remains queued.
+Single-GPU replacement prepares the new cache before draining the selected
+runtime, but it still has unavoidable downtime because both runtimes cannot
+occupy the only GPU. Status and Events report replacement and rollback
+outcomes.
 
 ### deactivate
 
@@ -164,7 +168,9 @@ inferops status qwen-chat --watch --timeout 10m
 
 Status output is a safe summary of the ModelDeployment. It includes observed
 conditions, placement, replica state, cache state, and the endpoint, but never
-returns the `spec.secrets` field or Kubernetes Secret objects.
+returns the `spec.secrets` field or Kubernetes Secret objects. During a drain
+or replacement, JSON/YAML output also includes the sanitized
+`drainStartedAt` and `replacement` status fields.
 
 ### models
 
