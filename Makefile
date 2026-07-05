@@ -199,12 +199,22 @@ helm-template:
 		--set auth.enabled=true \
 		--set-string auth.secretName=inferops-gateway-token \
 		> .verify/helm/inferops-gateway-auth.yaml
+	@$(HELM) template inferops-gateway-tenant deploy/helm/inferops-gateway \
+		--namespace team-a \
+		--set tenancy.access.enabled=true \
+		--set-string 'tenancy.access.subjects[0].kind=Group' \
+		--set-string 'tenancy.access.subjects[0].name=inference-team-a' \
+		--set-string 'tenancy.access.subjects[0].apiGroup=rbac.authorization.k8s.io' \
+		--set tenancy.quota.enabled=true \
+		--set tenancy.limitRange.enabled=true \
+		> .verify/helm/inferops-gateway-tenant.yaml
 	@runtime_count=$$(grep -c '^kind: ModelRuntime$$' .verify/helm/inferops-operator.yaml); \
 	[ "$$runtime_count" -eq 4 ] || { \
 		echo "error: operator chart rendered $$runtime_count packaged runtimes, want 4"; \
 		exit 1; \
 	}
 	@$(PYTHON) scripts/check_operator_rbac.py .verify/helm/inferops-operator.yaml
+	@$(PYTHON) scripts/check_tenant_rbac.py .verify/helm/inferops-gateway-tenant.yaml
 	@grep -q 'pathType: Prefix' .verify/helm/inferops-gateway-homelab.yaml
 	@grep -q 'profile: "homelab"' .verify/helm/inferops-operator-homelab.yaml
 	@grep -q 'gpu.required: "true"' .verify/helm/inferops-operator-homelab.yaml
@@ -214,6 +224,8 @@ helm-template:
 	@grep -q '^kind: ValidatingWebhookConfiguration$$' .verify/helm/inferops-operator.yaml
 	@test "$$(grep -c '^kind: PodDisruptionBudget$$' .verify/helm/inferops-operator.yaml)" -eq 1
 	@test "$$(grep -c '^kind: PodDisruptionBudget$$' .verify/helm/inferops-gateway.yaml)" -eq 1
+	@test "$$(grep -c '^kind: NetworkPolicy$$' .verify/helm/inferops-operator.yaml)" -eq 1
+	@test "$$(grep -c '^kind: NetworkPolicy$$' .verify/helm/inferops-gateway.yaml)" -eq 2
 	@! grep -q 'tailscale.com/hostname' .verify/helm/inferops-gateway-homelab.yaml || { \
 		echo "error: Tailscale Ingress hostname must be configured through spec.tls.hosts"; \
 		exit 1; \

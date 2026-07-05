@@ -29,6 +29,25 @@ serviceAccount:
 rbac:
   create: true
 
+networkPolicy:
+  enabled: true
+  # Empty keeps the named metrics, health, and webhook ports reachable from
+  # any source. Supply peers to restrict them to monitoring/control-plane pods.
+  ingressFrom: []
+  # Replace these common Kubernetes API Service IPs with the exact /32 or
+  # /128 advertised as KUBERNETES_SERVICE_HOST in this cluster.
+  apiServerCIDRs:
+    - 10.96.0.1/32
+    - 10.43.0.1/32
+    - 10.0.0.1/32
+  dns:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    podSelector:
+      matchLabels:
+        k8s-app: kube-dns
+
 cache:
   root: /var/lib/inferops/models
   defaultSize: 100Gi

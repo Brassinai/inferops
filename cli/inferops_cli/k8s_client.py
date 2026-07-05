@@ -40,6 +40,8 @@ from .kube import (
     StatusRequest,
 )
 
+CLI_FIELD_MANAGER = "inferops-cli"
+
 
 def _load_config(cluster: ClusterTarget) -> None:
     """Load kubeconfig for the selected cluster target."""
@@ -1537,6 +1539,7 @@ class LiveKubernetesClient(KubernetesClient):
                 plural="modeldeployments",
                 name=name,
                 body=body,
+                field_manager=CLI_FIELD_MANAGER,
             )
         except ApiException as exc:
             if _is_not_found(exc):

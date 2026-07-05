@@ -11,7 +11,12 @@ import unittest
 
 from inferops_cli import activate, delete, endpoints, models
 from inferops_cli.k8s_client import LiveKubernetesClient, _summarize_deployment
-from inferops_cli.kube import ActivationRequest, ClusterTarget, LogsRequest
+from inferops_cli.kube import (
+    ActivationRequest,
+    ClusterTarget,
+    DeactivationRequest,
+    LogsRequest,
+)
 from tests.python.fake_kube_client import FakeKubernetesClient
 
 
@@ -226,6 +231,7 @@ class LiveOperationalClientTest(unittest.TestCase):
         class CustomAPI:
             def __init__(self):
                 self.patched_body = None
+                self.field_manager = None
                 self.responses = [
                     deployment(
                         phase="WaitingForGPU",
@@ -249,6 +255,7 @@ class LiveOperationalClientTest(unittest.TestCase):
 
             def patch_namespaced_custom_object(self, **kwargs):
                 self.patched_body = kwargs["body"]
+                self.field_manager = kwargs["field_manager"]
                 return deployment(
                     phase="Active",
                     observed_generation=1,
@@ -283,6 +290,7 @@ class LiveOperationalClientTest(unittest.TestCase):
                 }
             },
         )
+        self.assertEqual(api.field_manager, "inferops-cli")
         self.assertEqual(response["outcome"], "active")
         self.assertEqual(
             [item["phase"] for item in response["transitions"]],
@@ -312,6 +320,37 @@ class LiveOperationalClientTest(unittest.TestCase):
         )
 
         self.assertEqual(response["outcome"], "rejected")
+
+    def test_deactivate_uses_cli_field_manager(self) -> None:
+        class CustomAPI:
+            def __init__(self):
+                self.patched_body = None
+                self.field_manager = None
+
+            def patch_namespaced_custom_object(self, **kwargs):
+                self.patched_body = kwargs["body"]
+                self.field_manager = kwargs["field_manager"]
+                result = deployment(phase="Cached")
+                result["spec"]["activation"]["desiredState"] = "Inactive"
+                return result
+
+        api = CustomAPI()
+        client = live_client(api)
+
+        response = client.deactivate(
+            DeactivationRequest(
+                cluster=client._cluster,
+                name="qwen-chat",
+                wait=False,
+            )
+        )
+
+        self.assertEqual(
+            api.patched_body,
+            {"spec": {"activation": {"desiredState": "Inactive"}}},
+        )
+        self.assertEqual(api.field_manager, "inferops-cli")
+        self.assertEqual(response["outcome"], "requested")
 
     def test_model_and_endpoint_lists_whitelist_fields(self) -> None:
         item = deployment(phase="Active")

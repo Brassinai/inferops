@@ -32,6 +32,8 @@ The gateway needs:
 - Receive the referenced auth `Secret` through a read-only projected volume
 
 Neither component needs cluster-admin. Keep roles namespace-scoped where possible.
+For per-team RoleBindings, quotas, and the supported shared-operator layout,
+see [Namespace tenancy](tenancy.md).
 
 ## Secrets
 
@@ -51,7 +53,10 @@ reproducible production release. Build the downloader locally with
 ## Network
 
 - Gateway exposes the OpenAI-compatible endpoint.
-- Use `NetworkPolicy` to restrict runtime pods to gateway traffic only.
+- The Helm charts enable NetworkPolicies that restrict runtime ingress to the
+  same-namespace gateway and deny runtime egress by default.
+- Set the exact Kubernetes API Service IP and narrow gateway ingress peers for
+  the target cluster as described in [Namespace tenancy](tenancy.md).
 - Use Tailscale or an ingress controller for external access; do not expose runtime pods directly.
 
 ## Monitoring

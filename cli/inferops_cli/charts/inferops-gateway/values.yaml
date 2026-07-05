@@ -13,6 +13,64 @@ serviceAccount:
 rbac:
   create: true
 
+networkPolicy:
+  enabled: true
+  gateway:
+    # Empty permits all sources on the gateway HTTP port. Narrow this to the
+    # ingress controller or tailnet peers in production.
+    ingressFrom: []
+    # Replace these common Kubernetes API Service IPs with the exact /32 or
+    # /128 advertised as KUBERNETES_SERVICE_HOST in this cluster.
+    apiServerCIDRs:
+      - 10.96.0.1/32
+      - 10.43.0.1/32
+      - 10.0.0.1/32
+  runtime:
+    # Add monitoring peers when Prometheus scrapes runtime metrics directly.
+    additionalIngressFrom: []
+    # Runtime weights are prepared by separate cache Jobs, so runtime pods
+    # need no egress by default. Add explicit rules only when required.
+    egress: []
+  dns:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    podSelector:
+      matchLabels:
+        k8s-app: kube-dns
+
+tenancy:
+  access:
+    enabled: false
+    roleName: inferops-team-operator
+    # User and Group subjects preserve individual Kubernetes audit identity.
+    # ServiceAccount subjects must include their namespace.
+    subjects: []
+    allowModelRuntimeWrite: false
+    # Keep deletion platform-admin-only because direct Kubernetes deletes
+    # bypass the CLI's in-use cache checks.
+    allowCacheDelete: false
+  quota:
+    enabled: false
+    hard:
+      pods: "20"
+      requests.cpu: "16"
+      requests.memory: 64Gi
+      limits.cpu: "32"
+      limits.memory: 128Gi
+      count/modeldeployments.inference.inferops.dev: "10"
+      count/modelcaches.inference.inferops.dev: "20"
+  limitRange:
+    enabled: false
+    limits:
+      - type: Container
+        defaultRequest:
+          cpu: 100m
+          memory: 128Mi
+        default:
+          cpu: "8"
+          memory: 32Gi
+
 discovery:
   # Bounds how long a Kubernetes lifecycle or Service change can remain unseen.
   # The gateway rejects values below one second.

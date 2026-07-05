@@ -65,6 +65,12 @@ checks that a same-namespace referenced Secret contains the required key, but
 never logs or copies its value; the downloader Job receives the value through
 `secretKeyRef`.
 
+The charts enable operator, gateway, and runtime NetworkPolicies by default.
+The gateway chart also provides opt-in `tenancy.access`, `tenancy.quota`, and
+`tenancy.limitRange` resources for a team namespace. See
+[Namespace tenancy](tenancy.md) to configure the exact Kubernetes API Service
+IP before installation or binding users.
+
 The install profile does not choose the engine for every model. Each
 deployment selects a registered runtime and independently declares whether it
 needs GPUs:
