@@ -154,6 +154,16 @@ class FakeOperationalCommandsTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(payload["outcome"], "active")
         self.assertEqual(payload["deployment"]["whenFull"], "ReplaceOldest")
+        self.assertEqual(
+            [transition["reason"] for transition in payload["transitions"]],
+            [
+                "ReplacementSelected",
+                "ReplacementDraining",
+                "RuntimeStarting",
+                "RuntimeReady",
+            ],
+        )
+        self.assertEqual(payload["deployment"]["replacement"]["phase"], "Completed")
         self.assertEqual(payload["transitions"][-1]["phase"], "Active")
 
     def test_activate_reports_waiting_without_failure_exit(self) -> None:

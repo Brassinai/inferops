@@ -107,6 +107,16 @@ class InstallRequest:
     profile: str
     cache_path: str | None = None
     tailscale_hostname: str | None = None
+    exposure: str | None = None
+    ingress_class: str | None = None
+    ingress_hostname: str | None = None
+    gateway_name: str | None = None
+    gateway_namespace: str | None = None
+    gateway_section_name: str | None = None
+    gateway_hostname: str | None = None
+    load_balancer_class: str | None = None
+    gateway_auth_secret: str | None = None
+    allow_unauthenticated_exposure: bool = False
     charts_dir: str | None = None
 
 

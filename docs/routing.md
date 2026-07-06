@@ -28,6 +28,11 @@ Custom `spec.routing.path` values are allowed, but every lane must support the
 default `/models/<deployment-name>` convention. Streaming responses must not be
 buffered.
 
+North-south exposure does not alter these paths. The gateway chart supports
+standard Ingress, Gateway API HTTPRoute, LoadBalancer Service, and Tailscale
+front doors while preserving `/models/<name>/v1/...`; see
+[Cluster and ingress support](cluster-ingress.md).
+
 The namespace-scoped registry is refreshed from `ModelDeployment`, Service, and
 EndpointSlice objects every five seconds by default. `discovery.syncInterval`
 configures this bound and must be at least one second. A failed Kubernetes read

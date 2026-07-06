@@ -46,6 +46,15 @@ inferops install --profile homelab \
   --tailscale-hostname inferops
 ```
 
+For managed clusters, the install command also supports
+`--exposure load-balancer`, `--exposure ingress`, and
+`--exposure gateway-api`. These external methods require an existing bearer
+token Secret selected with `--gateway-auth-secret`, or an explicit
+`--allow-unauthenticated-exposure` acknowledgement when authentication is
+enforced upstream. Provider-specific controllers remain cluster prerequisites.
+See [Cluster and ingress support](cluster-ingress.md) for the complete flags,
+values, security constraints, and acceptance checks.
+
 InferOps does not install or guess host NVIDIA drivers, the NVIDIA Container
 Toolkit, a device plugin, k3s, or Tailscale. Those host and cluster
 prerequisites must be installed and verified independently.

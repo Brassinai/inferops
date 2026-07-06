@@ -172,6 +172,37 @@ helm-lint:
 		echo "error: gateway chart accepted auth without a Secret name"; \
 		exit 1; \
 	fi
+	@if $(HELM) template invalid deploy/helm/inferops-gateway \
+		--set ingress.enabled=true --set-string ingress.path=/inferops >/dev/null 2>&1; then \
+		echo "error: gateway chart accepted an ingress path that changes model routes"; \
+		exit 1; \
+	fi
+	@if $(HELM) template invalid deploy/helm/inferops-gateway \
+		--set ingress.enabled=true --set-string ingress.pathType=Exact >/dev/null 2>&1; then \
+		echo "error: gateway chart accepted an ingress path type that drops model routes"; \
+		exit 1; \
+	fi
+	@if $(HELM) template invalid deploy/helm/inferops-gateway \
+		--set gatewayAPI.enabled=true >/dev/null 2>&1; then \
+		echo "error: gateway chart accepted Gateway API without a parent Gateway"; \
+		exit 1; \
+	fi
+	@if $(HELM) template invalid deploy/helm/inferops-gateway \
+		--set-string service.loadBalancerClass=example.com/internal >/dev/null 2>&1; then \
+		echo "error: gateway chart accepted a load balancer class on ClusterIP"; \
+		exit 1; \
+	fi
+	@if $(HELM) template invalid deploy/helm/inferops-gateway \
+		--set service.port=0 >/dev/null 2>&1; then \
+		echo "error: gateway chart accepted an invalid Service port"; \
+		exit 1; \
+	fi
+	@if $(HELM) template invalid deploy/helm/inferops-gateway \
+		--set topologySpread.enabled=true \
+		--set topologySpread.maxSkew=0 >/dev/null 2>&1; then \
+		echo "error: gateway chart accepted invalid topology spread"; \
+		exit 1; \
+	fi
 	@$(HELM) template inferops-operator-ha deploy/helm/inferops-operator \
 		--set replicaCount=2 >/dev/null
 
@@ -199,6 +230,45 @@ helm-template:
 		--set auth.enabled=true \
 		--set-string auth.secretName=inferops-gateway-token \
 		> .verify/helm/inferops-gateway-auth.yaml
+	@$(HELM) template inferops-gateway-nginx deploy/helm/inferops-gateway \
+		--set ingress.enabled=true \
+		--set-string ingress.className=nginx \
+		--set-string ingress.hostname=models.example.com \
+		--set auth.enabled=true \
+		--set-string auth.secretName=inferops-gateway-token \
+		> .verify/helm/inferops-gateway-nginx.yaml
+	@$(HELM) template inferops-gateway-traefik deploy/helm/inferops-gateway \
+		--set ingress.enabled=true \
+		--set-string ingress.className=traefik \
+		--set-string ingress.hostname=models.example.com \
+		--set auth.enabled=true \
+		--set-string auth.secretName=inferops-gateway-token \
+		> .verify/helm/inferops-gateway-traefik.yaml
+	@$(HELM) template inferops-gateway-api deploy/helm/inferops-gateway \
+		--set gatewayAPI.enabled=true \
+		--set-string 'gatewayAPI.parentRefs[0].name=public' \
+		--set-string 'gatewayAPI.hostnames[0]=models.example.com' \
+		--set auth.enabled=true \
+		--set-string auth.secretName=inferops-gateway-token \
+		> .verify/helm/inferops-gateway-api.yaml
+	@$(HELM) template inferops-gateway-istio deploy/helm/inferops-gateway \
+		--namespace inferops-system \
+		--set gatewayAPI.enabled=true \
+		--set-string 'gatewayAPI.parentRefs[0].name=public' \
+		--set-string 'gatewayAPI.parentRefs[0].namespace=istio-ingress' \
+		--set-string 'gatewayAPI.parentRefs[0].sectionName=http' \
+		--set-string 'gatewayAPI.hostnames[0]=models.example.com' \
+		--set auth.enabled=true \
+		--set-string auth.secretName=inferops-gateway-token \
+		> .verify/helm/inferops-gateway-istio.yaml
+	@$(HELM) template inferops-gateway-loadbalancer deploy/helm/inferops-gateway \
+		--set-string service.type=LoadBalancer \
+		--set auth.enabled=true \
+		--set-string auth.secretName=inferops-gateway-token \
+		> .verify/helm/inferops-gateway-loadbalancer.yaml
+	@$(HELM) template inferops-gateway-multinode deploy/helm/inferops-gateway \
+		--values deploy/helm/inferops-gateway/values-multinode.yaml \
+		> .verify/helm/inferops-gateway-multinode.yaml
 	@$(HELM) template inferops-gateway-tenant deploy/helm/inferops-gateway \
 		--namespace team-a \
 		--set tenancy.access.enabled=true \
@@ -221,6 +291,24 @@ helm-template:
 	@grep -q 'gpu.required: "false"' .verify/helm/inferops-operator.yaml
 	@grep -q 'INFEROPS_GATEWAY_AUTH_TOKEN_FILE' .verify/helm/inferops-gateway-auth.yaml
 	@grep -q 'secretName: "inferops-gateway-token"' .verify/helm/inferops-gateway-auth.yaml
+	@$(PYTHON) scripts/check_gateway_exposure.py --mode tailscale \
+		.verify/helm/inferops-gateway-homelab.yaml
+	@$(PYTHON) scripts/check_gateway_exposure.py --mode ingress \
+		--expected-class nginx --require-auth \
+		.verify/helm/inferops-gateway-nginx.yaml
+	@$(PYTHON) scripts/check_gateway_exposure.py --mode ingress \
+		--expected-class traefik --require-auth \
+		.verify/helm/inferops-gateway-traefik.yaml
+	@$(PYTHON) scripts/check_gateway_exposure.py --mode gateway-api \
+		--require-auth .verify/helm/inferops-gateway-api.yaml
+	@$(PYTHON) scripts/check_gateway_exposure.py --mode gateway-api \
+		--expected-parent-namespace istio-ingress \
+		--require-auth \
+		.verify/helm/inferops-gateway-istio.yaml
+	@$(PYTHON) scripts/check_gateway_exposure.py --mode load-balancer \
+		--require-auth .verify/helm/inferops-gateway-loadbalancer.yaml
+	@$(PYTHON) scripts/check_gateway_exposure.py --mode multi-node \
+		.verify/helm/inferops-gateway-multinode.yaml
 	@grep -q '^kind: ValidatingWebhookConfiguration$$' .verify/helm/inferops-operator.yaml
 	@test "$$(grep -c '^kind: PodDisruptionBudget$$' .verify/helm/inferops-operator.yaml)" -eq 1
 	@test "$$(grep -c '^kind: PodDisruptionBudget$$' .verify/helm/inferops-gateway.yaml)" -eq 1

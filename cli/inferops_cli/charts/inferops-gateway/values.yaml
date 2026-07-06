@@ -96,6 +96,28 @@ service:
   type: ClusterIP
   port: 80
   annotations: {}
+  # Optional settings for cloud or controller-provided LoadBalancer Services.
+  loadBalancerClass: ""
+  loadBalancerSourceRanges: []
+  externalTrafficPolicy: Cluster
+
+ingress:
+  enabled: false
+  # Set this explicitly unless the cluster has a trusted default IngressClass.
+  className: ""
+  annotations: {}
+  hostname: ""
+  path: /
+  pathType: Prefix
+  tls: []
+
+gatewayAPI:
+  enabled: false
+  annotations: {}
+  # References an operator-managed Gateway. The chart creates only HTTPRoute.
+  parentRefs: []
+  hostnames: []
+  path: /
 
 tailscale:
   enabled: false
@@ -131,3 +153,12 @@ securityContext:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+# Generates a release-specific selector so separate gateway releases do not
+# affect one another's topology skew.
+topologySpread:
+  enabled: false
+  maxSkew: 1
+  topologyKey: kubernetes.io/hostname
+  whenUnsatisfiable: DoNotSchedule
+# Advanced additional constraints. Do not combine with topologySpread.enabled.
+topologySpreadConstraints: []
