@@ -17,6 +17,37 @@ Custom `spec.routing.path` values are allowed, but every lane must support the
 default `/models/<deployment-name>` convention. Streaming responses must not be
 buffered.
 
+The gateway tracks active proxied requests per backend. When discovery observes
+`Draining`, the gateway rejects new requests for that backend but keeps already
+admitted streaming and non-streaming requests running until they complete or
+the client disconnects.
+
+`GET /drainz` exposes the current drain snapshot for operator use:
+
+```json
+{
+  "backends": [
+    {
+      "namespace": "default",
+      "model": "qwen-chat",
+      "routePrefix": "/models/qwen-chat",
+      "state": "draining",
+      "activeRequests": 0,
+      "draining": true,
+      "drainComplete": true
+    }
+  ]
+}
+```
+
+Filter a single backend with `?namespace=<namespace>&model=<name>`. A backend
+is drain-complete only when it is still observed as `draining` and
+`activeRequests` is zero. The operator may poll this endpoint during
+deactivation; if it is not configured or unavailable, the operator still
+deletes the runtime after `spec.activation.drainTimeout`.
+Set `gateway.drainStatusURL` in the operator Helm values to the gateway
+`/drainz` URL to enable early drain completion.
+
 The namespace-scoped registry is refreshed from `ModelDeployment`, Service, and
 EndpointSlice objects every five seconds by default. `discovery.syncInterval`
 configures this bound and must be at least one second. A failed Kubernetes read
@@ -27,10 +58,11 @@ query succeeds. Readiness also remains false until the first complete snapshot.
 
 Gateway errors use the OpenAI `{"error": ...}` envelope:
 
-| Model state | HTTP status | Error code |
+| Model lifecycle state | HTTP status | Error code |
 | --- | ---: | --- |
 | Unknown route | `404` | `model_not_found` |
-| Inactive | `409` | `model_inactive` |
+| Cached / inactive | `409` | `model_inactive` |
+| Pending, downloading, or waiting for capacity/GPU | `503` | `model_activating` |
 | Activating | `503` | `model_activating` |
 | Draining | `503` | `model_draining` |
 | Failed, stale, or unready | `503` | `model_unavailable` |

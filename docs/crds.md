@@ -125,6 +125,7 @@ workload without that workflow.
 | `GPUAssigned` | Node-level whole-GPU capacity is reserved; this does not assert a physical GPU UUID |
 | `RuntimeReady` | Managed runtime has its desired ready replicas |
 | `ModelLoaded` | Runtime readiness indicates that the model can receive traffic |
+| `DrainComplete` | Gateway drain finished before timeout, or records that timeout elapsed |
 
 Stable `reason` values are machine-readable; `message` is for operators. `observedGeneration` must match `metadata.generation` for freshness.
 

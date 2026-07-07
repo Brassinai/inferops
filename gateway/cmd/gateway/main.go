@@ -94,15 +94,19 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("create gateway proxy: %w", err)
 	}
 	healthHandler := health.HandlerWithReadiness(ready)
-	return health.RunWithHandler(ctx, address, gatewayHandler(healthHandler, gatewayProxy))
+	return health.RunWithHandler(ctx, address, gatewayHandler(healthHandler, gatewayProxy, http.HandlerFunc(gatewayProxy.ServeDrainStatus)))
 }
 
-func gatewayHandler(healthHandler, proxyHandler http.Handler) http.Handler {
+func gatewayHandler(healthHandler, proxyHandler, drainHandler http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL != nil &&
 			request.URL.RawPath == "" &&
 			(request.URL.Path == "/healthz" || request.URL.Path == "/readyz") {
 			healthHandler.ServeHTTP(response, request)
+			return
+		}
+		if request.URL != nil && request.URL.RawPath == "" && request.URL.Path == "/drainz" {
+			drainHandler.ServeHTTP(response, request)
 			return
 		}
 		proxyHandler.ServeHTTP(response, request)

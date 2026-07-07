@@ -285,6 +285,61 @@ func TestLifecycleDeactivationTouchesCacheOnce(t *testing.T) {
 	}
 }
 
+func TestLifecycleDeactivationPublishesDrainingBeforeDeletingRuntime(t *testing.T) {
+	t.Parallel()
+
+	deployment, c, reconciler := activeLifecycleDeployment(t, nil)
+	latest := requestLifecycleDeactivation(t, c, deployment)
+	reconcileLifecycle(t, reconciler, latest)
+
+	var draining v1alpha1.ModelDeployment
+	getObject(t, c, client.ObjectKeyFromObject(deployment), &draining)
+	if draining.Status.Phase != v1alpha1.ModelDeploymentPhaseDraining {
+		t.Fatalf("phase = %q, want Draining", draining.Status.Phase)
+	}
+	assertLifecycleCondition(t, draining.Status.Conditions, v1alpha1.ConditionDrainComplete, metav1.ConditionFalse, v1alpha1.ReasonDraining)
+	assertObjectExists(t, c, types.NamespacedName{Namespace: deployment.Namespace, Name: "qwen-runtime"}, &appsv1.Deployment{})
+}
+
+func TestLifecycleDeactivationCompletesWhenGatewayDrainCompletes(t *testing.T) {
+	t.Parallel()
+
+	deployment, c, reconciler := activeLifecycleDeployment(t, staticDrainChecker(true))
+	latest := requestLifecycleDeactivation(t, c, deployment)
+	reconcileLifecycle(t, reconciler, latest)
+	reconcileLifecycle(t, reconciler, latest)
+
+	var cached v1alpha1.ModelDeployment
+	getObject(t, c, client.ObjectKeyFromObject(deployment), &cached)
+	if cached.Status.Phase != v1alpha1.ModelDeploymentPhaseCached {
+		t.Fatalf("phase = %q, want Cached", cached.Status.Phase)
+	}
+	assertLifecycleCondition(t, cached.Status.Conditions, v1alpha1.ConditionDrainComplete, metav1.ConditionTrue, v1alpha1.ReasonDrainComplete)
+	assertObjectMissing(t, c, types.NamespacedName{Namespace: deployment.Namespace, Name: "qwen-runtime"}, &appsv1.Deployment{})
+}
+
+func TestLifecycleDeactivationDeletesRuntimeAfterDrainTimeout(t *testing.T) {
+	t.Parallel()
+
+	deployment, c, reconciler := activeLifecycleDeployment(t, staticDrainChecker(false))
+	latest := requestLifecycleDeactivation(t, c, deployment)
+	latest.Spec.Activation.DrainTimeout = "1ns"
+	latest.Generation++
+	if err := c.Update(context.Background(), latest); err != nil {
+		t.Fatalf("set short drain timeout: %v", err)
+	}
+	reconcileLifecycle(t, reconciler, latest)
+	reconcileLifecycle(t, reconciler, latest)
+
+	var cached v1alpha1.ModelDeployment
+	getObject(t, c, client.ObjectKeyFromObject(deployment), &cached)
+	if cached.Status.Phase != v1alpha1.ModelDeploymentPhaseCached {
+		t.Fatalf("phase = %q, want Cached", cached.Status.Phase)
+	}
+	assertLifecycleCondition(t, cached.Status.Conditions, v1alpha1.ConditionDrainComplete, metav1.ConditionFalse, v1alpha1.ReasonDrainTimedOut)
+	assertObjectMissing(t, c, types.NamespacedName{Namespace: deployment.Namespace, Name: "qwen-runtime"}, &appsv1.Deployment{})
+}
+
 func TestLifecycleRecoversGPUReservationFromManagedDeployment(t *testing.T) {
 	t.Parallel()
 
@@ -438,6 +493,89 @@ func lifecycleTestControllerWithMetrics(
 		t.Fatalf("NewModelDeploymentController() error = %v", err)
 	}
 	return c, reconciler
+}
+
+func lifecycleTestControllerWithDrainChecker(
+	t *testing.T,
+	drainChecker DrainChecker,
+	objects ...client.Object,
+) (client.Client, *ModelDeploymentController) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := v1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.ModelDeployment{}, &v1alpha1.ModelCache{}, &appsv1.Deployment{}).
+		WithObjects(objects...).
+		Build()
+	c := &patchCountingClient{Client: fakeClient}
+	reconciler, err := NewModelDeploymentController(
+		c,
+		scheme,
+		ModelDeploymentControllerConfig{
+			CacheRoot:        "/var/lib/inferops/models",
+			DefaultCacheSize: "20Gi",
+			DownloaderImage:  "ghcr.io/inferops/model-downloader:v0.1.0",
+			DrainChecker:     drainChecker,
+		},
+		record.NewFakeRecorder(100),
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("NewModelDeploymentController() error = %v", err)
+	}
+	return c, reconciler
+}
+
+func activeLifecycleDeployment(
+	t *testing.T,
+	drainChecker DrainChecker,
+) (*v1alpha1.ModelDeployment, client.Client, *ModelDeploymentController) {
+	t.Helper()
+	deployment := lifecycleDeployment(v1alpha1.ActivationDesiredStateActive, v1alpha1.ActivationWhenFullQueue)
+	cache := lifecycleReadyCache(t, deployment, "gpu-node-1")
+	c, reconciler := lifecycleTestControllerWithDrainChecker(
+		t, drainChecker, deployment, lifecycleRuntime(), cache, lifecycleGPUNode("gpu-node-1", 1),
+	)
+	reconcileLifecycle(t, reconciler, deployment)
+
+	var runtimeDeployment appsv1.Deployment
+	getObject(t, c, types.NamespacedName{Namespace: deployment.Namespace, Name: "qwen-runtime"}, &runtimeDeployment)
+	runtimeDeployment.Status.ObservedGeneration = runtimeDeployment.Generation
+	runtimeDeployment.Status.ReadyReplicas = 1
+	runtimeDeployment.Status.AvailableReplicas = 1
+	if err := c.Status().Update(context.Background(), &runtimeDeployment); err != nil {
+		t.Fatalf("update runtime Deployment status: %v", err)
+	}
+	reconcileLifecycle(t, reconciler, deployment)
+	return deployment, c, reconciler
+}
+
+func requestLifecycleDeactivation(
+	t *testing.T,
+	c client.Client,
+	deployment *v1alpha1.ModelDeployment,
+) *v1alpha1.ModelDeployment {
+	t.Helper()
+	var latest v1alpha1.ModelDeployment
+	getObject(t, c, client.ObjectKeyFromObject(deployment), &latest)
+	latest.Spec.Activation.DesiredState = v1alpha1.ActivationDesiredStateInactive
+	latest.Generation++
+	if err := c.Update(context.Background(), &latest); err != nil {
+		t.Fatalf("update desired state: %v", err)
+	}
+	return &latest
+}
+
+type staticDrainChecker bool
+
+func (c staticDrainChecker) DrainComplete(context.Context, string, string) (bool, error) {
+	return bool(c), nil
 }
 
 type recordingControllerMetrics struct {

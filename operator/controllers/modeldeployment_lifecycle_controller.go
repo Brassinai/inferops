@@ -38,6 +38,8 @@ import (
 const (
 	deploymentRequeueAfter = 10 * time.Second
 	waitingRequeueAfter    = 30 * time.Second
+	controllerDrainTimeout = 5 * time.Minute
+	controllerDrainPoll    = 2 * time.Second
 )
 
 var errPermanentLifecycle = errors.New("permanent lifecycle configuration error")
@@ -49,6 +51,7 @@ type ModelDeploymentControllerConfig struct {
 	DownloaderImage  string
 	GPUNodeSelector  map[string]string
 	GPUTypeLabel     string
+	DrainChecker     DrainChecker
 }
 
 // ModelDeploymentController reconciles ModelDeployment resources into stable
@@ -62,6 +65,7 @@ type ModelDeploymentController struct {
 	defaultCacheSize string
 	eventRecorder    record.EventRecorder
 	metrics          controllermetrics.Recorder
+	drainChecker     DrainChecker
 	// queueMetricDirty is safe without a mutex because SetupWithManager
 	// serializes this controller's reconciliations.
 	queueMetricDirty bool
@@ -122,6 +126,7 @@ func NewModelDeploymentController(
 		defaultCacheSize: config.DefaultCacheSize,
 		eventRecorder:    eventRecorder,
 		metrics:          metricsRecorder,
+		drainChecker:     config.DrainChecker,
 	}, nil
 }
 
@@ -270,15 +275,41 @@ func (r *ModelDeploymentController) reconcile(
 	r.projectReadyCache(deployment, cacheResult)
 
 	if effectiveDesiredState(deployment) == v1alpha1.ActivationDesiredStateInactive {
+		if shouldDrainBeforeDeleting(original.Status.Phase) {
+			if original.Status.Phase != v1alpha1.ModelDeploymentPhaseDraining {
+				if err := r.touchCacheLastUsed(ctx, cache); err != nil {
+					return ctrl.Result{}, err
+				}
+				r.projectDraining(deployment)
+				return r.patchDeploymentStatus(ctx, deployment, original, v1alpha1.ReasonDraining)
+			}
+			r.projectDraining(deployment)
+			complete, timedOut, remaining := r.drainCompleteOrTimedOut(ctx, deployment, original)
+			if !complete && !timedOut {
+				result, err := r.patchDeploymentStatus(ctx, deployment, original, "")
+				if err != nil || result.Requeue {
+					return result, err
+				}
+				if remaining <= 0 {
+					remaining = time.Second
+				}
+				return ctrl.Result{RequeueAfter: remaining}, nil
+			}
+			if timedOut {
+				setDeploymentCondition(deployment, v1alpha1.ConditionDrainComplete, metav1.ConditionFalse,
+					v1alpha1.ReasonDrainTimedOut, "Drain timeout elapsed before the gateway reported completion")
+				setDeploymentCondition(deployment, v1alpha1.ConditionRoutingReady, metav1.ConditionFalse,
+					v1alpha1.ReasonDrainTimedOut, "Drain timeout elapsed; runtime workload will be stopped")
+			} else {
+				setDeploymentCondition(deployment, v1alpha1.ConditionDrainComplete, metav1.ConditionTrue,
+					v1alpha1.ReasonDrainComplete, "Gateway reports no active requests for this backend")
+				setDeploymentCondition(deployment, v1alpha1.ConditionRoutingReady, metav1.ConditionFalse,
+					v1alpha1.ReasonDrainComplete, "Gateway reports no active requests for this backend")
+			}
+		}
 		deleted, err := r.deleteRuntimeWorkload(ctx, deployment)
 		if err != nil {
 			return ctrl.Result{}, err
-		}
-		if original.Status.Phase == v1alpha1.ModelDeploymentPhaseActive ||
-			original.Status.Phase == v1alpha1.ModelDeploymentPhaseActivating {
-			if err := r.touchCacheLastUsed(ctx, cache); err != nil {
-				return ctrl.Result{}, err
-			}
 		}
 		deployment.Status.Phase = v1alpha1.ModelDeploymentPhaseCached
 		deployment.Status.AssignedNode = ""
@@ -950,6 +981,7 @@ func (r *ModelDeploymentController) projectRuntimeDeployment(
 		runtimeDeployment.Status.AvailableReplicas >= desired {
 		deployment.Status.Phase = v1alpha1.ModelDeploymentPhaseActive
 		deployment.Status.Model.Loaded = true
+		status.RemoveCondition(&deployment.Status.Conditions, v1alpha1.ConditionDrainComplete)
 		setDeploymentCondition(deployment, v1alpha1.ConditionRuntimeReady, metav1.ConditionTrue,
 			v1alpha1.ReasonRuntimeReady, "Runtime has the desired ready replicas")
 		setDeploymentCondition(deployment, v1alpha1.ConditionModelLoaded, metav1.ConditionTrue,
@@ -976,6 +1008,7 @@ func (r *ModelDeploymentController) projectRuntimeDeployment(
 
 	deployment.Status.Phase = v1alpha1.ModelDeploymentPhaseActivating
 	deployment.Status.Model.Loaded = false
+	status.RemoveCondition(&deployment.Status.Conditions, v1alpha1.ConditionDrainComplete)
 	message := fmt.Sprintf("Runtime has %d/%d ready replicas", runtimeDeployment.Status.ReadyReplicas, desired)
 	setDeploymentCondition(deployment, v1alpha1.ConditionRuntimeReady, metav1.ConditionFalse,
 		v1alpha1.ReasonRuntimeCreating, message)
@@ -989,6 +1022,74 @@ func (r *ModelDeploymentController) projectRuntimeDeployment(
 		reason = v1alpha1.ReasonRuntimeCreating
 	}
 	return r.patchDeploymentStatus(ctx, deployment, original, reason)
+}
+
+func (r *ModelDeploymentController) projectDraining(deployment *v1alpha1.ModelDeployment) {
+	deployment.Status.Phase = v1alpha1.ModelDeploymentPhaseDraining
+	deployment.Status.Model.Loaded = false
+	setDeploymentCondition(deployment, v1alpha1.ConditionRuntimeReady, metav1.ConditionFalse,
+		v1alpha1.ReasonDraining, "Runtime is draining before shutdown")
+	setDeploymentCondition(deployment, v1alpha1.ConditionModelLoaded, metav1.ConditionFalse,
+		v1alpha1.ReasonDraining, "Model is draining and not accepting new requests")
+	setDeploymentCondition(deployment, v1alpha1.ConditionRoutingReady, metav1.ConditionFalse,
+		v1alpha1.ReasonDraining, "Gateway is rejecting new requests while active requests drain")
+	setDeploymentCondition(deployment, v1alpha1.ConditionDrainComplete, metav1.ConditionFalse,
+		v1alpha1.ReasonDraining, "Waiting for active gateway requests to finish")
+	setReadyFalse(&deployment.Status, v1alpha1.ReasonDraining, "Model is draining")
+}
+
+func (r *ModelDeploymentController) drainCompleteOrTimedOut(
+	ctx context.Context,
+	deployment, original *v1alpha1.ModelDeployment,
+) (complete bool, timedOut bool, remaining time.Duration) {
+	checkingGateway := r.drainChecker != nil
+	if r.drainChecker != nil {
+		drainComplete, err := r.drainChecker.DrainComplete(ctx, deployment.Namespace, deployment.Name)
+		if err == nil && drainComplete {
+			return true, false, 0
+		}
+	}
+
+	timeout := effectiveDrainTimeout(deployment.Spec.Activation.DrainTimeout)
+	startedAt := drainStartedAt(original.Status)
+	if startedAt.IsZero() {
+		return false, false, time.Second
+	}
+	deadline := startedAt.Add(timeout)
+	now := time.Now()
+	if !now.Before(deadline) {
+		return false, true, 0
+	}
+	remaining = deadline.Sub(now)
+	if checkingGateway && remaining > controllerDrainPoll {
+		remaining = controllerDrainPoll
+	}
+	return false, false, remaining
+}
+
+func shouldDrainBeforeDeleting(phase v1alpha1.ModelDeploymentPhase) bool {
+	return phase == v1alpha1.ModelDeploymentPhaseActive ||
+		phase == v1alpha1.ModelDeploymentPhaseActivating ||
+		phase == v1alpha1.ModelDeploymentPhaseDraining
+}
+
+func drainStartedAt(deploymentStatus v1alpha1.ModelDeploymentStatus) time.Time {
+	condition, found := status.FindCondition(deploymentStatus.Conditions, v1alpha1.ConditionDrainComplete)
+	if !found || condition.Reason != v1alpha1.ReasonDraining {
+		return time.Time{}
+	}
+	return condition.LastTransitionTime.Time
+}
+
+func effectiveDrainTimeout(value string) time.Duration {
+	if value == "" {
+		return controllerDrainTimeout
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		return controllerDrainTimeout
+	}
+	return parsed
 }
 
 func (r *ModelDeploymentController) projectReadyCache(

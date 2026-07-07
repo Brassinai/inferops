@@ -76,6 +76,9 @@ const (
 	// ConditionRoutingReady indicates whether the stable Service may receive
 	// traffic from the gateway.
 	ConditionRoutingReady = "RoutingReady"
+	// ConditionDrainComplete indicates whether a requested drain finished before
+	// the configured timeout.
+	ConditionDrainComplete = "DrainComplete"
 	// ConditionReady aggregates the overall readiness of the deployment.
 	ConditionReady = "Ready"
 )
@@ -107,6 +110,9 @@ const (
 	ReasonRuntimeUnavailable  = "RuntimeUnavailable"
 	ReasonRouteEnabled        = "RouteEnabled"
 	ReasonRouteDisabled       = "RouteDisabled"
+	ReasonDraining            = "Draining"
+	ReasonDrainComplete       = "DrainComplete"
+	ReasonDrainTimedOut       = "DrainTimedOut"
 )
 
 // ModelDeploymentPhase is the observed lifecycle phase of a model deployment.

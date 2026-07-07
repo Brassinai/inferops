@@ -154,6 +154,7 @@ func run(ctx context.Context) error {
 			DownloaderImage:  config.downloaderImage,
 			GPUNodeSelector:  config.gpuNodeSelector,
 			GPUTypeLabel:     config.gpuTypeLabel,
+			DrainChecker:     config.drainChecker,
 		},
 		eventRecorder,
 		metricsRecorder,
@@ -196,6 +197,7 @@ type operatorConfig struct {
 	cacheDownloadRequeue    time.Duration
 	gpuNodeSelector         map[string]string
 	gpuTypeLabel            string
+	drainChecker            controllers.DrainChecker
 	webhookEnabled          bool
 	webhookPort             int
 	webhookCertDir          string
@@ -230,6 +232,14 @@ func operatorConfigFromEnv() (operatorConfig, error) {
 	if err != nil {
 		return operatorConfig{}, err
 	}
+	var drainChecker controllers.DrainChecker
+	if drainStatusURL := strings.TrimSpace(os.Getenv("INFEROPS_GATEWAY_DRAIN_STATUS_URL")); drainStatusURL != "" {
+		checker, err := controllers.NewHTTPDrainChecker(drainStatusURL)
+		if err != nil {
+			return operatorConfig{}, fmt.Errorf("configure INFEROPS_GATEWAY_DRAIN_STATUS_URL: %w", err)
+		}
+		drainChecker = checker
+	}
 	return operatorConfig{
 		healthAddr:              envOrDefault("INFEROPS_HEALTH_ADDR", ":8081"),
 		metricsAddr:             envOrDefault("INFEROPS_METRICS_ADDR", ":8080"),
@@ -243,6 +253,7 @@ func operatorConfigFromEnv() (operatorConfig, error) {
 		cacheDownloadRequeue:    cacheDownloadRequeue,
 		gpuNodeSelector:         gpuNodeSelector,
 		gpuTypeLabel:            envOrDefault("INFEROPS_GPU_TYPE_LABEL", "inferops.dev/gpu-type"),
+		drainChecker:            drainChecker,
 		webhookEnabled:          webhookEnabled,
 		webhookPort:             webhookPort,
 		webhookCertDir:          envOrDefault("INFEROPS_WEBHOOK_CERT_DIR", "/tmp/k8s-webhook-server/serving-certs"),

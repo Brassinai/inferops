@@ -137,6 +137,68 @@ func TestProxyStreamsWithoutBuffering(t *testing.T) {
 	}
 }
 
+func TestProxyTracksActiveRequestsAndReportsDrainCompletion(t *testing.T) {
+	t.Parallel()
+	upstreamStarted := make(chan struct{})
+	releaseUpstream := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		close(upstreamStarted)
+		<-releaseUpstream
+		_, _ = io.WriteString(response, "data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+	defer close(releaseUpstream)
+
+	registry := routing.NewMemoryRegistry()
+	readyBackend := routing.Backend{
+		Namespace: "inferops",
+		Name:      "qwen",
+		State:     routing.StateReady,
+		Endpoint:  parseURL(t, upstream.URL),
+	}
+	if err := registry.Upsert(readyBackend); err != nil {
+		t.Fatalf("registry.Upsert ready: %v", err)
+	}
+	handler, err := New(registry)
+	if err != nil {
+		t.Fatalf("New(): %v", err)
+	}
+
+	firstResponseDone := make(chan struct{})
+	go func() {
+		defer close(firstResponseDone)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/models/qwen/v1/completions", nil))
+	}()
+	select {
+	case <-upstreamStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first upstream request did not start")
+	}
+	assertDrainStatus(t, handler, "qwen", 1, false)
+
+	drainingBackend := readyBackend
+	drainingBackend.State = routing.StateDraining
+	drainingBackend.Endpoint = nil
+	drainingBackend.Message = "model is draining"
+	if err := registry.Upsert(drainingBackend); err != nil {
+		t.Fatalf("registry.Upsert draining: %v", err)
+	}
+	rejected := httptest.NewRecorder()
+	handler.ServeHTTP(rejected, httptest.NewRequest(http.MethodPost, "/models/qwen/v1/completions", nil))
+	assertAPIError(t, rejected, http.StatusServiceUnavailable, "model_draining")
+	assertDrainStatus(t, handler, "qwen", 1, false)
+
+	releaseUpstream <- struct{}{}
+	select {
+	case <-firstResponseDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first request did not complete")
+	}
+	assertDrainStatus(t, handler, "qwen", 0, true)
+}
+
 func TestProxyPropagatesRequestCancellation(t *testing.T) {
 	t.Parallel()
 	upstreamStarted := make(chan struct{})
@@ -317,6 +379,34 @@ func newTestProxy(t *testing.T, backends ...routing.Backend) *Proxy {
 		t.Fatalf("New(): %v", err)
 	}
 	return handler
+}
+
+func assertDrainStatus(t *testing.T, handler *Proxy, model string, wantActive int, wantComplete bool) {
+	t.Helper()
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/drainz?namespace=inferops&model="+model, nil)
+	handler.ServeDrainStatus(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("drain status = %d, want 200; body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Backends []struct {
+			Model          string `json:"model"`
+			ActiveRequests int    `json:"activeRequests"`
+			DrainComplete  bool   `json:"drainComplete"`
+		} `json:"backends"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode drain status: %v", err)
+	}
+	if len(payload.Backends) != 1 {
+		t.Fatalf("drain backends = %#v, want one", payload.Backends)
+	}
+	got := payload.Backends[0]
+	if got.Model != model || got.ActiveRequests != wantActive || got.DrainComplete != wantComplete {
+		t.Fatalf("drain status = %+v, want model=%s active=%d complete=%t",
+			got, model, wantActive, wantComplete)
+	}
 }
 
 func parseURL(t *testing.T, value string) *url.URL {

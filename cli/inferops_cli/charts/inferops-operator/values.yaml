@@ -43,6 +43,12 @@ scheduling:
   gpuNodeSelector: {}
   gpuTypeLabel: inferops.dev/gpu-type
 
+gateway:
+  # Optional URL for the gateway /drainz endpoint. When set, the operator can
+  # finish deactivation as soon as gateway active requests reach zero instead
+  # of waiting for activation.drainTimeout.
+  drainStatusURL: ""
+
 webhook:
   enabled: true
   port: 9443

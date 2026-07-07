@@ -46,6 +46,11 @@ type ReplacingRegistry interface {
 	MarkReadyUnavailable(message string)
 }
 
+// SnapshotRegistry exposes the current backend snapshot for status endpoints.
+type SnapshotRegistry interface {
+	Backends() []Backend
+}
+
 // MemoryRegistry is a concurrency-safe fake registry. It is used by tests and
 // local gateway development, and is also the snapshot target for discovery.
 type MemoryRegistry struct {
@@ -138,6 +143,20 @@ func (r *MemoryRegistry) Delete(routePrefix string) {
 	defer r.mu.Unlock()
 	delete(r.routes, routePrefix)
 	r.rebuildPrefixes()
+}
+
+// Backends returns the current discovered backends sorted by route prefix.
+func (r *MemoryRegistry) Backends() []Backend {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	backends := make([]Backend, 0, len(r.prefixes))
+	for _, prefix := range r.prefixes {
+		backends = append(backends, cloneBackend(r.routes[prefix]))
+	}
+	return backends
 }
 
 // Replace atomically publishes a discovery snapshot. Ambiguous route prefixes

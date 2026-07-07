@@ -70,6 +70,10 @@ spec:
               value: {{ include "inferops-operator.gpuNodeSelector" . | quote }}
             - name: INFEROPS_GPU_TYPE_LABEL
               value: {{ .Values.scheduling.gpuTypeLabel | quote }}
+            {{- if .Values.gateway.drainStatusURL }}
+            - name: INFEROPS_GATEWAY_DRAIN_STATUS_URL
+              value: {{ .Values.gateway.drainStatusURL | quote }}
+            {{- end }}
             - name: INFEROPS_WEBHOOK_ENABLED
               value: {{ .Values.webhook.enabled | quote }}
             - name: INFEROPS_WEBHOOK_PORT
