@@ -60,6 +60,24 @@ webhook:
 metrics:
   port: 8080
 
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  annotations: {}
+  operator:
+    enabled: true
+  runtimes:
+    enabled: true
+    path: /metrics
+
+dashboards:
+  enabled: false
+  labels:
+    grafana_dashboard: "1"
+  annotations: {}
+
 modelRuntimes:
   nano-vllm:
     enabled: true

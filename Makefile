@@ -167,11 +167,28 @@ helm-template:
 		--set tailscale.enabled=true \
 		--set-string tailscale.hostname=inferops \
 		> .verify/helm/inferops-gateway-homelab.yaml
+	@$(HELM) template inferops-operator-observability deploy/helm/inferops-operator \
+		--set serviceMonitor.enabled=true \
+		--set dashboards.enabled=true \
+		> .verify/helm/inferops-operator-observability.yaml
+	@$(HELM) template inferops-gateway-observability deploy/helm/inferops-gateway \
+		--set serviceMonitor.enabled=true \
+		> .verify/helm/inferops-gateway-observability.yaml
+	@$(HELM) template inferops-runtime-observability deploy/helm/inferops-runtime \
+		--set metrics.serviceMonitor.enabled=true \
+		> .verify/helm/inferops-runtime-observability.yaml
 	@runtime_count=$$(grep -c '^kind: ModelRuntime$$' .verify/helm/inferops-operator.yaml); \
 	[ "$$runtime_count" -eq 4 ] || { \
 		echo "error: operator chart rendered $$runtime_count packaged runtimes, want 4"; \
 		exit 1; \
 	}
+	@! grep -q '^kind: ServiceMonitor$$' .verify/helm/inferops-operator.yaml
+	@! grep -q '^kind: ServiceMonitor$$' .verify/helm/inferops-gateway.yaml
+	@! grep -q '^kind: ServiceMonitor$$' .verify/helm/inferops-runtime-cpu.yaml
+	@grep -q '^kind: ServiceMonitor$$' .verify/helm/inferops-operator-observability.yaml
+	@grep -q '^kind: ServiceMonitor$$' .verify/helm/inferops-gateway-observability.yaml
+	@grep -q '^kind: ServiceMonitor$$' .verify/helm/inferops-runtime-observability.yaml
+	@grep -q 'inferops-vllm-dashboard.json' .verify/helm/inferops-operator-observability.yaml
 	@$(PYTHON) scripts/check_operator_rbac.py .verify/helm/inferops-operator.yaml
 	@grep -q 'pathType: Prefix' .verify/helm/inferops-gateway-homelab.yaml
 	@grep -q 'profile: "homelab"' .verify/helm/inferops-operator-homelab.yaml

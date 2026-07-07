@@ -18,6 +18,7 @@ func TestGatewayHandlerDoesNotCanonicalizeProxyPaths(t *testing.T) {
 			proxyPaths <- request.URL.Path
 		}),
 		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
 	)
 
 	handler.ServeHTTP(
@@ -49,6 +50,7 @@ func TestGatewayHandlerReservesExactHealthPaths(t *testing.T) {
 			proxyRequests++
 		}),
 		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
 	)
 
 	for _, requestPath := range []string{"/healthz", "/readyz"} {
@@ -79,6 +81,7 @@ func TestGatewayHandlerReservesExactDrainPath(t *testing.T) {
 		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 			drainRequests++
 		}),
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
 	)
 
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/drainz", nil))
@@ -86,5 +89,28 @@ func TestGatewayHandlerReservesExactDrainPath(t *testing.T) {
 
 	if drainRequests != 1 || proxyRequests != 1 {
 		t.Fatalf("drain requests = %d, proxy requests = %d; want 1 and 1", drainRequests, proxyRequests)
+	}
+}
+
+func TestGatewayHandlerReservesExactMetricsPath(t *testing.T) {
+	t.Parallel()
+	metricsRequests := 0
+	proxyRequests := 0
+	handler := gatewayHandler(
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			proxyRequests++
+		}),
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			metricsRequests++
+		}),
+	)
+
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/metrics/model", nil))
+
+	if metricsRequests != 1 || proxyRequests != 1 {
+		t.Fatalf("metrics requests = %d, proxy requests = %d; want 1 and 1", metricsRequests, proxyRequests)
 	}
 }

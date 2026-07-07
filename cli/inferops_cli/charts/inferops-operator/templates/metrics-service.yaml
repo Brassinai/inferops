@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "inferops-operator.fullname" . }}-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inferops-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator-metrics
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "inferops-operator.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+      protocol: TCP

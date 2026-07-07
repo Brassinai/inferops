@@ -69,8 +69,30 @@ Watch these:
 | Lifecycle failures | `inferops_controller_failures_total` |
 | Activation failures | `inferops_activation_failures_total` |
 | Cache failures | `inferops_cache_download_failures_total` |
-| Request latency / errors | Gateway metrics |
+| Gateway process metrics | Gateway `/metrics` |
+| Runtime TTFT | vLLM `vllm:time_to_first_token_seconds` |
+| Runtime tokens/sec | vLLM `vllm:generation_tokens_total` rate |
+| Pending runtime work | vLLM `vllm:num_requests_waiting`; pending-token panels approximate token debt from recent request sizes |
+| Runtime KV cache pressure | vLLM `vllm:kv_cache_usage_perc` |
+| GPU utilization | DCGM exporter or equivalent node GPU metrics |
+| Model load / switch time | `inferops_model_activation_duration_seconds` until a dedicated replacement workflow metric exists |
 | Runtime readiness | Engine `/health` |
+
+Enable Prometheus Operator integration with Helm values:
+
+```bash
+helm upgrade --install inferops-operator deploy/helm/inferops-operator \
+  --set serviceMonitor.enabled=true \
+  --set dashboards.enabled=true
+
+helm upgrade --install inferops-gateway deploy/helm/inferops-gateway \
+  --set serviceMonitor.enabled=true
+```
+
+The packaged dashboard is vLLM-first, but runtime scraping is label-based and
+works for any runtime Service that follows the InferOps runtime contract and
+serves Prometheus metrics at its `ModelRuntime.spec.metricsPath`.
+OpenTelemetry is intentionally not an MVP dependency.
 
 ## Upgrades
 
@@ -118,4 +140,4 @@ chart's `podDisruptionBudget` values after accepting the availability impact.
 - No hosted InferOps control plane; all components run in-cluster.
 - Replacement and rollback are not implemented until MVP-108; replacement
   policy values fail safely instead of evicting a model.
-- Advanced autoscaling and dashboard are not in month one.
+- Advanced autoscaling and OpenTelemetry export are not in month one.

@@ -17,6 +17,7 @@ import (
 	"github.com/brassinai/inferops/gateway/internal/routing"
 	"github.com/brassinai/inferops/internal/health"
 	v1alpha1 "github.com/brassinai/inferops/operator/api/v1alpha1"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -94,10 +95,15 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("create gateway proxy: %w", err)
 	}
 	healthHandler := health.HandlerWithReadiness(ready)
-	return health.RunWithHandler(ctx, address, gatewayHandler(healthHandler, gatewayProxy, http.HandlerFunc(gatewayProxy.ServeDrainStatus)))
+	return health.RunWithHandler(ctx, address, gatewayHandler(
+		healthHandler,
+		gatewayProxy,
+		http.HandlerFunc(gatewayProxy.ServeDrainStatus),
+		promhttp.Handler(),
+	))
 }
 
-func gatewayHandler(healthHandler, proxyHandler, drainHandler http.Handler) http.Handler {
+func gatewayHandler(healthHandler, proxyHandler, drainHandler, metricsHandler http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL != nil &&
 			request.URL.RawPath == "" &&
@@ -107,6 +113,10 @@ func gatewayHandler(healthHandler, proxyHandler, drainHandler http.Handler) http
 		}
 		if request.URL != nil && request.URL.RawPath == "" && request.URL.Path == "/drainz" {
 			drainHandler.ServeHTTP(response, request)
+			return
+		}
+		if request.URL != nil && request.URL.RawPath == "" && request.URL.Path == "/metrics" {
+			metricsHandler.ServeHTTP(response, request)
 			return
 		}
 		proxyHandler.ServeHTTP(response, request)

@@ -1,0 +1,161 @@
+{{- if .Values.dashboards.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "inferops-operator.fullname" . }}-vllm-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inferops-operator.labels" . | nindent 4 }}
+    {{- with .Values.dashboards.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.dashboards.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  inferops-vllm-dashboard.json: |-
+    {
+      "uid": "inferops-vllm",
+      "title": "InferOps / vLLM Runtime",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "tags": ["inferops", "vllm"],
+      "time": {
+        "from": "now-1h",
+        "to": "now"
+      },
+      "templating": {
+        "list": [
+          {
+            "name": "model",
+            "type": "query",
+            "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+            "query": "label_values(vllm:num_requests_running, model_name)",
+            "includeAll": true,
+            "multi": true,
+            "refresh": 1
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "timeseries",
+          "title": "TTFT p95",
+          "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "histogram_quantile(0.95, sum by (le, model_name) (rate(vllm:time_to_first_token_seconds_bucket{model_name=~\"$model\"}[$__rate_interval])))",
+              "legendFormat": "{{`{{model_name}}`}}"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "s"}}
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "Generation tokens/sec",
+          "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (model_name) (rate(vllm:generation_tokens_total{model_name=~\"$model\"}[$__rate_interval]))",
+              "legendFormat": "{{`{{model_name}}`}}"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "tok/s"}}
+        },
+        {
+          "id": 3,
+          "type": "timeseries",
+          "title": "Pending requests",
+          "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (model_name) (vllm:num_requests_waiting{model_name=~\"$model\"})",
+              "legendFormat": "{{`{{model_name}}`}}"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "short"}}
+        },
+        {
+          "id": 4,
+          "type": "timeseries",
+          "title": "Pending requested tokens approximation",
+          "description": "vLLM exposes waiting requests, not exact queued token debt. This multiplies waiting requests by recent p50 max requested generation tokens.",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (model_name) (vllm:num_requests_waiting{model_name=~\"$model\"}) * on(model_name) group_left histogram_quantile(0.50, sum by (le, model_name) (rate(vllm:request_max_num_generation_tokens_bucket{model_name=~\"$model\"}[$__rate_interval])))",
+              "legendFormat": "{{`{{model_name}}`}}"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "tokens"}}
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "KV cache usage",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "avg by (model_name) (vllm:kv_cache_usage_perc{model_name=~\"$model\"}) * 100",
+              "legendFormat": "{{`{{model_name}}`}}"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "percent"}}
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "GPU utilization",
+          "description": "Requires NVIDIA DCGM exporter or equivalent node GPU metrics.",
+          "gridPos": {"h": 8, "w": 8, "x": 0, "y": 16},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "avg by (pod) (DCGM_FI_DEV_GPU_UTIL)",
+              "legendFormat": "{{`{{pod}}`}}"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "percent"}}
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "Model load time p95",
+          "description": "InferOps activation duration from runtime Deployment creation until readiness.",
+          "gridPos": {"h": 8, "w": 8, "x": 8, "y": 16},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(inferops_model_activation_duration_seconds_bucket[$__rate_interval])))",
+              "legendFormat": "p95"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "s"}}
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "Switch time p95",
+          "description": "For MVP this uses the same InferOps activation-duration signal; a dedicated replacement/switch metric can be added with the replacement workflow.",
+          "gridPos": {"h": 8, "w": 8, "x": 16, "y": 16},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(inferops_model_activation_duration_seconds_bucket[$__rate_interval])))",
+              "legendFormat": "p95"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "s"}}
+        }
+      ]
+    }
+{{- end }}

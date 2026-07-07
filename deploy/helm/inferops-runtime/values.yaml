@@ -24,6 +24,12 @@ cache:
 
 metrics:
   prometheusAnnotations: false
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+    annotations: {}
 
 resources:
   requests:
