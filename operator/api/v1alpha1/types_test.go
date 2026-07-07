@@ -3,6 +3,7 @@ package v1alpha1
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -69,6 +70,22 @@ func TestModelDeploymentDeepCopy(t *testing.T) {
 		Status: ModelDeploymentStatus{
 			Phase:        ModelDeploymentPhaseActive,
 			AssignedGPUs: []string{"gpu-0"},
+			DrainStartedAt: func() *metav1.Time {
+				value := metav1.Now()
+				return &value
+			}(),
+			Replacement: &ReplacementStatus{
+				Phase:  ReplacementPhaseDraining,
+				Target: &ReplacementReference{Name: "victim", UID: "victim-uid"},
+				RequestedBy: &ReplacementReference{
+					Name: "requester",
+					UID:  "requester-uid",
+				},
+				StartedAt: func() *metav1.Time {
+					value := metav1.Now()
+					return &value
+				}(),
+			},
 			Conditions: []Condition{
 				{Type: "Ready", Status: metav1.ConditionTrue, Reason: "RuntimeReady", LastTransitionTime: metav1.Now()},
 			},
@@ -89,6 +106,10 @@ func TestModelDeploymentDeepCopy(t *testing.T) {
 	*copied.Spec.Availability.PodDisruptionBudget.Enabled = false
 	*copied.Spec.Availability.PodDisruptionBudget.MinAvailable = 0
 	copied.Status.AssignedGPUs[0] = "modified"
+	copied.Status.DrainStartedAt.Time = copied.Status.DrainStartedAt.Add(time.Hour)
+	copied.Status.Replacement.Target.Name = "modified"
+	copied.Status.Replacement.RequestedBy.Name = "modified"
+	copied.Status.Replacement.StartedAt.Time = copied.Status.Replacement.StartedAt.Add(time.Hour)
 	copied.Status.Conditions[0].Reason = "modified"
 	copied.Status.Conditions[0].LastTransitionTime = metav1.Now()
 
@@ -106,6 +127,14 @@ func TestModelDeploymentDeepCopy(t *testing.T) {
 	}
 	if original.Status.AssignedGPUs[0] != "gpu-0" {
 		t.Errorf("original assignedGPUs was mutated: got %q", original.Status.AssignedGPUs[0])
+	}
+	if original.Status.Replacement.Target.Name != "victim" ||
+		original.Status.Replacement.RequestedBy.Name != "requester" {
+		t.Error("original replacement references were mutated")
+	}
+	if original.Status.DrainStartedAt.Equal(copied.Status.DrainStartedAt) ||
+		original.Status.Replacement.StartedAt.Equal(copied.Status.Replacement.StartedAt) {
+		t.Error("replacement lifecycle timestamps were not deeply copied")
 	}
 	if original.Status.Conditions[0].Reason != "RuntimeReady" {
 		t.Errorf("original conditions were mutated: got %q", original.Status.Conditions[0].Reason)

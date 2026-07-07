@@ -1,0 +1,89 @@
+{{- if .Values.tenancy.access.enabled }}
+{{- if not .Values.tenancy.access.subjects }}
+{{- fail "tenancy.access.subjects must contain at least one subject when team access is enabled" }}
+{{- end }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Values.tenancy.access.roleName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inferops-gateway.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [inference.inferops.dev]
+    resources: [modeldeployments]
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: [inference.inferops.dev]
+    resources: [modeldeployments/status]
+    verbs: [get]
+  - apiGroups: [inference.inferops.dev]
+    resources: [modelcaches]
+    verbs:
+      - get
+      - list
+      - watch
+      {{- if .Values.tenancy.access.allowCacheDelete }}
+      - delete
+      {{- end }}
+  - apiGroups: [inference.inferops.dev]
+    resources: [modelruntimes]
+    verbs:
+      - get
+      - list
+      - watch
+      {{- if .Values.tenancy.access.allowModelRuntimeWrite }}
+      - create
+      - delete
+      - patch
+      - update
+      {{- end }}
+  - apiGroups: [""]
+    resources: [pods, services]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Values.tenancy.access.roleName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inferops-gateway.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Values.tenancy.access.roleName }}
+subjects:
+  {{- toYaml .Values.tenancy.access.subjects | nindent 2 }}
+{{- end }}
+{{- if .Values.tenancy.quota.enabled }}
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ include "inferops-gateway.fullname" . }}-tenant
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inferops-gateway.labels" . | nindent 4 }}
+spec:
+  hard:
+    {{- toYaml .Values.tenancy.quota.hard | nindent 4 }}
+{{- end }}
+{{- if .Values.tenancy.limitRange.enabled }}
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: {{ include "inferops-gateway.fullname" . }}-tenant
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inferops-gateway.labels" . | nindent 4 }}
+spec:
+  limits:
+    {{- toYaml .Values.tenancy.limitRange.limits | nindent 4 }}
+{{- end }}

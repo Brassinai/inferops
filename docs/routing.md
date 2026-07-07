@@ -13,9 +13,25 @@ new requests as soon as discovery observes `Draining`. Inactive, waiting,
 activating, draining, and failed models remain addressable at their stable route
 but receive an explicit lifecycle response.
 
+At drain start the operator also removes the stable runtime Service selector.
+This retains the Service and ClusterIP while EndpointSlice reconciliation
+withdraws the runtime endpoints, providing a second fail-closed barrier if a
+gateway instance is briefly serving an older discovery snapshot. The selector
+is restored before reactivation.
+
+Keep `spec.activation.drainTimeout` longer than the configured gateway
+`discovery.syncInterval`. The defaults are five minutes and five seconds,
+respectively, leaving ample time for every healthy gateway replica to observe
+`Draining` before the in-flight grace period ends.
+
 Custom `spec.routing.path` values are allowed, but every lane must support the
 default `/models/<deployment-name>` convention. Streaming responses must not be
 buffered.
+
+North-south exposure does not alter these paths. The gateway chart supports
+standard Ingress, Gateway API HTTPRoute, LoadBalancer Service, and Tailscale
+front doors while preserving `/models/<name>/v1/...`; see
+[Cluster and ingress support](cluster-ingress.md).
 
 The namespace-scoped registry is refreshed from `ModelDeployment`, Service, and
 EndpointSlice objects every five seconds by default. `discovery.syncInterval`
@@ -41,7 +57,47 @@ streaming responses, query parameters, and client cancellation are passed
 through to the selected runtime. Only paths below the selected model's `/v1`
 prefix are proxied. Custom route prefixes must be canonical paths: traversal,
 duplicate separators, URL escapes, backslashes, query or fragment delimiters,
-and the reserved `/healthz` and `/readyz` trees are rejected during admission.
+and the reserved `/healthz`, `/readyz`, and `/metrics` trees are rejected
+during admission.
+
+## Authentication
+
+Gateway bearer authentication is optional and fails closed when enabled. Create
+a Secret whose selected key contains one token per line, then configure the
+chart:
+
+```bash
+kubectl create secret generic inferops-gateway-token \
+  --from-literal=token='<random bearer token>' \
+  --namespace inferops-system
+
+helm upgrade --install inferops-gateway ./deploy/helm/inferops-gateway \
+  --namespace inferops-system \
+  --set auth.enabled=true \
+  --set auth.secretName=inferops-gateway-token
+```
+
+Clients send `Authorization: Bearer <token>`. Missing or invalid credentials
+receive an OpenAI-shaped `401` response. The Secret is mounted read-only and
+reloaded on a bounded one-second interval, so projected Secret updates are
+accepted without a gateway restart or per-request filesystem I/O. An unreadable
+or empty token file returns `503`, fails gateway readiness, and does not forward
+traffic. Gateway credentials are removed before a request reaches the runtime.
+
+The gateway does not log authorization headers or request bodies.
+
+## Metrics
+
+`GET /metrics` exposes:
+
+- `inferops_gateway_requests_total`
+- `inferops_gateway_request_duration_seconds`
+- `inferops_gateway_active_requests`
+- `inferops_gateway_upstream_errors_total`
+
+Labels are limited to normalized HTTP methods, status codes, and stable error
+reasons. Model names, repositories, route paths, credentials, and object UIDs
+are intentionally excluded.
 
 ## Gateway configuration
 
@@ -52,9 +108,12 @@ The Helm chart supplies these settings to the gateway:
 | `INFEROPS_GATEWAY_ADDRESS` | `:8080` | HTTP listen address |
 | `INFEROPS_GATEWAY_REGISTRY` | `kubernetes` | Registry mode; `fake` starts with an empty in-memory registry for package-level development |
 | `INFEROPS_GATEWAY_SYNC_INTERVAL` | `5s` | Kubernetes query and successful refresh interval |
+| `INFEROPS_GATEWAY_AUTH_TOKEN_FILE` | empty | Enables auth using the mounted newline-delimited token file |
 | `POD_NAMESPACE` | none | Required namespace for Kubernetes discovery; the chart injects it from pod metadata |
 
 The gateway ServiceAccount has namespace-scoped `list` access only to
-`ModelDeployment`, Service, and EndpointSlice objects. Set
+`ModelDeployment`, Service, and EndpointSlice objects. Kubernetes mounts the
+referenced authentication Secret, so the gateway process does not need Secret
+API permissions. Set
 `serviceAccount.create` and `rbac.create` to `false` only when supplying
 equivalent identities and permissions externally.

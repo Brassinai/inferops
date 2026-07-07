@@ -47,6 +47,16 @@ spec:
               value: kubernetes
             - name: INFEROPS_GATEWAY_SYNC_INTERVAL
               value: {{ .Values.discovery.syncInterval | quote }}
+            {{- if .Values.auth.enabled }}
+            - name: INFEROPS_GATEWAY_AUTH_TOKEN_FILE
+              value: {{ printf "%s/%s" .Values.auth.mountPath .Values.auth.secretKey | quote }}
+            {{- end }}
+          {{- if .Values.auth.enabled }}
+          volumeMounts:
+            - name: gateway-auth
+              mountPath: {{ .Values.auth.mountPath | quote }}
+              readOnly: true
+          {{- end }}
           livenessProbe:
             httpGet:
               path: {{ .Values.probes.livenessPath }}
@@ -67,12 +77,47 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+      {{- if .Values.auth.enabled }}
+      volumes:
+        - name: gateway-auth
+          secret:
+            secretName: {{ required "auth.secretName is required when auth.enabled is true" .Values.auth.secretName | quote }}
+            defaultMode: 0444
+            items:
+              - key: {{ required "auth.secretKey is required when auth.enabled is true" .Values.auth.secretKey | quote }}
+                path: {{ .Values.auth.secretKey | quote }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.affinity }}
       affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if and .Values.topologySpread.enabled .Values.topologySpreadConstraints }}
+      {{- fail "topologySpread.enabled and topologySpreadConstraints cannot both be configured" }}
+      {{- end }}
+      {{- if .Values.topologySpread.enabled }}
+      {{- if lt (int .Values.topologySpread.maxSkew) 1 }}
+      {{- fail "topologySpread.maxSkew must be greater than zero" }}
+      {{- end }}
+      {{- if not .Values.topologySpread.topologyKey }}
+      {{- fail "topologySpread.topologyKey is required when topology spread is enabled" }}
+      {{- end }}
+      {{- if not (has .Values.topologySpread.whenUnsatisfiable (list "DoNotSchedule" "ScheduleAnyway")) }}
+      {{- fail "topologySpread.whenUnsatisfiable must be DoNotSchedule or ScheduleAnyway" }}
+      {{- end }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.topologySpread.maxSkew }}
+          topologyKey: {{ .Values.topologySpread.topologyKey | quote }}
+          whenUnsatisfiable: {{ .Values.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "inferops-gateway.selectorLabels" . | nindent 14 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.tolerations }}

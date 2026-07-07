@@ -9,7 +9,32 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 spec:
+  {{- if not (has .Values.service.type (list "ClusterIP" "NodePort" "LoadBalancer")) }}
+  {{- fail "service.type must be ClusterIP, NodePort, or LoadBalancer" }}
+  {{- end }}
+  {{- if or (lt (int .Values.service.port) 1) (gt (int .Values.service.port) 65535) }}
+  {{- fail "service.port must be between 1 and 65535" }}
+  {{- end }}
   type: {{ .Values.service.type }}
+  {{- if .Values.service.loadBalancerClass }}
+  {{- if ne .Values.service.type "LoadBalancer" }}
+  {{- fail "service.loadBalancerClass requires service.type=LoadBalancer" }}
+  {{- end }}
+  loadBalancerClass: {{ .Values.service.loadBalancerClass | quote }}
+  {{- end }}
+  {{- with .Values.service.loadBalancerSourceRanges }}
+  {{- if ne $.Values.service.type "LoadBalancer" }}
+  {{- fail "service.loadBalancerSourceRanges requires service.type=LoadBalancer" }}
+  {{- end }}
+  loadBalancerSourceRanges:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- if eq .Values.service.type "LoadBalancer" }}
+  {{- if not (has .Values.service.externalTrafficPolicy (list "Cluster" "Local")) }}
+  {{- fail "service.externalTrafficPolicy must be Cluster or Local" }}
+  {{- end }}
+  externalTrafficPolicy: {{ .Values.service.externalTrafficPolicy }}
+  {{- end }}
   selector:
     {{- include "inferops-gateway.selectorLabels" . | nindent 4 }}
   ports:

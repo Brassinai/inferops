@@ -170,15 +170,52 @@ class FakeKubernetesClient:
             "reason": conditions[0]["reason"],
             "message": conditions[0]["message"],
         }
+        transitions = [transition]
+        if outcome == "active" and deployment["whenFull"] in {
+            "ReplaceOldest",
+            "ReplaceLowestPriority",
+        }:
+            deployment["replacement"] = {
+                "phase": "Completed",
+                "requestGeneration": deployment["generation"],
+                "target": {
+                    "namespace": deployment["namespace"],
+                    "name": "previous-model",
+                    "uid": "previous-model-uid",
+                },
+                "message": "replacement completed and runtime is ready",
+            }
+            transitions = [
+                {
+                    "phase": "WaitingForGPU",
+                    "observedGeneration": deployment["observedGeneration"],
+                    "reason": "ReplacementSelected",
+                    "message": "selected previous-model for replacement",
+                },
+                {
+                    "phase": "WaitingForGPU",
+                    "observedGeneration": deployment["observedGeneration"],
+                    "reason": "ReplacementDraining",
+                    "message": "waiting for previous-model to drain",
+                },
+                {
+                    "phase": "Activating",
+                    "observedGeneration": deployment["observedGeneration"],
+                    "reason": "RuntimeStarting",
+                    "message": "replacement capacity released; runtime is starting",
+                },
+                transition,
+            ]
         if request.on_transition is not None:
-            request.on_transition(transition)
+            for observed in transitions:
+                request.on_transition(observed)
         return {
             "mode": "fake",
             "cluster": request.cluster.to_safe_dict(),
             "deployment": deployment.copy(),
             "operation": "activate",
             "outcome": outcome,
-            "transitions": [transition],
+            "transitions": transitions,
         }
 
     def deactivate(self, request: DeactivationRequest) -> dict[str, Any]:
@@ -355,16 +392,30 @@ class FakeKubernetesClient:
         }
 
     def install(self, request: InstallRequest) -> dict[str, Any]:
+        exposure = request.exposure or (
+            "tailscale" if request.tailscale_hostname else "cluster-ip"
+        )
+        resources = [
+            f"namespace/{request.cluster.namespace}",
+            "crd/modeldeployments.inference.inferops.dev",
+            "deployment/inferops-operator",
+        ]
+        if exposure == "load-balancer":
+            resources.append("service/inferops-gateway")
+        elif exposure == "ingress":
+            resources.append("ingress/inferops-gateway")
+        elif exposure == "gateway-api":
+            resources.append("httproute/inferops-gateway")
+        elif exposure == "tailscale":
+            resources.append("ingress/inferops-gateway-tailscale")
         install = {
             "profile": request.profile,
             "namespace": request.cluster.namespace,
             "cachePath": request.cache_path,
             "tailscaleHostname": request.tailscale_hostname,
-            "resources": [
-                f"namespace/{request.cluster.namespace}",
-                "crd/modeldeployments.inference.inferops.dev",
-                "deployment/inferops-operator",
-            ],
+            "exposure": exposure,
+            "authEnabled": bool(request.gateway_auth_secret),
+            "resources": resources,
         }
         self._installs.append(install)
         return {

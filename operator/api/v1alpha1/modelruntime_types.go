@@ -40,6 +40,10 @@ type ModelRuntimeSpec struct {
 	Env           map[string]string `json:"env,omitempty"`
 }
 
+// ModelRuntimeProtocolOpenAI is the runtime protocol currently supported by
+// the InferOps gateway.
+const ModelRuntimeProtocolOpenAI = "openai"
+
 // ModelRuntimeStatus reports runtime availability.
 type ModelRuntimeStatus struct {
 	ObservedGeneration int64             `json:"observedGeneration,omitempty"`

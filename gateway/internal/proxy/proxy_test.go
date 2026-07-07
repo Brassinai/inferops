@@ -197,6 +197,44 @@ func TestProxyReturnsOpenAIErrorForUpstreamFailure(t *testing.T) {
 	assertAPIError(t, response, http.StatusBadGateway, "upstream_error")
 }
 
+func TestProxyRecordsBoundedUpstreamFailureReasons(t *testing.T) {
+	t.Parallel()
+	recorder := &recordingMetrics{counts: make(map[string]int)}
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	endpoint := parseURL(t, upstream.URL)
+	registry := routing.NewMemoryRegistry()
+	if err := registry.Upsert(routing.Backend{
+		Name:     "qwen",
+		State:    routing.StateReady,
+		Endpoint: endpoint,
+	}); err != nil {
+		t.Fatalf("registry.Upsert(): %v", err)
+	}
+	handler, err := NewWithMetrics(registry, recorder)
+	if err != nil {
+		t.Fatalf("NewWithMetrics(): %v", err)
+	}
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/models/qwen/v1/completions", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("upstream response status = %d, want %d", response.Code, http.StatusServiceUnavailable)
+	}
+	upstream.Close()
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/models/qwen/v1/completions", nil))
+	assertAPIError(t, response, http.StatusBadGateway, "upstream_error")
+
+	if got := recorder.counts["response_5xx"]; got != 1 {
+		t.Errorf("response_5xx count = %d, want 1", got)
+	}
+	if got := recorder.counts["transport"]; got != 1 {
+		t.Errorf("transport count = %d, want 1", got)
+	}
+}
+
 func TestProxyRejectsLifecycleStatesWithoutReachingUpstream(t *testing.T) {
 	t.Parallel()
 	var requests atomic.Int32
@@ -349,4 +387,12 @@ func assertAPIError(t *testing.T, response *httptest.ResponseRecorder, status in
 	if envelope.Error.Message == "" || envelope.Error.Type == "" {
 		t.Errorf("incomplete error response: %+v", envelope.Error)
 	}
+}
+
+type recordingMetrics struct {
+	counts map[string]int
+}
+
+func (r *recordingMetrics) ObserveUpstreamError(reason string) {
+	r.counts[reason]++
 }

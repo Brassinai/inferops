@@ -23,10 +23,21 @@ type Proxy struct {
 	registry  routing.Registry
 	transport http.RoundTripper
 	errorLog  *log.Logger
+	metrics   metricsRecorder
+}
+
+type metricsRecorder interface {
+	ObserveUpstreamError(reason string)
 }
 
 // New creates a gateway proxy backed by registry.
 func New(registry routing.Registry) (*Proxy, error) {
+	return NewWithMetrics(registry, nil)
+}
+
+// NewWithMetrics creates a gateway proxy and records upstream failures when a
+// recorder is supplied.
+func NewWithMetrics(registry routing.Registry, recorder metricsRecorder) (*Proxy, error) {
 	if registry == nil {
 		return nil, errors.New("model registry is required")
 	}
@@ -34,6 +45,7 @@ func New(registry routing.Registry) (*Proxy, error) {
 		registry:  registry,
 		transport: http.DefaultTransport,
 		errorLog:  log.New(os.Stderr, "gateway proxy: ", log.LstdFlags),
+		metrics:   recorder,
 	}, nil
 }
 
@@ -103,11 +115,17 @@ func (p *Proxy) forward(
 		ErrorLog:      p.errorLog,
 		ModifyResponse: func(upstreamResponse *http.Response) error {
 			upstreamResponse.Header.Set("X-Accel-Buffering", "no")
+			if upstreamResponse.StatusCode >= http.StatusInternalServerError && p.metrics != nil {
+				p.metrics.ObserveUpstreamError("response_5xx")
+			}
 			return nil
 		},
 		ErrorHandler: func(writer http.ResponseWriter, upstreamRequest *http.Request, err error) {
 			if upstreamRequest.Context().Err() != nil {
 				return
+			}
+			if p.metrics != nil {
+				p.metrics.ObserveUpstreamError("transport")
 			}
 			p.errorLog.Printf("model=%q upstream request failed: %v", backend.Name, err)
 			writeError(writer, http.StatusBadGateway, "upstream_error", "api_error", "model runtime request failed")
