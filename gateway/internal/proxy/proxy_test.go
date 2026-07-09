@@ -2,9 +2,11 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -197,6 +199,130 @@ func TestProxyTracksActiveRequestsAndReportsDrainCompletion(t *testing.T) {
 		t.Fatal("first request did not complete")
 	}
 	assertDrainStatus(t, handler, "qwen", 0, true)
+}
+
+func TestProxyRoutesToLeastLoadedReadyBackend(t *testing.T) {
+	t.Parallel()
+	stableStarted := make(chan struct{})
+	releaseStable := make(chan struct{})
+	stable := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		close(stableStarted)
+		<-releaseStable
+		_, _ = response.Write([]byte("stable"))
+	}))
+	defer stable.Close()
+	defer close(releaseStable)
+	canary := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		_, _ = response.Write([]byte("canary"))
+	}))
+	defer canary.Close()
+
+	registry := routing.NewMemoryRegistry()
+	if err := registry.Replace([]routing.Backend{
+		{Name: "a-stable", RoutePrefix: "/models/qwen", State: routing.StateReady, Endpoint: parseURL(t, stable.URL)},
+		{Name: "b-canary", RoutePrefix: "/models/qwen", State: routing.StateReady, Endpoint: parseURL(t, canary.URL)},
+	}); err != nil {
+		t.Fatalf("registry.Replace(): %v", err)
+	}
+	handler, err := New(registry)
+	if err != nil {
+		t.Fatalf("New(): %v", err)
+	}
+
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/models/qwen/v1/chat/completions", nil))
+	}()
+	select {
+	case <-stableStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stable request did not start")
+	}
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/models/qwen/v1/chat/completions", nil))
+	if response.Code != http.StatusOK || response.Body.String() != "canary" {
+		t.Fatalf("second response = %d %q, want canary", response.Code, response.Body.String())
+	}
+
+	releaseStable <- struct{}{}
+	select {
+	case <-firstDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stable request did not complete")
+	}
+}
+
+func TestProxyAppliesBackendRateLimit(t *testing.T) {
+	t.Parallel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		_, _ = response.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+	rpm := 1
+	handler := newTestProxy(t, routing.Backend{
+		Name:     "qwen",
+		State:    routing.StateReady,
+		Endpoint: parseURL(t, upstream.URL),
+		Policy: routing.TrafficPolicy{
+			RateLimit: &routing.RateLimitPolicy{RequestsPerMinute: rpm, Burst: 1},
+		},
+	})
+
+	allowed := httptest.NewRecorder()
+	handler.ServeHTTP(allowed, httptest.NewRequest(http.MethodPost, "/models/qwen/v1/completions", nil))
+	if allowed.Code != http.StatusOK {
+		t.Fatalf("first status = %d, want 200", allowed.Code)
+	}
+	limited := httptest.NewRecorder()
+	handler.ServeHTTP(limited, httptest.NewRequest(http.MethodPost, "/models/qwen/v1/completions", nil))
+	assertAPIError(t, limited, http.StatusTooManyRequests, "rate_limit_exceeded")
+	if limited.Header().Get("Retry-After") == "" {
+		t.Fatal("rate-limited response omitted Retry-After")
+	}
+}
+
+func TestProxyWritesSanitizedRequestLogWhenEnabled(t *testing.T) {
+	t.Parallel()
+	var logs bytes.Buffer
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		_, _ = response.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+	enabled := true
+	registry := routing.NewMemoryRegistry()
+	if err := registry.Upsert(routing.Backend{
+		Namespace: "inferops",
+		Name:      "qwen",
+		State:     routing.StateReady,
+		Endpoint:  parseURL(t, upstream.URL),
+		Policy: routing.TrafficPolicy{
+			RequestLogging: &routing.RequestLoggingPolicy{Enabled: &enabled},
+		},
+	}); err != nil {
+		t.Fatalf("registry.Upsert(): %v", err)
+	}
+	handler, err := NewWithMetricsAndOptions(registry, nil, Options{
+		RequestLogger: log.New(&logs, "", 0),
+	})
+	if err != nil {
+		t.Fatalf("NewWithMetricsAndOptions(): %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/models/qwen/v1/completions", strings.NewReader(`{"secret":"body"}`))
+	request.Header.Set("Authorization", "Bearer sensitive")
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+
+	line := logs.String()
+	for _, want := range []string{`model="qwen"`, `namespace="inferops"`, `status=200`, `path="/models/qwen/v1/completions"`} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("request log %q does not contain %s", line, want)
+		}
+	}
+	if strings.Contains(line, "sensitive") || strings.Contains(line, "secret") {
+		t.Fatalf("request log included sensitive request data: %q", line)
+	}
 }
 
 func TestProxyPropagatesRequestCancellation(t *testing.T) {

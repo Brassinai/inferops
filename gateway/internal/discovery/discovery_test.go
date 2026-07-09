@@ -54,6 +54,47 @@ func TestSyncPublishesOnlyReadyActiveOwnedService(t *testing.T) {
 	}
 }
 
+func TestSyncPublishesRoutingPolicy(t *testing.T) {
+	t.Parallel()
+	deployment := readyDeployment()
+	weight := int32(25)
+	loggingEnabled := true
+	deployment.Spec.Routing.Policy = v1alpha1.RoutingPolicySpec{
+		RoutingStrategy: v1alpha1.RoutingStrategyWeighted,
+		Weight:          &weight,
+		RateLimit: &v1alpha1.RateLimitSpec{
+			RequestsPerMinute: 60,
+			Burst:             10,
+		},
+		RequestLogging: v1alpha1.RequestLoggingPolicy{Enabled: &loggingEnabled},
+	}
+	kubernetesClient := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(deployment, runtimeService(), runtimeEndpointSlice()).
+		Build()
+	registry := routing.NewMemoryRegistry()
+	modelDiscovery := newTestDiscovery(t, kubernetesClient, registry)
+
+	if err := modelDiscovery.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	backend, _, found := registry.Lookup("/models/qwen-chat/v1/chat/completions")
+	if !found {
+		t.Fatal("active model route was not published")
+	}
+	if backend.Policy.RoutingStrategy != routing.RoutingStrategyWeighted ||
+		backend.Policy.Weight == nil ||
+		*backend.Policy.Weight != 25 ||
+		backend.Policy.RateLimit == nil ||
+		backend.Policy.RateLimit.RequestsPerMinute != 60 ||
+		backend.Policy.RateLimit.Burst != 10 ||
+		backend.Policy.RequestLogging == nil ||
+		backend.Policy.RequestLogging.Enabled == nil ||
+		!*backend.Policy.RequestLogging.Enabled {
+		t.Fatalf("backend policy = %#v, want routing policy from ModelDeployment", backend.Policy)
+	}
+}
+
 func TestSyncReactsToDrainBeforeAcceptingAnotherRequest(t *testing.T) {
 	t.Parallel()
 	scheme := testScheme(t)

@@ -57,6 +57,32 @@ func TestReadinessIncludesAuthenticationSource(t *testing.T) {
 	}
 }
 
+func TestProxyOptionsFromEnvironment(t *testing.T) {
+	t.Setenv("INFEROPS_GATEWAY_RATE_LIMIT_RPM", "120")
+	t.Setenv("INFEROPS_GATEWAY_RATE_LIMIT_BURST", "20")
+	t.Setenv("INFEROPS_GATEWAY_REQUEST_LOGGING", "true")
+
+	options, err := proxyOptionsFromEnvironment()
+	if err != nil {
+		t.Fatalf("proxyOptionsFromEnvironment() error = %v", err)
+	}
+	if options.DefaultRateLimit == nil ||
+		options.DefaultRateLimit.RequestsPerMinute != 120 ||
+		options.DefaultRateLimit.Burst != 20 {
+		t.Fatalf("DefaultRateLimit = %#v, want 120 rpm burst 20", options.DefaultRateLimit)
+	}
+	if options.RequestLoggingEnabled == nil || !*options.RequestLoggingEnabled {
+		t.Fatalf("RequestLoggingEnabled = %#v, want true", options.RequestLoggingEnabled)
+	}
+}
+
+func TestProxyOptionsRejectBurstWithoutRate(t *testing.T) {
+	t.Setenv("INFEROPS_GATEWAY_RATE_LIMIT_BURST", "20")
+	if _, err := proxyOptionsFromEnvironment(); err == nil {
+		t.Fatal("proxyOptionsFromEnvironment() error = nil, want burst without rpm error")
+	}
+}
+
 type readinessTokenSource struct {
 	tokens []string
 	err    error

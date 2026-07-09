@@ -28,6 +28,32 @@ Custom `spec.routing.path` values are allowed, but every lane must support the
 default `/models/<deployment-name>` convention. Streaming responses must not be
 buffered.
 
+Multiple active `ModelDeployment` objects may intentionally share one
+`spec.routing.path` for canary traffic. Ready candidates are selected with the
+route policy in `spec.routing.policy.routingStrategy`:
+
+- `LeastLoaded` is the default. Each gateway process sends the next request to
+  the ready candidate with the fewest in-flight requests observed by that
+  process. If several candidates have the same load, their
+  `spec.routing.policy.weight` values are used as weighted tie breakers.
+- `Weighted` ignores current in-flight counts and uses smooth weighted
+  round-robin among ready candidates. Omitted weights default to `100`; a
+  weight of `0` keeps a backend discoverable but prevents new traffic while any
+  positive-weight ready candidate exists. If every ready candidate has weight
+  `0`, the route returns `503` instead of silently choosing one.
+
+`spec.routing.policy.rateLimit.requestsPerMinute` enables a local token bucket
+per gateway process and backend. `burst` defaults to the request-per-minute
+value when omitted. This is useful as a runtime protection guard, but it is not
+a globally consistent tenant quota across multiple gateway replicas; enforce
+global quotas at the upstream ingress or API gateway.
+
+`spec.routing.policy.requestLogging.enabled` writes sanitized request logs with
+model name, namespace, route, method, path, status, and duration. It never logs
+request bodies, authorization headers, model credentials, or arbitrary request
+headers. Gateway chart defaults can enable rate limiting or request logging for
+routes that do not set an explicit per-deployment policy.
+
 North-south exposure does not alter these paths. The gateway chart supports
 standard Ingress, Gateway API HTTPRoute, LoadBalancer Service, and Tailscale
 front doors while preserving `/models/<name>/v1/...`; see
@@ -119,6 +145,9 @@ The Helm chart supplies these settings to the gateway:
 | `INFEROPS_GATEWAY_ADDRESS` | `:8080` | HTTP listen address |
 | `INFEROPS_GATEWAY_REGISTRY` | `kubernetes` | Registry mode; `fake` starts with an empty in-memory registry for package-level development |
 | `INFEROPS_GATEWAY_SYNC_INTERVAL` | `5s` | Kubernetes query and successful refresh interval |
+| `INFEROPS_GATEWAY_RATE_LIMIT_RPM` | `0` | Default local per-backend requests per minute; `0` disables the default |
+| `INFEROPS_GATEWAY_RATE_LIMIT_BURST` | `0` | Default local token bucket burst; `0` uses the RPM value when enabled |
+| `INFEROPS_GATEWAY_REQUEST_LOGGING` | `false` | Default sanitized request logging for routes without an explicit policy |
 | `INFEROPS_GATEWAY_AUTH_TOKEN_FILE` | empty | Enables auth using the mounted newline-delimited token file |
 | `POD_NAMESPACE` | none | Required namespace for Kubernetes discovery; the chart injects it from pod metadata |
 

@@ -228,6 +228,7 @@ func backendFor(
 		RoutePrefix: routePrefix,
 		State:       routing.StateUnavailable,
 		Message:     "model runtime is unavailable",
+		Policy:      routingPolicy(deployment.Spec.Routing.Policy),
 	}
 
 	if deployment.Status.Phase == v1alpha1.ModelDeploymentPhaseDraining {
@@ -339,6 +340,31 @@ func backendFor(
 	backend.State = routing.StateReady
 	backend.Message = ""
 	return backend
+}
+
+func routingPolicy(policy v1alpha1.RoutingPolicySpec) routing.TrafficPolicy {
+	gatewayPolicy := routing.TrafficPolicy{}
+	switch policy.RoutingStrategy {
+	case v1alpha1.RoutingStrategyWeighted:
+		gatewayPolicy.RoutingStrategy = routing.RoutingStrategyWeighted
+	case v1alpha1.RoutingStrategyLeastLoaded:
+		gatewayPolicy.RoutingStrategy = routing.RoutingStrategyLeastLoaded
+	}
+	if policy.Weight != nil {
+		weight := int(*policy.Weight)
+		gatewayPolicy.Weight = &weight
+	}
+	if policy.RateLimit != nil {
+		gatewayPolicy.RateLimit = &routing.RateLimitPolicy{
+			RequestsPerMinute: int(policy.RateLimit.RequestsPerMinute),
+			Burst:             int(policy.RateLimit.Burst),
+		}
+	}
+	if policy.RequestLogging.Enabled != nil {
+		enabled := *policy.RequestLogging.Enabled
+		gatewayPolicy.RequestLogging = &routing.RequestLoggingPolicy{Enabled: &enabled}
+	}
+	return gatewayPolicy
 }
 
 func readyServicesByName(endpointSlices []discoveryv1.EndpointSlice) map[string]bool {

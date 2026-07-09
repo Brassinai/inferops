@@ -136,7 +136,46 @@ Check GPU inventory:
 inferops gpu list
 ```
 
-## 8. Hugging Face token (gated models only)
+## 8. Run the acceptance workflow
+
+After the host prerequisites and install checks pass, run the recorded
+single-node GPU acceptance workflow from the repository root. The script runs
+install, doctor, GPU inventory, deploy, cache inspection, activation, streaming
+OpenAI-compatible inference, deactivation, GPU release inspection,
+re-activation, and cache inspection. It writes timings, command output, and
+defects to a Markdown report.
+
+```bash
+scripts/homelab_acceptance.py \
+  --manifest examples/yaml-deploy/modeldeployment.yaml \
+  --model-name qwen-chat \
+  --gateway-url http://<gateway-host> \
+  --namespace inferops-system \
+  --output homelab-acceptance.md
+```
+
+If the platform is already installed, add `--skip-install`. To validate
+explicit single-GPU replacement, add a second manifest and name:
+
+```bash
+scripts/homelab_acceptance.py \
+  --manifest examples/yaml-deploy/modeldeployment.yaml \
+  --model-name qwen-chat \
+  --replacement-manifest <replacement-modeldeployment.yaml> \
+  --replacement-name <replacement-name> \
+  --gateway-url http://<gateway-host> \
+  --namespace inferops-system \
+  --skip-install \
+  --output homelab-acceptance.md
+```
+
+Keep the generated report with the release notes or issue evidence. A passing
+run proves that streaming traffic reaches the gateway, deactivation releases
+the GPU while preserving cache state, re-activation does not require another
+model download, and explicit replacement either succeeds or reports visible
+rollback status.
+
+## 9. Hugging Face token (gated models only)
 
 ```bash
 kubectl create secret generic hf-token \

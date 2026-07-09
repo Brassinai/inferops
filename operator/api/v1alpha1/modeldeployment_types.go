@@ -271,8 +271,44 @@ type ScalingSpec struct {
 type RoutingSpec struct {
 	Enabled bool `json:"enabled,omitempty"`
 	// +kubebuilder:validation:Pattern=^/
-	Path             string `json:"path,omitempty"`
-	OpenAICompatible bool   `json:"openAICompatible,omitempty"`
+	Path             string            `json:"path,omitempty"`
+	OpenAICompatible bool              `json:"openAICompatible,omitempty"`
+	Policy           RoutingPolicySpec `json:"policy,omitempty"`
+}
+
+// RoutingPolicySpec controls gateway admission and candidate selection for
+// routes that may be shared by stable and canary deployments.
+type RoutingPolicySpec struct {
+	// +kubebuilder:validation:Enum=LeastLoaded;Weighted
+	RoutingStrategy RoutingStrategy `json:"routingStrategy,omitempty"`
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=1000000
+	Weight *int32 `json:"weight,omitempty"`
+	// RateLimit applies per gateway process and per backend. Use an upstream
+	// API gateway for globally consistent tenant limits.
+	RateLimit      *RateLimitSpec       `json:"rateLimit,omitempty"`
+	RequestLogging RequestLoggingPolicy `json:"requestLogging,omitempty"`
+}
+
+// RoutingStrategy selects among ready backends sharing the same route path.
+type RoutingStrategy string
+
+const (
+	RoutingStrategyLeastLoaded RoutingStrategy = "LeastLoaded"
+	RoutingStrategyWeighted    RoutingStrategy = "Weighted"
+)
+
+// RateLimitSpec configures local gateway token-bucket admission.
+type RateLimitSpec struct {
+	// +kubebuilder:validation:Minimum=1
+	RequestsPerMinute int32 `json:"requestsPerMinute,omitempty"`
+	// +kubebuilder:validation:Minimum=0
+	Burst int32 `json:"burst,omitempty"`
+}
+
+// RequestLoggingPolicy controls sanitized gateway request logs for a route.
+type RequestLoggingPolicy struct {
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 // CacheSpec requests a persistent model artifact cache.

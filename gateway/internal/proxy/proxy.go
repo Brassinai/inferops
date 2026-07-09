@@ -2,9 +2,13 @@
 package proxy
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
+	"math"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -13,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/brassinai/inferops/gateway/internal/routing"
 )
@@ -21,11 +26,21 @@ const retryAfterSeconds = 5
 
 // Proxy routes requests using a model registry.
 type Proxy struct {
-	registry  routing.Registry
-	transport http.RoundTripper
-	errorLog  *log.Logger
-	metrics   metricsRecorder
-	tracker   *requestTracker
+	registry   routing.Registry
+	transport  http.RoundTripper
+	errorLog   *log.Logger
+	requestLog *log.Logger
+	metrics    metricsRecorder
+	tracker    *requestTracker
+	limiter    *rateLimiter
+	options    Options
+}
+
+// Options configures gateway policies that may be overridden per backend.
+type Options struct {
+	DefaultRateLimit      *routing.RateLimitPolicy
+	RequestLoggingEnabled *bool
+	RequestLogger         *log.Logger
 }
 
 type metricsRecorder interface {
@@ -40,15 +55,40 @@ func New(registry routing.Registry) (*Proxy, error) {
 // NewWithMetrics creates a gateway proxy and records upstream failures when a
 // recorder is supplied.
 func NewWithMetrics(registry routing.Registry, recorder metricsRecorder) (*Proxy, error) {
+	return NewWithMetricsAndOptions(registry, recorder, Options{})
+}
+
+// NewWithMetricsAndOptions creates a gateway proxy with explicit policy
+// defaults for backends that do not define their own routing policy.
+func NewWithMetricsAndOptions(
+	registry routing.Registry,
+	recorder metricsRecorder,
+	options Options,
+) (*Proxy, error) {
 	if registry == nil {
 		return nil, errors.New("model registry is required")
 	}
+	if options.DefaultRateLimit != nil {
+		if options.DefaultRateLimit.RequestsPerMinute < 0 {
+			return nil, errors.New("default rate limit requestsPerMinute must be non-negative")
+		}
+		if options.DefaultRateLimit.Burst < 0 {
+			return nil, errors.New("default rate limit burst must be non-negative")
+		}
+	}
+	requestLog := options.RequestLogger
+	if requestLog == nil {
+		requestLog = log.New(os.Stdout, "gateway request: ", log.LstdFlags)
+	}
 	return &Proxy{
-		registry:  registry,
-		transport: http.DefaultTransport,
-		errorLog:  log.New(os.Stderr, "gateway proxy: ", log.LstdFlags),
-		metrics:   recorder,
-		tracker:   newRequestTracker(),
+		registry:   registry,
+		transport:  http.DefaultTransport,
+		errorLog:   log.New(os.Stderr, "gateway proxy: ", log.LstdFlags),
+		requestLog: requestLog,
+		metrics:    recorder,
+		tracker:    newRequestTracker(),
+		limiter:    newRateLimiter(),
+		options:    cloneOptions(options),
 	}, nil
 }
 
@@ -59,16 +99,28 @@ func (p *Proxy) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusBadRequest, "invalid_path", "invalid_request_error", "request path must not contain escapes, backslashes, or traversal segments")
 		return
 	}
-	backend, upstreamPath, found := p.registry.Lookup(request.URL.Path)
+	backend, upstreamPath, found := p.lookup(request.URL.Path)
 	if !found {
 		writeError(response, http.StatusNotFound, "model_not_found", "unknown_model", "model route was not found")
 		return
+	}
+	logging := p.requestLoggingEnabled(backend)
+	if logging {
+		writer := &accessLogWriter{ResponseWriter: response}
+		started := time.Now()
+		defer p.logRequest(writer, request, backend, started)
+		response = writer
 	}
 
 	switch backend.State {
 	case routing.StateReady:
 		if upstreamPath != "/v1" && !strings.HasPrefix(upstreamPath, "/v1/") {
 			writeError(response, http.StatusNotFound, "invalid_path", "invalid_request_error", "model routes accept only /v1 endpoints")
+			return
+		}
+		if allowed, retryAfter := p.rateLimitAllowed(backend); !allowed {
+			response.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+			writeError(response, http.StatusTooManyRequests, "rate_limit_exceeded", "rate_limit_error", "model route rate limit exceeded")
 			return
 		}
 		p.forward(response, request, backend, upstreamPath)
@@ -84,6 +136,15 @@ func (p *Proxy) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
 		writeError(response, http.StatusServiceUnavailable, "model_unavailable", "unavailable_model", stateMessage(backend, "model is unavailable"))
 	}
+}
+
+func (p *Proxy) lookup(requestPath string) (routing.Backend, string, bool) {
+	if selectable, ok := p.registry.(routing.SelectingRegistry); ok {
+		return selectable.Select(requestPath, func(backend routing.Backend) int {
+			return p.tracker.activeCount(backend)
+		})
+	}
+	return p.registry.Lookup(requestPath)
 }
 
 func canonicalRequestPath(requestURL *url.URL) bool {
@@ -138,6 +199,53 @@ func (p *Proxy) forward(
 		},
 	}
 	reverseProxy.ServeHTTP(response, request)
+}
+
+func (p *Proxy) rateLimitAllowed(backend routing.Backend) (bool, int) {
+	policy := p.rateLimitPolicy(backend)
+	if policy == nil || policy.RequestsPerMinute <= 0 {
+		return true, 0
+	}
+	return p.limiter.allow(keyForBackend(backend), *policy)
+}
+
+func (p *Proxy) rateLimitPolicy(backend routing.Backend) *routing.RateLimitPolicy {
+	if backend.Policy.RateLimit != nil {
+		return backend.Policy.RateLimit
+	}
+	return p.options.DefaultRateLimit
+}
+
+func (p *Proxy) requestLoggingEnabled(backend routing.Backend) bool {
+	if backend.Policy.RequestLogging != nil && backend.Policy.RequestLogging.Enabled != nil {
+		return *backend.Policy.RequestLogging.Enabled
+	}
+	return p.options.RequestLoggingEnabled != nil && *p.options.RequestLoggingEnabled
+}
+
+func (p *Proxy) logRequest(
+	writer *accessLogWriter,
+	request *http.Request,
+	backend routing.Backend,
+	started time.Time,
+) {
+	status := writer.status
+	if status == 0 {
+		status = http.StatusOK
+		if request.Context().Err() != nil {
+			status = 499
+		}
+	}
+	p.requestLog.Printf(
+		"model=%q namespace=%q route=%q method=%q path=%q status=%d duration_ms=%d",
+		backend.Name,
+		backend.Namespace,
+		backend.RoutePrefix,
+		request.Method,
+		request.URL.Path,
+		status,
+		time.Since(started).Milliseconds(),
+	)
 }
 
 // ServeDrainStatus reports active request counts and drain completion state for
@@ -241,6 +349,112 @@ func (t *requestTracker) activeCount(backend routing.Backend) int {
 
 func keyForBackend(backend routing.Backend) backendKey {
 	return backendKey{namespace: backend.Namespace, name: backend.Name}
+}
+
+type rateLimiter struct {
+	mu      sync.Mutex
+	buckets map[backendKey]*tokenBucket
+}
+
+type tokenBucket struct {
+	requestsPerMinute int
+	capacity          float64
+	tokens            float64
+	last              time.Time
+}
+
+func newRateLimiter() *rateLimiter {
+	return &rateLimiter{buckets: make(map[backendKey]*tokenBucket)}
+}
+
+func (l *rateLimiter) allow(key backendKey, policy routing.RateLimitPolicy) (bool, int) {
+	if l == nil || policy.RequestsPerMinute <= 0 {
+		return true, 0
+	}
+	burst := policy.Burst
+	if burst <= 0 {
+		burst = policy.RequestsPerMinute
+	}
+	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	bucket := l.buckets[key]
+	if bucket == nil || bucket.requestsPerMinute != policy.RequestsPerMinute || bucket.capacity != float64(burst) {
+		bucket = &tokenBucket{
+			requestsPerMinute: policy.RequestsPerMinute,
+			capacity:          float64(burst),
+			tokens:            float64(burst),
+			last:              now,
+		}
+		l.buckets[key] = bucket
+	}
+	ratePerSecond := float64(policy.RequestsPerMinute) / 60
+	elapsed := now.Sub(bucket.last).Seconds()
+	bucket.last = now
+	bucket.tokens = math.Min(bucket.capacity, bucket.tokens+elapsed*ratePerSecond)
+	if bucket.tokens >= 1 {
+		bucket.tokens--
+		return true, 0
+	}
+	retry := int(math.Ceil((1 - bucket.tokens) / ratePerSecond))
+	if retry < 1 {
+		retry = 1
+	}
+	return false, retry
+}
+
+type accessLogWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *accessLogWriter) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *accessLogWriter) Write(content []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(content)
+}
+
+func (w *accessLogWriter) Flush() {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	_ = http.NewResponseController(w.ResponseWriter).Flush()
+}
+
+func (w *accessLogWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return http.NewResponseController(w.ResponseWriter).Hijack()
+}
+
+func (w *accessLogWriter) ReadFrom(reader io.Reader) (int64, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return io.Copy(w.ResponseWriter, reader)
+}
+
+func (w *accessLogWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func cloneOptions(options Options) Options {
+	if options.DefaultRateLimit != nil {
+		rateLimit := *options.DefaultRateLimit
+		options.DefaultRateLimit = &rateLimit
+	}
+	if options.RequestLoggingEnabled != nil {
+		enabled := *options.RequestLoggingEnabled
+		options.RequestLoggingEnabled = &enabled
+	}
+	return options
 }
 
 func joinURLPath(endpoint *url.URL, requestPath string) string {

@@ -76,6 +76,19 @@ discovery:
   # The gateway rejects values below one second.
   syncInterval: 5s
 
+trafficPolicy:
+  # Defaults apply only when spec.routing.policy does not set an override.
+  defaultRateLimit:
+    # Zero disables process-local gateway rate limiting.
+    requestsPerMinute: 0
+    # Zero uses requestsPerMinute as the token bucket burst when rate limiting
+    # is enabled.
+    burst: 0
+  requestLogging:
+    # Logs sanitized request metadata only: model, namespace, route, method,
+    # path, status, and duration. Bodies and credential headers are never logged.
+    enabled: false
+
 auth:
   enabled: false
   # Name of an existing Secret in the release namespace.

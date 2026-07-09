@@ -40,6 +40,14 @@ spec:
     enabled: true
     path: /models/qwen-chat
     openAICompatible: true
+    policy:
+      routingStrategy: LeastLoaded
+      weight: 100
+      rateLimit:
+        requestsPerMinute: 600
+        burst: 60
+      requestLogging:
+        enabled: false
   cache:
     enabled: true
     type: nodeLocal
@@ -71,6 +79,8 @@ spec:
 | `scaling.maxReplicas` | `1` |
 | `routing.enabled` | `true` |
 | `routing.openAICompatible` | `true` |
+| `routing.policy.routingStrategy` | `LeastLoaded` |
+| `routing.policy.weight` | `100` |
 | `cache.enabled` | `true` |
 | `cache.type` | `nodeLocal` |
 | `cache.size` | Operator `cache.defaultSize` (`100Gi` by default) |
@@ -109,6 +119,31 @@ runtime replicas after the runtime reports no pending or running requests for
 the timeout. Scale-from-zero needs a later spec update or external signal; the
 gateway does not synthesize demand for a deployment with no ready runtime
 endpoints.
+
+### Routing policy
+
+`routing.path` defaults to `/models/<deployment-name>`. Multiple deployments
+can share the same path only when they are deliberately part of one traffic
+set, such as a stable deployment and a canary deployment.
+
+`routing.policy.routingStrategy` accepts `LeastLoaded` or `Weighted`.
+`LeastLoaded` sends new requests to the ready backend with the fewest
+in-flight requests observed by the current gateway process and uses
+`routing.policy.weight` as a tie breaker. `Weighted` uses smooth weighted
+round-robin among ready candidates. Omitted weights behave as `100`; explicit
+`0` keeps the backend out of new traffic while another positive-weight ready
+candidate exists. If every ready candidate has weight `0`, the route returns
+`503` instead of silently choosing one.
+
+`routing.policy.rateLimit.requestsPerMinute` enables a process-local token
+bucket for that backend. `burst` is optional and defaults to the RPM value.
+Use upstream ingress or API gateway policy for globally consistent quotas
+across multiple gateway replicas.
+
+`routing.policy.requestLogging.enabled` writes sanitized request metadata from
+the gateway. Logs include model, namespace, route, method, path, status, and
+duration; request bodies, credential headers, and arbitrary request headers are
+not logged.
 
 ### Activation policies
 

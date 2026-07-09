@@ -193,6 +193,11 @@ inferops deactivate qwen-chat
 
 GPU is released. Cache is preserved. Re-activation skips re-download.
 
+For the full single-node GPU acceptance workflow with recorded timings and
+defects, run
+[`scripts/homelab_acceptance.py`](../scripts/homelab_acceptance.py) as described
+in [Homelab setup details](homelab.md).
+
 ## Delete
 
 ```bash

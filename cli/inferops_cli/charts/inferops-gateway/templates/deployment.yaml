@@ -47,6 +47,12 @@ spec:
               value: kubernetes
             - name: INFEROPS_GATEWAY_SYNC_INTERVAL
               value: {{ .Values.discovery.syncInterval | quote }}
+            - name: INFEROPS_GATEWAY_RATE_LIMIT_RPM
+              value: {{ .Values.trafficPolicy.defaultRateLimit.requestsPerMinute | quote }}
+            - name: INFEROPS_GATEWAY_RATE_LIMIT_BURST
+              value: {{ .Values.trafficPolicy.defaultRateLimit.burst | quote }}
+            - name: INFEROPS_GATEWAY_REQUEST_LOGGING
+              value: {{ .Values.trafficPolicy.requestLogging.enabled | quote }}
             {{- if .Values.auth.enabled }}
             - name: INFEROPS_GATEWAY_AUTH_TOKEN_FILE
               value: {{ printf "%s/%s" .Values.auth.mountPath .Values.auth.secretKey | quote }}
