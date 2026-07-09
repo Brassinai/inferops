@@ -101,13 +101,31 @@ helm upgrade --install inferops-runtime deploy/helm/inferops-runtime \
   --set metrics.serviceMonitor.enabled=true
 ```
 
-The packaged dashboard is vLLM-first, but runtime scraping is label-based and
-works for runtime Services that follow the InferOps runtime contract and serve
-Prometheus metrics at the configured `serviceMonitor.runtimes.path`. Keep that
-chart value aligned with the deployed `ModelRuntime.spec.metricsPath`; use a
-dedicated ServiceMonitor when one namespace mixes runtimes with different
-metrics paths.
+The packaged Grafana dashboard is vLLM-first, but runtime scraping is
+label-based and works for runtime Services that follow the InferOps runtime
+contract and serve Prometheus metrics at the configured
+`serviceMonitor.runtimes.path`. Keep that chart value aligned with the deployed
+`ModelRuntime.spec.metricsPath`; use a dedicated ServiceMonitor when one
+namespace mixes runtimes with different metrics paths.
 OpenTelemetry is intentionally not an MVP dependency.
+
+## Self-hosted dashboard
+
+Install the optional read-only dashboard when operators need an in-cluster view
+of deployments, GPUs, caches, endpoints, Events, log selectors, metrics query
+hints, activation state, scaling state, and sanitized generated YAML:
+
+```bash
+helm upgrade --install inferops-dashboard deploy/helm/inferops-dashboard \
+  --namespace inferops-system \
+  --set-string dashboard.gatewayBaseURL=https://models.example.com \
+  --set-string dashboard.prometheusURL=https://prometheus.example.com
+```
+
+The dashboard Service is `ClusterIP` by default and should stay behind
+port-forwarding, a private network, or an authenticated internal ingress. Its
+RBAC is read-only and intentionally excludes Secret reads and custom-resource
+mutation. See [Self-hosted dashboard](dashboard.md).
 
 ## Upgrades
 
@@ -162,4 +180,5 @@ chart's `podDisruptionBudget` values after accepting the availability impact.
   protect the scheduler contract, but real hardware release drills must still
   cover vendor device-plugin failures, physical GPU health faults, and topology
   constraints.
-- Advanced autoscaling and the self-hosted dashboard UI are not included.
+- The self-hosted dashboard is read-only. Activation, scaling, and rollout
+  changes remain explicit CLI, SDK, YAML, or GitOps operations.

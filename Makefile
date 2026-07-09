@@ -203,6 +203,16 @@ helm-lint:
 		echo "error: gateway chart accepted invalid topology spread"; \
 		exit 1; \
 	fi
+	@if $(HELM) template invalid deploy/helm/inferops-dashboard \
+		--set service.port=0 >/dev/null 2>&1; then \
+		echo "error: dashboard chart accepted an invalid Service port"; \
+		exit 1; \
+	fi
+	@if $(HELM) template invalid deploy/helm/inferops-dashboard \
+		--set networkPolicy.apiServerCIDRs={} >/dev/null 2>&1; then \
+		echo "error: dashboard chart accepted an empty Kubernetes API CIDR list"; \
+		exit 1; \
+	fi
 	@$(HELM) template inferops-operator-ha deploy/helm/inferops-operator \
 		--set replicaCount=2 >/dev/null
 
@@ -300,6 +310,10 @@ helm-template:
 	@grep -q '^kind: ServiceMonitor$$' .verify/helm/inferops-gateway-observability.yaml
 	@grep -q '^kind: ServiceMonitor$$' .verify/helm/inferops-runtime-observability.yaml
 	@grep -q 'inferops-vllm-dashboard.json' .verify/helm/inferops-operator-observability.yaml
+	@grep -q '^kind: Deployment$$' .verify/helm/inferops-dashboard.yaml
+	@grep -q '^kind: NetworkPolicy$$' .verify/helm/inferops-dashboard.yaml
+	@grep -q '^kind: ClusterRole$$' .verify/helm/inferops-dashboard.yaml
+	@! grep -q -- '- secrets$$' .verify/helm/inferops-dashboard.yaml
 	@$(PYTHON) scripts/check_operator_rbac.py .verify/helm/inferops-operator.yaml
 	@$(PYTHON) scripts/check_tenant_rbac.py .verify/helm/inferops-gateway-tenant.yaml
 	@grep -q 'pathType: Prefix' .verify/helm/inferops-gateway-homelab.yaml

@@ -133,9 +133,11 @@ kubectl apply -f modeldeployment.yaml
 - [SDK reference](docs/sdk.md)
 - [CRD reference](docs/crds.md)
 - [Cluster and ingress support](docs/cluster-ingress.md)
+- [Self-hosted dashboard](docs/dashboard.md)
 - [Production notes](docs/production.md)
 - [Namespace tenancy](docs/tenancy.md)
 - [Backup and disaster recovery](docs/disaster-recovery.md)
+- [Core platform gate](docs/core-platform-gate.md)
 
 ## Development
 

@@ -1,0 +1,74 @@
+image:
+  repository: ghcr.io/inferops/inferops-dashboard
+  tag: "0.0.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  create: true
+
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+dashboard:
+  requestTimeout: 5s
+  maxEvents: 25
+  prometheusURL: ""
+  gatewayBaseURL: ""
+
+networkPolicy:
+  enabled: true
+  ingressFrom: []
+  apiServerCIDRs:
+    - 10.96.0.1/32
+    - 10.43.0.1/32
+    - 10.0.0.1/32
+  dns:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    podSelector:
+      matchLabels:
+        k8s-app: kube-dns
+
+probes:
+  livenessPath: /healthz
+  readinessPath: /readyz
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
