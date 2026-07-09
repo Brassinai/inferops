@@ -103,6 +103,7 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("create gateway proxy: %w", err)
 	}
 	var proxyHandler http.Handler = gatewayProxy
+	var drainHandler http.Handler = http.HandlerFunc(gatewayProxy.ServeDrainStatus)
 	tokenFile := strings.TrimSpace(os.Getenv("INFEROPS_GATEWAY_AUTH_TOKEN_FILE"))
 	if tokenFile != "" {
 		tokenSource, err := auth.NewFileTokenSource(tokenFile)
@@ -114,6 +115,7 @@ func run(ctx context.Context) error {
 			return fmt.Errorf("configure gateway authentication: %w", err)
 		}
 		proxyHandler = authenticator.Wrap(proxyHandler)
+		drainHandler = authenticator.Wrap(drainHandler)
 		ready = readinessWithTokenSource(ready, tokenSource)
 	}
 	proxyHandler = metricsRecorder.Middleware(proxyHandler)
@@ -123,7 +125,7 @@ func run(ctx context.Context) error {
 	return health.RunWithHandler(
 		ctx,
 		address,
-		gatewayHandler(healthHandler, metricsHandler, proxyHandler),
+		gatewayHandler(healthHandler, metricsHandler, proxyHandler, drainHandler),
 	)
 }
 
@@ -140,7 +142,7 @@ func readinessWithTokenSource(
 	}
 }
 
-func gatewayHandler(healthHandler, metricsHandler, proxyHandler http.Handler) http.Handler {
+func gatewayHandler(healthHandler, metricsHandler, proxyHandler, drainHandler http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL != nil && request.URL.RawPath == "" {
 			switch request.URL.Path {
@@ -149,6 +151,9 @@ func gatewayHandler(healthHandler, metricsHandler, proxyHandler http.Handler) ht
 				return
 			case "/metrics":
 				metricsHandler.ServeHTTP(response, request)
+				return
+			case "/drainz":
+				drainHandler.ServeHTTP(response, request)
 				return
 			}
 		}

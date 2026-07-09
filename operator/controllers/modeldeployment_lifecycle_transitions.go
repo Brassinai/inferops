@@ -21,6 +21,7 @@ import (
 )
 
 const defaultModelDrainTimeout = 5 * time.Minute
+const drainPollInterval = 2 * time.Second
 
 func (r *ModelDeploymentController) reconcileDeactivation(
 	ctx context.Context,
@@ -54,9 +55,21 @@ func (r *ModelDeploymentController) reconcileDeactivation(
 			}
 		}
 		if remaining > 0 {
+			drainComplete, err := r.gatewayDrainComplete(ctx, deployment)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+			if drainComplete {
+				remaining = 0
+			}
+		}
+		if remaining > 0 {
 			setDrainingConditions(deployment)
 			result, err := r.patchDeploymentStatus(ctx, deployment, original, v1alpha1.ReasonDrainStarted)
 			if err == nil {
+				if r.drainChecker != nil && remaining > drainPollInterval {
+					remaining = drainPollInterval
+				}
 				result.RequeueAfter = remaining
 			}
 			return result, err
@@ -114,6 +127,9 @@ func (r *ModelDeploymentController) reconcileDeactivation(
 			timeout, timeoutErr := effectiveDrainTimeout(deployment)
 			if timeoutErr != nil {
 				return ctrl.Result{}, timeoutErr
+			}
+			if r.drainChecker != nil && timeout > drainPollInterval {
+				timeout = drainPollInterval
 			}
 			result.RequeueAfter = timeout
 		}
@@ -175,6 +191,20 @@ func (r *ModelDeploymentController) reconcileDeactivation(
 		eventReason = v1alpha1.ReasonDrainComplete
 	}
 	return r.patchDeploymentStatus(ctx, deployment, original, eventReason)
+}
+
+func (r *ModelDeploymentController) gatewayDrainComplete(
+	ctx context.Context,
+	deployment *v1alpha1.ModelDeployment,
+) (bool, error) {
+	if r.drainChecker == nil {
+		return false, nil
+	}
+	complete, err := r.drainChecker.DrainComplete(ctx, deployment.Namespace, deployment.Name)
+	if err != nil {
+		return false, fmt.Errorf("check gateway drain status: %w", err)
+	}
+	return complete, nil
 }
 
 func setDrainingConditions(deployment *v1alpha1.ModelDeployment) {

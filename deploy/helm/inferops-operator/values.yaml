@@ -40,6 +40,10 @@ networkPolicy:
     - 10.96.0.1/32
     - 10.43.0.1/32
     - 10.0.0.1/32
+  gatewayDrain:
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/name: inferops-gateway
   dns:
     namespaceSelector:
       matchLabels:
@@ -61,6 +65,22 @@ cache:
 scheduling:
   gpuNodeSelector: {}
   gpuTypeLabel: inferops.dev/gpu-type
+
+gateway:
+  # Optional URL for the gateway /drainz endpoint. When set, the operator can
+  # finish deactivation as soon as gateway active requests reach zero instead
+  # of waiting for activation.drainTimeout. Use only for single-endpoint custom
+  # topologies; the EndpointSlice mode below is safe for multiple gateway pods.
+  drainStatusURL: ""
+  drainStatus:
+    enabled: true
+    serviceName: inferops-gateway
+    serviceNamespace: ""
+    scheme: http
+    port: 8080
+    tokenSecretName: ""
+    tokenSecretKey: token
+    tokenMountPath: /var/run/secrets/inferops-gateway-drain
 
 webhook:
   enabled: true

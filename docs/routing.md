@@ -41,12 +41,23 @@ delay. If discovery cannot refresh for three configured intervals, readiness
 fails and every previously ready backend is marked unavailable until a complete
 query succeeds. Readiness also remains false until the first complete snapshot.
 
+`GET /drainz?namespace=<namespace>&model=<name>` returns one gateway process's
+observed drain state for the matching backend, including active request count
+and `drainComplete`. When gateway authentication is enabled, `/drainz` requires
+the same bearer token as model traffic. The operator chart does not trust a
+single load-balanced `/drainz` response by default; it lists the gateway
+Service's ready EndpointSlice addresses and requires every ready gateway pod to
+report `drainComplete=true` before finishing deactivation or replacement
+drains. `spec.activation.drainTimeout` remains the fallback when gateway status
+is unavailable or requests keep streaming.
+
 Gateway errors use the OpenAI `{"error": ...}` envelope:
 
-| Model state | HTTP status | Error code |
+| Model lifecycle state | HTTP status | Error code |
 | --- | ---: | --- |
 | Unknown route | `404` | `model_not_found` |
-| Inactive | `409` | `model_inactive` |
+| Cached / inactive | `409` | `model_inactive` |
+| Pending, downloading, or waiting for capacity/GPU | `503` | `model_activating` |
 | Activating | `503` | `model_activating` |
 | Draining | `503` | `model_draining` |
 | Failed, stale, or unready | `503` | `model_unavailable` |

@@ -145,6 +145,14 @@ func run(ctx context.Context) error {
 	if err := cacheReconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup cache controller: %w", err)
 	}
+	drainChecker := config.drainChecker
+	if config.gatewayDrainService != nil {
+		checker, err := controllers.NewEndpointSliceDrainChecker(mgr.GetClient(), *config.gatewayDrainService)
+		if err != nil {
+			return fmt.Errorf("configure gateway EndpointSlice drain checker: %w", err)
+		}
+		drainChecker = checker
+	}
 	deploymentReconciler, err := controllers.NewModelDeploymentController(
 		mgr.GetClient(),
 		mgr.GetScheme(),
@@ -154,6 +162,7 @@ func run(ctx context.Context) error {
 			DownloaderImage:  config.downloaderImage,
 			GPUNodeSelector:  config.gpuNodeSelector,
 			GPUTypeLabel:     config.gpuTypeLabel,
+			DrainChecker:     drainChecker,
 		},
 		eventRecorder,
 		metricsRecorder,
@@ -196,6 +205,8 @@ type operatorConfig struct {
 	cacheDownloadRequeue    time.Duration
 	gpuNodeSelector         map[string]string
 	gpuTypeLabel            string
+	drainChecker            controllers.DrainChecker
+	gatewayDrainService     *controllers.EndpointSliceDrainCheckerConfig
 	webhookEnabled          bool
 	webhookPort             int
 	webhookCertDir          string
@@ -230,6 +241,39 @@ func operatorConfigFromEnv() (operatorConfig, error) {
 	if err != nil {
 		return operatorConfig{}, err
 	}
+	var drainChecker controllers.DrainChecker
+	var gatewayDrainService *controllers.EndpointSliceDrainCheckerConfig
+	drainTokenFile := strings.TrimSpace(os.Getenv("INFEROPS_GATEWAY_DRAIN_STATUS_TOKEN_FILE"))
+	drainStatusURL := strings.TrimSpace(os.Getenv("INFEROPS_GATEWAY_DRAIN_STATUS_URL"))
+	drainStatusServiceName := strings.TrimSpace(os.Getenv("INFEROPS_GATEWAY_DRAIN_STATUS_SERVICE_NAME"))
+	if drainStatusURL != "" && drainStatusServiceName != "" {
+		return operatorConfig{}, errors.New("configure only one of INFEROPS_GATEWAY_DRAIN_STATUS_URL or INFEROPS_GATEWAY_DRAIN_STATUS_SERVICE_NAME")
+	}
+	if drainStatusURL != "" {
+		checker, err := controllers.NewHTTPDrainCheckerWithTokenFile(drainStatusURL, drainTokenFile)
+		if err != nil {
+			return operatorConfig{}, fmt.Errorf("configure INFEROPS_GATEWAY_DRAIN_STATUS_URL: %w", err)
+		}
+		drainChecker = checker
+	} else if drainStatusServiceName != "" {
+		drainStatusPort, err := intFromEnv("INFEROPS_GATEWAY_DRAIN_STATUS_SERVICE_PORT", 8080)
+		if err != nil {
+			return operatorConfig{}, err
+		}
+		if drainStatusPort < 1 || drainStatusPort > 65535 {
+			return operatorConfig{}, fmt.Errorf("INFEROPS_GATEWAY_DRAIN_STATUS_SERVICE_PORT must be between 1 and 65535, got %d", drainStatusPort)
+		}
+		gatewayDrainService = &controllers.EndpointSliceDrainCheckerConfig{
+			Namespace: envOrDefault(
+				"INFEROPS_GATEWAY_DRAIN_STATUS_SERVICE_NAMESPACE",
+				leaderElectionNamespace(),
+			),
+			ServiceName: drainStatusServiceName,
+			Scheme:      envOrDefault("INFEROPS_GATEWAY_DRAIN_STATUS_SERVICE_SCHEME", "http"),
+			Port:        int32(drainStatusPort),
+			TokenFile:   drainTokenFile,
+		}
+	}
 	return operatorConfig{
 		healthAddr:              envOrDefault("INFEROPS_HEALTH_ADDR", ":8081"),
 		metricsAddr:             envOrDefault("INFEROPS_METRICS_ADDR", ":8080"),
@@ -243,6 +287,8 @@ func operatorConfigFromEnv() (operatorConfig, error) {
 		cacheDownloadRequeue:    cacheDownloadRequeue,
 		gpuNodeSelector:         gpuNodeSelector,
 		gpuTypeLabel:            envOrDefault("INFEROPS_GPU_TYPE_LABEL", "inferops.dev/gpu-type"),
+		drainChecker:            drainChecker,
+		gatewayDrainService:     gatewayDrainService,
 		webhookEnabled:          webhookEnabled,
 		webhookPort:             webhookPort,
 		webhookCertDir:          envOrDefault("INFEROPS_WEBHOOK_CERT_DIR", "/tmp/k8s-webhook-server/serving-certs"),

@@ -49,6 +49,7 @@ type ModelDeploymentControllerConfig struct {
 	DownloaderImage  string
 	GPUNodeSelector  map[string]string
 	GPUTypeLabel     string
+	DrainChecker     DrainChecker
 }
 
 // ModelDeploymentController reconciles ModelDeployment resources into stable
@@ -62,6 +63,7 @@ type ModelDeploymentController struct {
 	defaultCacheSize string
 	eventRecorder    record.EventRecorder
 	metrics          controllermetrics.Recorder
+	drainChecker     DrainChecker
 	// queueMetricDirty is safe without a mutex because SetupWithManager
 	// serializes this controller's reconciliations.
 	queueMetricDirty bool
@@ -122,6 +124,7 @@ func NewModelDeploymentController(
 		defaultCacheSize: config.DefaultCacheSize,
 		eventRecorder:    eventRecorder,
 		metrics:          metricsRecorder,
+		drainChecker:     config.DrainChecker,
 	}, nil
 }
 

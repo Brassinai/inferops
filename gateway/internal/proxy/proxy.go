@@ -12,6 +12,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/brassinai/inferops/gateway/internal/routing"
 )
@@ -24,6 +25,7 @@ type Proxy struct {
 	transport http.RoundTripper
 	errorLog  *log.Logger
 	metrics   metricsRecorder
+	tracker   *requestTracker
 }
 
 type metricsRecorder interface {
@@ -46,6 +48,7 @@ func NewWithMetrics(registry routing.Registry, recorder metricsRecorder) (*Proxy
 		transport: http.DefaultTransport,
 		errorLog:  log.New(os.Stderr, "gateway proxy: ", log.LstdFlags),
 		metrics:   recorder,
+		tracker:   newRequestTracker(),
 	}, nil
 }
 
@@ -103,6 +106,9 @@ func (p *Proxy) forward(
 	backend routing.Backend,
 	upstreamPath string,
 ) {
+	done := p.tracker.begin(backend)
+	defer done()
+
 	reverseProxy := &httputil.ReverseProxy{
 		Rewrite: func(proxyRequest *httputil.ProxyRequest) {
 			proxyRequest.SetURL(backend.Endpoint)
@@ -132,6 +138,109 @@ func (p *Proxy) forward(
 		},
 	}
 	reverseProxy.ServeHTTP(response, request)
+}
+
+// ServeDrainStatus reports active request counts and drain completion state for
+// the operator. It is intentionally read-only and derived from the gateway's
+// current registry snapshot plus requests already admitted by this process.
+func (p *Proxy) ServeDrainStatus(response http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		response.Header().Set("Allow", http.MethodGet)
+		writeError(response, http.StatusMethodNotAllowed, "method_not_allowed", "invalid_request_error", "method not allowed")
+		return
+	}
+	snapshot, ok := p.registry.(routing.SnapshotRegistry)
+	if !ok {
+		writeError(response, http.StatusServiceUnavailable, "drain_status_unavailable", "api_error", "backend registry does not expose drain status")
+		return
+	}
+
+	namespaceFilter := strings.TrimSpace(request.URL.Query().Get("namespace"))
+	modelFilter := strings.TrimSpace(request.URL.Query().Get("model"))
+	backends := snapshot.Backends()
+	statuses := make([]drainBackendStatus, 0, len(backends))
+	for _, backend := range backends {
+		if namespaceFilter != "" && backend.Namespace != namespaceFilter {
+			continue
+		}
+		if modelFilter != "" && backend.Name != modelFilter {
+			continue
+		}
+		active := p.tracker.activeCount(backend)
+		statuses = append(statuses, drainBackendStatus{
+			Namespace:      backend.Namespace,
+			Model:          backend.Name,
+			RoutePrefix:    backend.RoutePrefix,
+			State:          string(backend.State),
+			ActiveRequests: active,
+			Draining:       backend.State == routing.StateDraining,
+			DrainComplete:  backend.State == routing.StateDraining && active == 0,
+			Message:        backend.Message,
+		})
+	}
+	response.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(response).Encode(drainStatusResponse{Backends: statuses})
+}
+
+type drainStatusResponse struct {
+	Backends []drainBackendStatus `json:"backends"`
+}
+
+type drainBackendStatus struct {
+	Namespace      string `json:"namespace,omitempty"`
+	Model          string `json:"model"`
+	RoutePrefix    string `json:"routePrefix"`
+	State          string `json:"state"`
+	ActiveRequests int    `json:"activeRequests"`
+	Draining       bool   `json:"draining"`
+	DrainComplete  bool   `json:"drainComplete"`
+	Message        string `json:"message,omitempty"`
+}
+
+type requestTracker struct {
+	mu     sync.Mutex
+	active map[backendKey]int
+}
+
+type backendKey struct {
+	namespace string
+	name      string
+}
+
+func newRequestTracker() *requestTracker {
+	return &requestTracker{active: make(map[backendKey]int)}
+}
+
+func (t *requestTracker) begin(backend routing.Backend) func() {
+	if t == nil {
+		return func() {}
+	}
+	key := keyForBackend(backend)
+	t.mu.Lock()
+	t.active[key]++
+	t.mu.Unlock()
+	return func() {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		if t.active[key] <= 1 {
+			delete(t.active, key)
+			return
+		}
+		t.active[key]--
+	}
+}
+
+func (t *requestTracker) activeCount(backend routing.Backend) int {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.active[keyForBackend(backend)]
+}
+
+func keyForBackend(backend routing.Backend) backendKey {
+	return backendKey{namespace: backend.Namespace, name: backend.Name}
 }
 
 func joinURLPath(endpoint *url.URL, requestPath string) string {

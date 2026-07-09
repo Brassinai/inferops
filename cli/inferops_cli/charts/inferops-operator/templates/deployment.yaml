@@ -14,6 +14,20 @@
 {{- fail "webhook.tls.caBundle is required when webhook.tls.existingSecret is set" }}
 {{- end }}
 {{- end }}
+{{- if .Values.gateway.drainStatus.enabled }}
+{{- if not .Values.gateway.drainStatus.serviceName }}
+{{- fail "gateway.drainStatus.serviceName is required when gateway.drainStatus.enabled is true" }}
+{{- end }}
+{{- if not (has .Values.gateway.drainStatus.scheme (list "http" "https")) }}
+{{- fail "gateway.drainStatus.scheme must be http or https" }}
+{{- end }}
+{{- if or (lt (int .Values.gateway.drainStatus.port) 1) (gt (int .Values.gateway.drainStatus.port) 65535) }}
+{{- fail "gateway.drainStatus.port must be between 1 and 65535" }}
+{{- end }}
+{{- if and .Values.gateway.drainStatus.tokenSecretName (not .Values.gateway.drainStatus.tokenSecretKey) }}
+{{- fail "gateway.drainStatus.tokenSecretKey is required when gateway.drainStatus.tokenSecretName is set" }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -70,6 +84,27 @@ spec:
               value: {{ include "inferops-operator.gpuNodeSelector" . | quote }}
             - name: INFEROPS_GPU_TYPE_LABEL
               value: {{ .Values.scheduling.gpuTypeLabel | quote }}
+            {{- if .Values.gateway.drainStatusURL }}
+            - name: INFEROPS_GATEWAY_DRAIN_STATUS_URL
+              value: {{ .Values.gateway.drainStatusURL | quote }}
+            {{- if .Values.gateway.drainStatus.tokenSecretName }}
+            - name: INFEROPS_GATEWAY_DRAIN_STATUS_TOKEN_FILE
+              value: {{ printf "%s/%s" .Values.gateway.drainStatus.tokenMountPath .Values.gateway.drainStatus.tokenSecretKey | quote }}
+            {{- end }}
+            {{- else if .Values.gateway.drainStatus.enabled }}
+            - name: INFEROPS_GATEWAY_DRAIN_STATUS_SERVICE_NAME
+              value: {{ .Values.gateway.drainStatus.serviceName | quote }}
+            - name: INFEROPS_GATEWAY_DRAIN_STATUS_SERVICE_NAMESPACE
+              value: {{ default .Release.Namespace .Values.gateway.drainStatus.serviceNamespace | quote }}
+            - name: INFEROPS_GATEWAY_DRAIN_STATUS_SERVICE_SCHEME
+              value: {{ .Values.gateway.drainStatus.scheme | quote }}
+            - name: INFEROPS_GATEWAY_DRAIN_STATUS_SERVICE_PORT
+              value: {{ .Values.gateway.drainStatus.port | quote }}
+            {{- if .Values.gateway.drainStatus.tokenSecretName }}
+            - name: INFEROPS_GATEWAY_DRAIN_STATUS_TOKEN_FILE
+              value: {{ printf "%s/%s" .Values.gateway.drainStatus.tokenMountPath .Values.gateway.drainStatus.tokenSecretKey | quote }}
+            {{- end }}
+            {{- end }}
             - name: INFEROPS_WEBHOOK_ENABLED
               value: {{ .Values.webhook.enabled | quote }}
             - name: INFEROPS_WEBHOOK_PORT
@@ -116,17 +151,35 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- if .Values.webhook.enabled }}
+          {{- if or .Values.webhook.enabled .Values.gateway.drainStatus.tokenSecretName }}
           volumeMounts:
+            {{- if .Values.webhook.enabled }}
             - name: webhook-certs
               mountPath: {{ .Values.webhook.certDir }}
               readOnly: true
+            {{- end }}
+            {{- if .Values.gateway.drainStatus.tokenSecretName }}
+            - name: gateway-drain-token
+              mountPath: {{ .Values.gateway.drainStatus.tokenMountPath | quote }}
+              readOnly: true
+            {{- end }}
           {{- end }}
-      {{- if .Values.webhook.enabled }}
+      {{- if or .Values.webhook.enabled .Values.gateway.drainStatus.tokenSecretName }}
       volumes:
+        {{- if .Values.webhook.enabled }}
         - name: webhook-certs
           secret:
             secretName: {{ include "inferops-operator.webhookSecretName" . }}
+        {{- end }}
+        {{- if .Values.gateway.drainStatus.tokenSecretName }}
+        - name: gateway-drain-token
+          secret:
+            secretName: {{ .Values.gateway.drainStatus.tokenSecretName | quote }}
+            defaultMode: 0444
+            items:
+              - key: {{ .Values.gateway.drainStatus.tokenSecretKey | quote }}
+                path: {{ .Values.gateway.drainStatus.tokenSecretKey | quote }}
+        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
