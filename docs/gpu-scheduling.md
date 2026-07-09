@@ -33,9 +33,25 @@ path from another node would expose unrelated or incomplete data.
 - `Queue` sets `WaitingForGPU` and retries through controller backoff and Node
   watches. It does not create an unschedulable runtime Deployment.
 - `Reject` sets `Failed` with reason `InsufficientGPUCapacity`.
-- `ReplaceOldest` and `ReplaceLowestPriority` set
-  `ReplacementNotImplemented` until the explicit drain and rollback workflow is
-  installed. No implicit eviction occurs.
+- `ReplaceOldest` and `ReplaceLowestPriority` opt into deterministic
+  single-GPU replacement. The incoming cache is prepared first, the selected
+  runtime is drained, and traffic switches only after the incoming runtime is
+  ready. A failed activation triggers a visible attempt to restore the prior
+  runtime.
+
+`ReplaceLowestPriority` only displaces a workload with a strictly lower
+priority. Replacement candidates are namespace-scoped so one tenant cannot
+evict another tenant's workload. Both workloads must use one replica and one
+GPU of the same vendor resource on the cache node. Because the old runtime
+must release the only GPU before the new runtime can start, single-GPU
+replacement has unavoidable downtime. `Queue` and `Reject` never enter this
+workflow.
+While the old runtime drains, the incoming deployment's `assignedNode` is a
+logical handoff reservation and `GPUAssigned` remains `Unknown`; this prevents
+another queued workload from taking the slot without claiming that Kubernetes
+has already assigned a physical device. The same reservation remains in force
+during rollback and is consumable only by the displaced deployment being
+restored.
 
 InferOps records the selected node in `status.assignedNode`. It does not invent
 physical GPU UUIDs; `status.assignedGPUs` remains empty unless a trusted

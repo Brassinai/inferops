@@ -414,6 +414,13 @@ func ValidateModelRuntime(runtime v1alpha1.ModelRuntime) error {
 	if runtime.Spec.Protocol == "" {
 		return errors.New("spec.protocol is required")
 	}
+	if runtime.Spec.Protocol != v1alpha1.ModelRuntimeProtocolOpenAI {
+		return fmt.Errorf(
+			"spec.protocol %q is unsupported; expected %q",
+			runtime.Spec.Protocol,
+			v1alpha1.ModelRuntimeProtocolOpenAI,
+		)
+	}
 	if runtime.Spec.DefaultImage == "" {
 		return errors.New("spec.defaultImage is required")
 	}

@@ -132,7 +132,9 @@ kubectl apply -f modeldeployment.yaml
 - [CLI reference](docs/cli.md)
 - [SDK reference](docs/sdk.md)
 - [CRD reference](docs/crds.md)
+- [Cluster and ingress support](docs/cluster-ingress.md)
 - [Production notes](docs/production.md)
+- [Namespace tenancy](docs/tenancy.md)
 - [Backup and disaster recovery](docs/disaster-recovery.md)
 
 ## Development

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	v1alpha1 "github.com/brassinai/inferops/operator/api/v1alpha1"
@@ -149,6 +150,28 @@ func TestResolvedRuntimeDoesNotAliasModelRuntime(t *testing.T) {
 	}
 	if got, want := second.Env["MODE"], "safe"; got != want {
 		t.Errorf("resolved env MODE = %q, want %q", got, want)
+	}
+}
+
+func TestResolveRejectsUnsupportedProtocol(t *testing.T) {
+	t.Parallel()
+	md := &v1alpha1.ModelDeployment{
+		ObjectMeta: newObjectMeta("qwen-chat"),
+		Spec: v1alpha1.ModelDeploymentSpec{
+			Runtime: v1alpha1.RuntimeSpec{Ref: "custom"},
+		},
+	}
+	modelRuntime := &v1alpha1.ModelRuntime{
+		ObjectMeta: newObjectMeta("custom"),
+		Spec: v1alpha1.ModelRuntimeSpec{
+			Engine:       "custom",
+			Protocol:     "grpc",
+			DefaultImage: "example.com/custom:v1",
+		},
+	}
+	_, err := NewResolver(fakeGetter{runtime: modelRuntime}).Resolve(context.Background(), md)
+	if err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("Resolve() error = %v, want unsupported protocol", err)
 	}
 }
 

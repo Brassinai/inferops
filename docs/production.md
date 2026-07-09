@@ -29,9 +29,11 @@ The operator needs:
 The gateway needs:
 
 - Read `ModelDeployment` and `Service`
-- Read referenced `Secret` for auth tokens
+- Receive the referenced auth `Secret` through a read-only projected volume
 
 Neither component needs cluster-admin. Keep roles namespace-scoped where possible.
+For per-team RoleBindings, quotas, and the supported shared-operator layout,
+see [Namespace tenancy](tenancy.md).
 
 ## Secrets
 
@@ -51,7 +53,10 @@ reproducible production release. Build the downloader locally with
 ## Network
 
 - Gateway exposes the OpenAI-compatible endpoint.
-- Use `NetworkPolicy` to restrict runtime pods to gateway traffic only.
+- The Helm charts enable NetworkPolicies that restrict runtime ingress to the
+  same-namespace gateway and deny runtime egress by default.
+- Set the exact Kubernetes API Service IP and narrow gateway ingress peers for
+  the target cluster as described in [Namespace tenancy](tenancy.md).
 - Use Tailscale or an ingress controller for external access; do not expose runtime pods directly.
 
 ## Monitoring
@@ -70,6 +75,10 @@ Watch these:
 | Activation failures | `inferops_activation_failures_total` |
 | Cache failures | `inferops_cache_download_failures_total` |
 | Request latency / errors | Gateway metrics |
+| Gateway request count | `inferops_gateway_requests_total` |
+| Gateway request latency | `inferops_gateway_request_duration_seconds` |
+| Gateway active requests | `inferops_gateway_active_requests` |
+| Gateway upstream failures | `inferops_gateway_upstream_errors_total` |
 | Runtime readiness | Engine `/health` |
 
 ## Upgrades
@@ -116,6 +125,8 @@ chart's `podDisruptionBudget` values after accepting the availability impact.
 
 - GPU slicing is not supported.
 - No hosted InferOps control plane; all components run in-cluster.
-- Replacement and rollback are not implemented until MVP-108; replacement
-  policy values fail safely instead of evicting a model.
+- Single-GPU replacement has unavoidable downtime while the current runtime
+  releases the GPU and the replacement becomes ready. Activation failures
+  trigger a best-effort rollback whose outcome is reported in status and
+  Events; operators must intervene when rollback also fails.
 - Advanced autoscaling and dashboard are not in month one.

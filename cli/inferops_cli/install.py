@@ -30,6 +30,57 @@ def register(subcommands) -> None:
         help="Expose the gateway through an installed Tailscale Kubernetes Operator.",
     )
     parser.add_argument(
+        "--exposure",
+        choices=("cluster-ip", "load-balancer", "ingress", "gateway-api"),
+        help=(
+            "Gateway exposure method. Defaults to cluster-ip unless "
+            "--tailscale-hostname is set."
+        ),
+    )
+    parser.add_argument(
+        "--ingress-class",
+        help="IngressClass name; requires --exposure ingress.",
+    )
+    parser.add_argument(
+        "--ingress-hostname",
+        help="Optional DNS hostname for --exposure ingress.",
+    )
+    parser.add_argument(
+        "--gateway-name",
+        help="Existing Gateway API Gateway name; requires --exposure gateway-api.",
+    )
+    parser.add_argument(
+        "--gateway-namespace",
+        help="Namespace of the referenced Gateway when it is not the install namespace.",
+    )
+    parser.add_argument(
+        "--gateway-section-name",
+        help="Optional Gateway listener name for the HTTPRoute parent reference.",
+    )
+    parser.add_argument(
+        "--gateway-hostname",
+        help="Optional HTTPRoute hostname for --exposure gateway-api.",
+    )
+    parser.add_argument(
+        "--load-balancer-class",
+        help="Optional Service loadBalancerClass; requires --exposure load-balancer.",
+    )
+    parser.add_argument(
+        "--gateway-auth-secret",
+        help=(
+            "Existing Secret containing the gateway bearer token. Required for "
+            "Ingress, Gateway API, and LoadBalancer exposure unless explicitly overridden."
+        ),
+    )
+    parser.add_argument(
+        "--allow-unauthenticated-exposure",
+        action="store_true",
+        help=(
+            "Explicitly allow external exposure without built-in gateway authentication. "
+            "Use only when equivalent authentication is enforced upstream."
+        ),
+    )
+    parser.add_argument(
         "--charts-dir",
         help="Path to the InferOps Helm charts. Usually detected automatically.",
     )
@@ -48,6 +99,18 @@ def run(args, client=None) -> int:
                 profile=getattr(args, "profile", "default"),
                 cache_path=getattr(args, "cache_path", None),
                 tailscale_hostname=getattr(args, "tailscale_hostname", None),
+                exposure=getattr(args, "exposure", None),
+                ingress_class=getattr(args, "ingress_class", None),
+                ingress_hostname=getattr(args, "ingress_hostname", None),
+                gateway_name=getattr(args, "gateway_name", None),
+                gateway_namespace=getattr(args, "gateway_namespace", None),
+                gateway_section_name=getattr(args, "gateway_section_name", None),
+                gateway_hostname=getattr(args, "gateway_hostname", None),
+                load_balancer_class=getattr(args, "load_balancer_class", None),
+                gateway_auth_secret=getattr(args, "gateway_auth_secret", None),
+                allow_unauthenticated_exposure=getattr(
+                    args, "allow_unauthenticated_exposure", False
+                ),
                 charts_dir=getattr(args, "charts_dir", None),
             )
         )

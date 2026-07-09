@@ -46,6 +46,15 @@ inferops install --profile homelab \
   --tailscale-hostname inferops
 ```
 
+For managed clusters, the install command also supports
+`--exposure load-balancer`, `--exposure ingress`, and
+`--exposure gateway-api`. These external methods require an existing bearer
+token Secret selected with `--gateway-auth-secret`, or an explicit
+`--allow-unauthenticated-exposure` acknowledgement when authentication is
+enforced upstream. Provider-specific controllers remain cluster prerequisites.
+See [Cluster and ingress support](cluster-ingress.md) for the complete flags,
+values, security constraints, and acceptance checks.
+
 InferOps does not install or guess host NVIDIA drivers, the NVIDIA Container
 Toolkit, a device plugin, k3s, or Tailscale. Those host and cluster
 prerequisites must be installed and verified independently.
@@ -64,6 +73,12 @@ The supplied ClusterRole grants only `get` on Secrets. The cache controller
 checks that a same-namespace referenced Secret contains the required key, but
 never logs or copies its value; the downloader Job receives the value through
 `secretKeyRef`.
+
+The charts enable operator, gateway, and runtime NetworkPolicies by default.
+The gateway chart also provides opt-in `tenancy.access`, `tenancy.quota`, and
+`tenancy.limitRange` resources for a team namespace. See
+[Namespace tenancy](tenancy.md) to configure the exact Kubernetes API Service
+IP before installation or binding users.
 
 The install profile does not choose the engine for every model. Each
 deployment selects a registered runtime and independently declares whether it
@@ -139,6 +154,10 @@ The existing `whenFull` policy is preserved unless `--when-full` is supplied.
 Replacement is never inferred: select `ReplaceOldest` or
 `ReplaceLowestPriority` explicitly to authorize replacement. If no GPU slot is
 free with `Queue`, the deployment reports `WaitingForGPU` and remains queued.
+Single-GPU replacement prepares the new cache before draining the selected
+runtime, but it still has unavoidable downtime because both runtimes cannot
+occupy the only GPU. Status and Events report replacement and rollback
+outcomes.
 
 ### deactivate
 
@@ -164,7 +183,9 @@ inferops status qwen-chat --watch --timeout 10m
 
 Status output is a safe summary of the ModelDeployment. It includes observed
 conditions, placement, replica state, cache state, and the endpoint, but never
-returns the `spec.secrets` field or Kubernetes Secret objects.
+returns the `spec.secrets` field or Kubernetes Secret objects. During a drain
+or replacement, JSON/YAML output also includes the sanitized
+`drainStartedAt` and `replacement` status fields.
 
 ### models
 

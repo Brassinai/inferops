@@ -21,6 +21,7 @@ func TestNormalize(t *testing.T) {
 		{name: "backslash", prefix: "/models/qwen\\other", wantErr: true},
 		{name: "health endpoint", prefix: "/healthz", wantErr: true},
 		{name: "readiness subtree", prefix: "/readyz/model", wantErr: true},
+		{name: "metrics endpoint", prefix: "/metrics", wantErr: true},
 	}
 	for _, test := range tests {
 		test := test

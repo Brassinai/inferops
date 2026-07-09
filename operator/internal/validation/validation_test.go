@@ -134,6 +134,7 @@ func TestValidateModelRuntime(t *testing.T) {
 		{name: "missing name", mutate: func(r *v1alpha1.ModelRuntime) { r.Name = "" }, wantErr: true},
 		{name: "missing engine", mutate: func(r *v1alpha1.ModelRuntime) { r.Spec.Engine = "" }, wantErr: true},
 		{name: "missing protocol", mutate: func(r *v1alpha1.ModelRuntime) { r.Spec.Protocol = "" }, wantErr: true},
+		{name: "unsupported protocol", mutate: func(r *v1alpha1.ModelRuntime) { r.Spec.Protocol = "grpc" }, wantErr: true},
 		{name: "missing defaultImage", mutate: func(r *v1alpha1.ModelRuntime) { r.Spec.DefaultImage = "" }, wantErr: true},
 		{name: "invalid port zero", mutate: func(r *v1alpha1.ModelRuntime) { r.Spec.Port = 0 }, wantErr: true},
 		{name: "invalid port too high", mutate: func(r *v1alpha1.ModelRuntime) { r.Spec.Port = 70000 }, wantErr: true},

@@ -1,0 +1,68 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "inferops-operator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inferops-operator.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "inferops-operator.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - {{- with .Values.networkPolicy.ingressFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      ports:
+        - port: metrics
+          protocol: TCP
+        - port: health
+          protocol: TCP
+        {{- if .Values.webhook.enabled }}
+        - port: webhook
+          protocol: TCP
+        {{- end }}
+  egress:
+    - to:
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.dns.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .Values.networkPolicy.dns.podSelector | nindent 12 }}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    {{- if not .Values.networkPolicy.apiServerCIDRs }}
+    {{- fail "networkPolicy.apiServerCIDRs must contain at least one Kubernetes API CIDR" }}
+    {{- end }}
+    - to:
+        {{- range .Values.networkPolicy.apiServerCIDRs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - port: 443
+          protocol: TCP
+    {{- if and (not .Values.gateway.drainStatusURL) .Values.gateway.drainStatus.enabled }}
+    - to:
+        {{- if .Values.gateway.drainStatus.serviceNamespace }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.gateway.drainStatus.serviceNamespace | quote }}
+          podSelector:
+            {{- toYaml .Values.networkPolicy.gatewayDrain.podSelector | nindent 12 }}
+        {{- else }}
+        - podSelector:
+            {{- toYaml .Values.networkPolicy.gatewayDrain.podSelector | nindent 12 }}
+        {{- end }}
+      ports:
+        - port: {{ .Values.gateway.drainStatus.port }}
+          protocol: TCP
+    {{- end }}
+{{- end }}

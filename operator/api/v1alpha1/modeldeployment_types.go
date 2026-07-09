@@ -3,6 +3,7 @@ package v1alpha1
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // ModelDeployment describes a desired inference runtime model endpoint.
@@ -47,11 +48,46 @@ type ModelDeploymentStatus struct {
 	ServiceName        string               `json:"serviceName,omitempty"`
 	AssignedNode       string               `json:"assignedNode,omitempty"`
 	AssignedGPUs       []string             `json:"assignedGPUs,omitempty"`
+	DrainStartedAt     *metav1.Time         `json:"drainStartedAt,omitempty"`
+	Replacement        *ReplacementStatus   `json:"replacement,omitempty"`
 	Cache              ModelCacheSummary    `json:"cache,omitempty"`
 	Replicas           ReplicaStatus        `json:"replicas,omitempty"`
 	Model              ModelStatus          `json:"model,omitempty"`
 	Conditions         []Condition          `json:"conditions,omitempty"`
 }
+
+// ReplacementStatus records a durable, controller-owned single-GPU
+// replacement transaction. Target is set on the incoming deployment and
+// RequestedBy is set on the deployment whose runtime is being displaced.
+type ReplacementStatus struct {
+	Phase             ReplacementPhase      `json:"phase,omitempty"`
+	RequestGeneration int64                 `json:"requestGeneration,omitempty"`
+	Target            *ReplacementReference `json:"target,omitempty"`
+	RequestedBy       *ReplacementReference `json:"requestedBy,omitempty"`
+	StartedAt         *metav1.Time          `json:"startedAt,omitempty"`
+	Message           string                `json:"message,omitempty"`
+}
+
+// ReplacementReference identifies one participant in a replacement
+// transaction and protects the transaction from name reuse.
+type ReplacementReference struct {
+	Namespace string    `json:"namespace"`
+	Name      string    `json:"name"`
+	UID       types.UID `json:"uid"`
+}
+
+// ReplacementPhase is the observed state of a replacement transaction.
+type ReplacementPhase string
+
+const (
+	ReplacementPhaseDraining       ReplacementPhase = "Draining"
+	ReplacementPhaseActivating     ReplacementPhase = "Activating"
+	ReplacementPhaseSucceeded      ReplacementPhase = "Succeeded"
+	ReplacementPhaseDisplaced      ReplacementPhase = "Displaced"
+	ReplacementPhaseRollingBack    ReplacementPhase = "RollingBack"
+	ReplacementPhaseRolledBack     ReplacementPhase = "RolledBack"
+	ReplacementPhaseRollbackFailed ReplacementPhase = "RollbackFailed"
+)
 
 // Well-known condition types for ModelDeployment status.
 const (
@@ -76,9 +112,9 @@ const (
 	// ConditionRoutingReady indicates whether the stable Service may receive
 	// traffic from the gateway.
 	ConditionRoutingReady = "RoutingReady"
-	// ConditionDrainComplete indicates whether a requested drain finished before
-	// the configured timeout.
-	ConditionDrainComplete = "DrainComplete"
+	// ConditionReplacement reports an explicitly requested single-GPU
+	// replacement and any rollback attempt.
+	ConditionReplacement = "Replacement"
 	// ConditionReady aggregates the overall readiness of the deployment.
 	ConditionReady = "Ready"
 )
@@ -104,15 +140,29 @@ const (
 	ReasonInsufficientGPU     = "InsufficientGPUCapacity"
 	ReasonInsufficientCompute = "InsufficientComputeCapacity"
 	ReasonSchedulingBlocked   = "SchedulingConstraintsUnsatisfied"
-	ReasonReplacementPending  = "ReplacementNotImplemented"
-	ReasonRuntimeCreating     = "RuntimeCreating"
-	ReasonRuntimeReady        = "RuntimeReady"
-	ReasonRuntimeUnavailable  = "RuntimeUnavailable"
-	ReasonRouteEnabled        = "RouteEnabled"
-	ReasonRouteDisabled       = "RouteDisabled"
-	ReasonDraining            = "Draining"
-	ReasonDrainComplete       = "DrainComplete"
-	ReasonDrainTimedOut       = "DrainTimedOut"
+	// ReasonReplacementPending is retained for clients compiled against the
+	// pre-replacement API. The lifecycle controller no longer emits it.
+	ReasonReplacementPending          = "ReplacementNotImplemented"
+	ReasonDrainStarted                = "DrainStarted"
+	ReasonDrainComplete               = "DrainComplete"
+	ReasonDeactivationStarted         = "DeactivationStarted"
+	ReasonReplacementStarted          = "ReplacementStarted"
+	ReasonReplacementCanceled         = "ReplacementCanceled"
+	ReasonReplacementDraining         = "ReplacementDraining"
+	ReasonReplacementActivating       = "ReplacementActivating"
+	ReasonReplacementSucceeded        = "ReplacementSucceeded"
+	ReasonReplacementUnsupported      = "ReplacementUnsupported"
+	ReasonReplacementNoCandidate      = "ReplacementNoCandidate"
+	ReasonReplacementDisplaced        = "ReplacedByWorkload"
+	ReasonReplacementActivationFailed = "ReplacementActivationFailed"
+	ReasonReplacementRollbackStarted  = "ReplacementRollbackStarted"
+	ReasonReplacementRolledBack       = "ReplacementRolledBack"
+	ReasonReplacementRollbackFailed   = "ReplacementRollbackFailed"
+	ReasonRuntimeCreating             = "RuntimeCreating"
+	ReasonRuntimeReady                = "RuntimeReady"
+	ReasonRuntimeUnavailable          = "RuntimeUnavailable"
+	ReasonRouteEnabled                = "RouteEnabled"
+	ReasonRouteDisabled               = "RouteDisabled"
 )
 
 // ModelDeploymentPhase is the observed lifecycle phase of a model deployment.
@@ -424,12 +474,45 @@ func (in *ModelDeploymentStatus) DeepCopyInto(out *ModelDeploymentStatus) {
 		out.AssignedGPUs = make([]string, len(in.AssignedGPUs))
 		copy(out.AssignedGPUs, in.AssignedGPUs)
 	}
+	if in.DrainStartedAt != nil {
+		out.DrainStartedAt = in.DrainStartedAt.DeepCopy()
+	}
+	if in.Replacement != nil {
+		out.Replacement = new(ReplacementStatus)
+		in.Replacement.DeepCopyInto(out.Replacement)
+	}
 	if in.Conditions != nil {
 		out.Conditions = make([]Condition, len(in.Conditions))
 		for i := range in.Conditions {
 			in.Conditions[i].DeepCopyInto(&out.Conditions[i])
 		}
 	}
+}
+
+// DeepCopyInto copies the receiver, writing into out.
+func (in *ReplacementStatus) DeepCopyInto(out *ReplacementStatus) {
+	*out = *in
+	if in.Target != nil {
+		out.Target = new(ReplacementReference)
+		*out.Target = *in.Target
+	}
+	if in.RequestedBy != nil {
+		out.RequestedBy = new(ReplacementReference)
+		*out.RequestedBy = *in.RequestedBy
+	}
+	if in.StartedAt != nil {
+		out.StartedAt = in.StartedAt.DeepCopy()
+	}
+}
+
+// DeepCopy creates a copy.
+func (in *ReplacementStatus) DeepCopy() *ReplacementStatus {
+	if in == nil {
+		return nil
+	}
+	out := new(ReplacementStatus)
+	in.DeepCopyInto(out)
+	return out
 }
 
 // DeepCopy creates a copy.

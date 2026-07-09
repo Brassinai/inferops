@@ -1,0 +1,12 @@
+apiVersion: inference.inferops.dev/v1alpha1
+kind: ModelRuntime
+metadata:
+  name: custom-fastapi
+spec:
+  engine: custom-fastapi
+  protocol: openai
+  defaultImage: inferops/custom-fastapi:0.0.0
+  port: 8000
+  healthPath: /health
+  readinessPath: /ready
+  metricsPath: /metrics

@@ -19,6 +19,16 @@ DEFAULT_RELEASES = ("inferops-operator", "inferops-gateway")
 DEFAULT_TIMEOUT = "5m"
 CRD_FIELD_MANAGER = "inferops-cli"
 TAILSCALE_HOSTNAME = re.compile(r"^[a-z](?:[a-z0-9-]*[a-z])?$")
+DNS_SUBDOMAIN = re.compile(
+    r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$"
+)
+DNS_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$")
+QUALIFIED_NAME = re.compile(
+    r"^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*/)?"
+    r"[A-Za-z0-9](?:[-_.A-Za-z0-9]*[A-Za-z0-9])?$"
+)
+EXPOSURE_METHODS = {"cluster-ip", "load-balancer", "ingress", "gateway-api"}
 
 CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 
@@ -38,6 +48,7 @@ class HelmInstaller:
         _validate_cache_root(cache_root)
         if request.tailscale_hostname:
             _validate_tailscale_hostname(request.tailscale_hostname)
+        exposure = _validate_exposure(request)
         charts_dir = _resolve_charts_dir(request.charts_dir)
         crds_dir = charts_dir / "inferops-operator" / "crds"
         if not crds_dir.is_dir() or not any(crds_dir.glob("*.yaml")):
@@ -98,6 +109,12 @@ class HelmInstaller:
         ]
         if request.tailscale_hostname:
             resources.append("ingress/inferops-gateway-tailscale")
+        elif exposure == "ingress":
+            resources.append("ingress/inferops-gateway")
+        elif exposure == "gateway-api":
+            resources.append("httproute/inferops-gateway")
+        elif exposure == "load-balancer":
+            resources.append("service/inferops-gateway")
 
         return {
             "cluster": request.cluster.to_safe_dict(),
@@ -106,6 +123,8 @@ class HelmInstaller:
                 "namespace": request.cluster.namespace,
                 "cachePath": cache_root,
                 "tailscaleHostname": request.tailscale_hostname,
+                "exposure": exposure,
+                "authEnabled": bool(request.gateway_auth_secret),
                 "resources": resources,
                 "crds": {
                     "status": "applied",
@@ -175,16 +194,95 @@ def _build_upgrade_command(
                 f"profile={request.profile}",
             )
         )
-    elif request.tailscale_hostname:
-        command.extend(
+    else:
+        command.extend(_gateway_exposure_values(request))
+        command.extend(_gateway_auth_values(request))
+    return command
+
+
+def _gateway_exposure_values(request: InstallRequest) -> list[str]:
+    if request.tailscale_hostname:
+        return [
+            "--set",
+            "tailscale.enabled=true",
+            "--set-string",
+            f"tailscale.hostname={_escape_helm_string(request.tailscale_hostname)}",
+        ]
+
+    exposure = request.exposure or "cluster-ip"
+    if exposure == "cluster-ip":
+        return []
+    if exposure == "load-balancer":
+        values = ["--set-string", "service.type=LoadBalancer"]
+        if request.load_balancer_class:
+            values.extend(
+                (
+                    "--set-string",
+                    "service.loadBalancerClass="
+                    + _escape_helm_string(request.load_balancer_class),
+                )
+            )
+        return values
+    if exposure == "ingress":
+        values = [
+            "--set",
+            "ingress.enabled=true",
+            "--set-string",
+            "ingress.className=" + _escape_helm_string(request.ingress_class or ""),
+        ]
+        if request.ingress_hostname:
+            values.extend(
+                (
+                    "--set-string",
+                    "ingress.hostname="
+                    + _escape_helm_string(request.ingress_hostname),
+                )
+            )
+        return values
+
+    values = [
+        "--set",
+        "gatewayAPI.enabled=true",
+        "--set-string",
+        "gatewayAPI.parentRefs[0].name="
+        + _escape_helm_string(request.gateway_name or ""),
+    ]
+    if request.gateway_namespace:
+        values.extend(
             (
-                "--set",
-                "tailscale.enabled=true",
                 "--set-string",
-                f"tailscale.hostname={_escape_helm_string(request.tailscale_hostname)}",
+                "gatewayAPI.parentRefs[0].namespace="
+                + _escape_helm_string(request.gateway_namespace),
             )
         )
-    return command
+    if request.gateway_section_name:
+        values.extend(
+            (
+                "--set-string",
+                "gatewayAPI.parentRefs[0].sectionName="
+                + _escape_helm_string(request.gateway_section_name),
+            )
+        )
+    if request.gateway_hostname:
+        values.extend(
+            (
+                "--set-string",
+                "gatewayAPI.hostnames[0]="
+                + _escape_helm_string(request.gateway_hostname),
+            )
+        )
+    return values
+
+
+def _gateway_auth_values(request: InstallRequest) -> list[str]:
+    if not request.gateway_auth_secret:
+        return []
+    return [
+        "--set",
+        "auth.enabled=true",
+        "--set-string",
+        "auth.secretName=" + _escape_helm_string(request.gateway_auth_secret),
+    ]
 
 
 def _resolve_charts_dir(explicit_path: str | None) -> Path:
@@ -253,6 +351,97 @@ def _validate_tailscale_hostname(hostname: str) -> None:
         raise CLIError(
             "Tailscale hostname must be at most 63 characters, start and end "
             "with a lowercase letter, and contain only letters, digits, and hyphens"
+        )
+
+
+def _validate_exposure(request: InstallRequest) -> str:
+    exposure = request.exposure or (
+        "tailscale" if request.tailscale_hostname else "cluster-ip"
+    )
+    if request.exposure is not None and request.exposure not in EXPOSURE_METHODS:
+        raise CLIError(f"unsupported gateway exposure: {request.exposure}")
+    if request.tailscale_hostname and request.exposure is not None:
+        raise CLIError(
+            "--tailscale-hostname cannot be combined with --exposure; choose one exposure method"
+        )
+
+    ingress_values = (request.ingress_class, request.ingress_hostname)
+    gateway_values = (
+        request.gateway_name,
+        request.gateway_namespace,
+        request.gateway_section_name,
+        request.gateway_hostname,
+    )
+    if exposure == "ingress":
+        if not request.ingress_class:
+            raise CLIError("--ingress-class is required with --exposure ingress")
+    elif any(ingress_values):
+        raise CLIError(
+            "--ingress-class and --ingress-hostname require --exposure ingress"
+        )
+
+    if exposure == "gateway-api":
+        if not request.gateway_name:
+            raise CLIError("--gateway-name is required with --exposure gateway-api")
+    elif any(gateway_values):
+        raise CLIError("Gateway options require --exposure gateway-api")
+
+    if exposure != "load-balancer" and request.load_balancer_class:
+        raise CLIError(
+            "--load-balancer-class requires --exposure load-balancer"
+        )
+    external_exposures = {"ingress", "gateway-api", "load-balancer"}
+    if (
+        exposure in external_exposures
+        and not request.gateway_auth_secret
+        and not request.allow_unauthenticated_exposure
+    ):
+        raise CLIError(
+            "external gateway exposure requires --gateway-auth-secret or an "
+            "explicit --allow-unauthenticated-exposure acknowledgement"
+        )
+    if request.allow_unauthenticated_exposure and exposure not in external_exposures:
+        raise CLIError(
+            "--allow-unauthenticated-exposure requires an external --exposure method"
+        )
+
+    for label, value in (
+        ("IngressClass", request.ingress_class),
+        ("ingress hostname", request.ingress_hostname),
+        ("Gateway name", request.gateway_name),
+        ("Gateway hostname", request.gateway_hostname),
+        ("gateway auth Secret", request.gateway_auth_secret),
+    ):
+        if value:
+            _validate_dns_subdomain(label, value)
+    for label, value in (
+        ("Gateway namespace", request.gateway_namespace),
+        ("Gateway listener", request.gateway_section_name),
+    ):
+        if value:
+            _validate_dns_label(label, value)
+    if request.load_balancer_class and (
+        len(request.load_balancer_class) > 253
+        or not QUALIFIED_NAME.fullmatch(request.load_balancer_class)
+    ):
+        raise CLIError(
+            "load balancer class must be a valid Kubernetes qualified name"
+        )
+    return exposure
+
+
+def _validate_dns_subdomain(label: str, value: str) -> None:
+    candidate = value[2:] if value.startswith("*.") else value
+    if len(value) > 253 or not DNS_SUBDOMAIN.fullmatch(candidate):
+        raise CLIError(
+            f"{label} must be a valid lowercase Kubernetes DNS name"
+        )
+
+
+def _validate_dns_label(label: str, value: str) -> None:
+    if len(value) > 63 or not DNS_LABEL.fullmatch(value):
+        raise CLIError(
+            f"{label} must be a valid lowercase Kubernetes DNS label"
         )
 
 
