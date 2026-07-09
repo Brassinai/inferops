@@ -144,6 +144,7 @@ func (r *ModelDeploymentController) reconcileDeactivation(
 	deployment.Status.AssignedNode = ""
 	deployment.Status.AssignedGPUs = nil
 	deployment.Status.Replicas = v1alpha1.ReplicaStatus{}
+	deployment.Status.Scaling = v1alpha1.ScalingStatus{}
 	deployment.Status.Model.Loaded = false
 	stateMessage := "Model is cached and inactive"
 	runtimeMessage := "Runtime is not created while the deployment is inactive"

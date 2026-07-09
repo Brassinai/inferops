@@ -197,10 +197,7 @@ func (b Builder) BuildRuntimeDeployment(
 
 	replicas := int32(0)
 	if active {
-		replicas = md.Spec.Scaling.MinReplicas
-		if replicas == 0 {
-			replicas = 1
-		}
+		replicas = runtimeReplicas(md)
 	}
 	progressDeadlineSeconds := runtimeProgressDeadlineSeconds
 	automountServiceAccountToken := false
@@ -276,10 +273,7 @@ func BuildRuntimePodDisruptionBudget(
 		return nil, nil
 	}
 
-	replicas := md.Spec.Scaling.MinReplicas
-	if replicas < 1 {
-		replicas = 1
-	}
+	replicas := runtimeReplicas(md)
 	minAvailable := replicas - 1
 	if minAvailable < 1 {
 		minAvailable = 1
@@ -320,6 +314,24 @@ func BuildRuntimePodDisruptionBudget(
 func podDisruptionBudgetEnabled(md *v1alpha1.ModelDeployment) bool {
 	enabled := md.Spec.Availability.PodDisruptionBudget.Enabled
 	return enabled == nil || *enabled
+}
+
+func runtimeReplicas(md *v1alpha1.ModelDeployment) int32 {
+	replicas := md.Spec.Scaling.MinReplicas
+	if md.Status.Scaling.DesiredReplicas > 0 {
+		replicas = md.Status.Scaling.DesiredReplicas
+	}
+	if replicas < 1 {
+		replicas = 1
+	}
+	maxReplicas := md.Spec.Scaling.MaxReplicas
+	if maxReplicas < 1 {
+		maxReplicas = 1
+	}
+	if replicas > maxReplicas {
+		return maxReplicas
+	}
+	return replicas
 }
 
 func buildTolerations(input []v1alpha1.Toleration) []corev1.Toleration {

@@ -61,10 +61,7 @@ func ValidateRuntimeNode(
 		}
 	}
 
-	replicas := int64(deployment.Spec.Scaling.MinReplicas)
-	if replicas < 1 {
-		replicas = 1
-	}
+	replicas := runtimeReplicaCount(deployment)
 	for _, requested := range []struct {
 		name  corev1.ResourceName
 		value string
@@ -96,6 +93,17 @@ func ValidateRuntimeNode(
 		}
 	}
 	return nil
+}
+
+func runtimeReplicaCount(deployment *v1alpha1.ModelDeployment) int64 {
+	replicas := int64(deployment.Status.Scaling.DesiredReplicas)
+	if replicas < 1 {
+		replicas = int64(deployment.Spec.Scaling.MinReplicas)
+	}
+	if replicas < 1 {
+		return 1
+	}
+	return replicas
 }
 
 func isTaintTolerated(taint corev1.Taint, tolerations []v1alpha1.Toleration) bool {

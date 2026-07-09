@@ -50,6 +50,7 @@ type ModelDeploymentControllerConfig struct {
 	GPUNodeSelector  map[string]string
 	GPUTypeLabel     string
 	DrainChecker     DrainChecker
+	MetricsScraper   RuntimeMetricsScraper
 }
 
 // ModelDeploymentController reconciles ModelDeployment resources into stable
@@ -64,6 +65,7 @@ type ModelDeploymentController struct {
 	eventRecorder    record.EventRecorder
 	metrics          controllermetrics.Recorder
 	drainChecker     DrainChecker
+	metricsScraper   RuntimeMetricsScraper
 	// queueMetricDirty is safe without a mutex because SetupWithManager
 	// serializes this controller's reconciliations.
 	queueMetricDirty bool
@@ -110,6 +112,9 @@ func NewModelDeploymentController(
 	if metricsRecorder == nil {
 		metricsRecorder = controllermetrics.NoOpRecorder{}
 	}
+	if config.MetricsScraper == nil {
+		config.MetricsScraper = NewHTTPRuntimeMetricsScraper()
+	}
 	getter := kubernetesRuntimeGetter{client: c}
 	return &ModelDeploymentController{
 		client:  c,
@@ -125,6 +130,7 @@ func NewModelDeploymentController(
 		eventRecorder:    eventRecorder,
 		metrics:          metricsRecorder,
 		drainChecker:     config.DrainChecker,
+		metricsScraper:   config.MetricsScraper,
 	}, nil
 }
 
@@ -213,6 +219,7 @@ func (r *ModelDeploymentController) reconcile(
 		deployment.Status.AssignedNode = ""
 		deployment.Status.AssignedGPUs = nil
 		deployment.Status.Replicas = v1alpha1.ReplicaStatus{}
+		deployment.Status.Scaling = v1alpha1.ScalingStatus{}
 		deployment.Status.Model.Loaded = false
 		if blockedByValidation {
 			setDeploymentCondition(
@@ -308,6 +315,7 @@ func (r *ModelDeploymentController) reconcile(
 		deployment.Status.AssignedNode = ""
 		deployment.Status.AssignedGPUs = nil
 		deployment.Status.Replicas = v1alpha1.ReplicaStatus{}
+		deployment.Status.Scaling = v1alpha1.ScalingStatus{}
 		deployment.Status.Model.Loaded = false
 		deployment.Status.Cache = v1alpha1.ModelCacheSummary{
 			State:    string(cache.Status.Phase),
@@ -358,6 +366,46 @@ func (r *ModelDeploymentController) reconcile(
 	deployment.Status.DrainStartedAt = nil
 
 	assignedNode := cacheResult.NodeName
+	if err := r.planRuntimeReplicas(ctx, deployment, original, modelRuntime, assignedNode); err != nil {
+		return ctrl.Result{}, err
+	}
+	if deployment.Status.Scaling.DesiredReplicas == 0 {
+		scaledToZero := deployment.DeepCopy()
+		scaledToZero.Spec.Activation.DesiredState = v1alpha1.ActivationDesiredStateInactive
+		if _, err := r.deleteRuntimePodDisruptionBudget(ctx, deployment); err != nil {
+			return ctrl.Result{}, err
+		}
+		if _, _, err := r.ensureRuntimeDeployment(
+			ctx,
+			scaledToZero,
+			modelRuntime,
+			assignedNode,
+			cacheResult.Path,
+		); err != nil {
+			if !errors.Is(err, errPermanentLifecycle) {
+				return ctrl.Result{}, err
+			}
+			if _, deleteErr := r.deleteRuntimeWorkload(ctx, deployment); deleteErr != nil {
+				return ctrl.Result{}, deleteErr
+			}
+			return r.failDeployment(ctx, deployment, original, v1alpha1.ReasonRuntimeUnavailable, err.Error())
+		}
+		deployment.Status.Phase = v1alpha1.ModelDeploymentPhaseCached
+		deployment.Status.Replicas = v1alpha1.ReplicaStatus{Desired: 0, Ready: 0}
+		deployment.Status.Model.Loaded = false
+		setDeploymentCondition(deployment, v1alpha1.ConditionRuntimeReady, metav1.ConditionFalse,
+			v1alpha1.ReasonIdleScaledToZero, "Runtime is scaled to zero after the configured idle timeout")
+		setDeploymentCondition(deployment, v1alpha1.ConditionModelLoaded, metav1.ConditionFalse,
+			v1alpha1.ReasonIdleScaledToZero, "Model is cached but no runtime replica is running")
+		setDeploymentCondition(deployment, v1alpha1.ConditionRoutingReady, metav1.ConditionFalse,
+			v1alpha1.ReasonRouteDisabled, "Gateway routing waits for a ready runtime replica")
+		setReadyFalse(&deployment.Status, v1alpha1.ReasonIdleScaledToZero, "Model is cached and scaled to zero")
+		result, err := r.patchDeploymentStatus(ctx, deployment, original, v1alpha1.ReasonIdleScaledToZero)
+		if err == nil {
+			result.RequeueAfter = scalingRequeueAfter(deployment)
+		}
+		return result, err
+	}
 	var runtimeNode corev1.Node
 	if deployment.Spec.Resources.GPU != nil {
 		placement, err := r.reserveGPU(ctx, deployment, cacheResult.NodeName)
@@ -835,22 +883,13 @@ func (r *ModelDeploymentController) deleteRuntimeWorkload(
 	deployment *v1alpha1.ModelDeployment,
 ) (bool, error) {
 	deleted := false
-	pdb := &policyv1.PodDisruptionBudget{}
 	key := types.NamespacedName{
 		Namespace: deployment.Namespace,
 		Name:      templates.RuntimeServiceName(deployment.Name),
 	}
-	if err := r.client.Get(ctx, key, pdb); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("get runtime PodDisruptionBudget for deletion: %w", err)
-		}
-	} else {
-		if err := assertControlledBy(pdb, deployment); err != nil {
-			return false, err
-		}
-		if err := r.client.Delete(ctx, pdb); err != nil && !apierrors.IsNotFound(err) {
-			return false, fmt.Errorf("delete runtime PodDisruptionBudget: %w", err)
-		}
+	if pdbDeleted, err := r.deleteRuntimePodDisruptionBudget(ctx, deployment); err != nil {
+		return false, err
+	} else if pdbDeleted {
 		deleted = true
 	}
 
@@ -871,6 +910,30 @@ func (r *ModelDeploymentController) deleteRuntimeWorkload(
 		if !apierrors.IsNotFound(err) {
 			return false, fmt.Errorf("delete runtime Deployment: %w", err)
 		}
+	}
+	return true, nil
+}
+
+func (r *ModelDeploymentController) deleteRuntimePodDisruptionBudget(
+	ctx context.Context,
+	deployment *v1alpha1.ModelDeployment,
+) (bool, error) {
+	pdb := &policyv1.PodDisruptionBudget{}
+	key := types.NamespacedName{
+		Namespace: deployment.Namespace,
+		Name:      templates.RuntimeServiceName(deployment.Name),
+	}
+	if err := r.client.Get(ctx, key, pdb); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("get runtime PodDisruptionBudget for deletion: %w", err)
+	}
+	if err := assertControlledBy(pdb, deployment); err != nil {
+		return false, err
+	}
+	if err := r.client.Delete(ctx, pdb); err != nil && !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("delete runtime PodDisruptionBudget: %w", err)
 	}
 	return true, nil
 }
@@ -1105,6 +1168,167 @@ func (r *ModelDeploymentController) handleGPUCapacityError(
 	}
 }
 
+func (r *ModelDeploymentController) planRuntimeReplicas(
+	ctx context.Context,
+	deployment, original *v1alpha1.ModelDeployment,
+	modelRuntime *v1alpha1.ModelRuntime,
+	cacheNode string,
+) error {
+	desired := baseRuntimeReplicas(deployment)
+	scaling := v1alpha1.ScalingStatus{
+		DesiredReplicas:  desired,
+		LastActivityTime: copyTimePointer(original.Status.Scaling.LastActivityTime),
+	}
+	if autoscalingEnabled(deployment) {
+		planned, observed, err := r.desiredReplicasFromRuntimeMetrics(ctx, deployment, original, modelRuntime, desired)
+		scaling.PendingRequests = observed.PendingRequests
+		scaling.RunningRequests = observed.RunningRequests
+		if err != nil {
+			scaling.Reason = v1alpha1.ReasonScalingMetricsUnavailable
+			scaling.Message = err.Error()
+		} else {
+			desired = planned
+			scaling.DesiredReplicas = desired
+			if desired == 0 {
+				scaling.Reason = v1alpha1.ReasonIdleScaledToZero
+				scaling.Message = "Runtime is held at zero replicas after the configured idle timeout"
+			}
+			if observed.PendingRequests > 0 || observed.RunningRequests > 0 {
+				now := metav1.Now()
+				scaling.LastActivityTime = &now
+			} else if scaling.LastActivityTime == nil {
+				now := metav1.Now()
+				scaling.LastActivityTime = &now
+			}
+		}
+	}
+	if deployment.Spec.Resources.GPU != nil && desired > 0 {
+		capped, limited, err := r.capReplicasByGPUCapacity(ctx, deployment, cacheNode, desired)
+		if err != nil {
+			return err
+		}
+		desired = capped
+		scaling.DesiredReplicas = capped
+		scaling.CapacityLimited = limited
+		if limited {
+			scaling.Reason = v1alpha1.ReasonScalingCapacityCapped
+			scaling.Message = fmt.Sprintf("Desired replicas capped at %d by compatible GPU capacity", capped)
+		}
+	}
+	deployment.Status.Scaling = scaling
+	return nil
+}
+
+func (r *ModelDeploymentController) desiredReplicasFromRuntimeMetrics(
+	ctx context.Context,
+	deployment, original *v1alpha1.ModelDeployment,
+	modelRuntime *v1alpha1.ModelRuntime,
+	floor int32,
+) (int32, RuntimeMetrics, error) {
+	if r.metricsScraper == nil {
+		return floor, RuntimeMetrics{}, errors.New("runtime metrics scraper is not configured")
+	}
+	if shouldHoldIdleScaleToZero(original) {
+		return 0, RuntimeMetrics{}, nil
+	}
+	port := modelRuntime.Spec.Port
+	if port == 0 {
+		port = templates.RuntimeHTTPPort
+	}
+	metricsPath := modelRuntime.Spec.MetricsPath
+	if metricsPath == "" {
+		metricsPath = templates.RuntimeMetricsPath
+	}
+	observed, err := r.metricsScraper.ScrapeRuntimeMetrics(
+		ctx,
+		deployment.Namespace,
+		templates.RuntimeServiceName(deployment.Name),
+		port,
+		metricsPath,
+	)
+	if err != nil {
+		return floor, RuntimeMetrics{}, err
+	}
+
+	desired := floor
+	if target := deployment.Spec.Scaling.TargetPendingRequests; target > 0 && observed.PendingRequests > 0 {
+		current := original.Status.Replicas.Desired
+		if current < floor {
+			current = floor
+		}
+		scaleUp := int32((observed.PendingRequests + int64(target) - 1) / int64(target))
+		desired = current + scaleUp
+	}
+	maxReplicas := effectiveMaxReplicas(deployment)
+	if desired > maxReplicas {
+		desired = maxReplicas
+	}
+	if desired < floor {
+		desired = floor
+	}
+
+	if timeout, ok := effectiveIdleTimeout(deployment); ok &&
+		deployment.Spec.Scaling.MinReplicas == 0 &&
+		observed.PendingRequests == 0 &&
+		observed.RunningRequests == 0 {
+		lastActivity := original.Status.Scaling.LastActivityTime
+		if lastActivity != nil && time.Since(lastActivity.Time) >= timeout {
+			desired = 0
+		}
+	}
+	return desired, observed, nil
+}
+
+func (r *ModelDeploymentController) capReplicasByGPUCapacity(
+	ctx context.Context,
+	deployment *v1alpha1.ModelDeployment,
+	cacheNode string,
+	desired int32,
+) (int32, bool, error) {
+	if deployment.Spec.Resources.GPU == nil || desired <= 0 {
+		return desired, false, nil
+	}
+	var nodeList corev1.NodeList
+	if err := r.client.List(ctx, &nodeList); err != nil {
+		return 0, false, fmt.Errorf("list Nodes for replica capacity: %w", err)
+	}
+	nodes := nodeList.Items
+	if cacheNode != "" {
+		filtered := make([]corev1.Node, 0, 1)
+		for i := range nodes {
+			if nodes[i].Name == cacheNode {
+				filtered = append(filtered, nodes[i])
+			}
+		}
+		nodes = filtered
+	}
+	allocations, err := r.gpuAllocations(ctx, deployment)
+	if err != nil {
+		return 0, false, err
+	}
+	perReplica := int64(deployment.Spec.Resources.GPU.Count)
+	if perReplica < 1 {
+		perReplica = 1
+	}
+	placement, err := r.gpuPlanner.Plan(scheduler.GPURequest{
+		ResourceName:  gpuResourceName(deployment),
+		Count:         perReplica,
+		Type:          deployment.Spec.Resources.GPU.Type,
+		PreferredNode: cacheNode,
+	}, nodes, allocations)
+	if err != nil {
+		return desired, false, nil
+	}
+	maxByCapacity := int32(placement.Available / perReplica)
+	if maxByCapacity < desired {
+		if maxByCapacity < baseRuntimeReplicas(deployment) {
+			return desired, false, nil
+		}
+		return maxByCapacity, true, nil
+	}
+	return desired, false, nil
+}
+
 func (r *ModelDeploymentController) projectRuntimeDeployment(
 	ctx context.Context,
 	deployment, original *v1alpha1.ModelDeployment,
@@ -1161,6 +1385,9 @@ func (r *ModelDeploymentController) projectRuntimeDeployment(
 				r.metrics.ObserveActivationDuration(duration)
 			}
 		}
+		if err == nil && scalingRequeueAfter(deployment) > 0 {
+			result.RequeueAfter = scalingRequeueAfter(deployment)
+		}
 		return result, err
 	}
 	if message, failed := runtimeActivationFailure(runtimeDeployment); failed {
@@ -1195,7 +1422,11 @@ func (r *ModelDeploymentController) projectRuntimeDeployment(
 	if created || original.Status.Phase != v1alpha1.ModelDeploymentPhaseActivating {
 		reason = v1alpha1.ReasonRuntimeCreating
 	}
-	return r.patchDeploymentStatus(ctx, deployment, original, reason)
+	result, err := r.patchDeploymentStatus(ctx, deployment, original, reason)
+	if err == nil && scalingRequeueAfter(deployment) > 0 {
+		result.RequeueAfter = scalingRequeueAfter(deployment)
+	}
+	return result, err
 }
 
 func (r *ModelDeploymentController) projectReadyCache(
@@ -1398,11 +1629,70 @@ func effectiveWhenFull(deployment *v1alpha1.ModelDeployment) v1alpha1.Activation
 }
 
 func effectiveRuntimeReplicas(deployment *v1alpha1.ModelDeployment) int32 {
+	if deployment.Status.Scaling.DesiredReplicas > 0 {
+		maxReplicas := effectiveMaxReplicas(deployment)
+		if deployment.Status.Scaling.DesiredReplicas <= maxReplicas {
+			return deployment.Status.Scaling.DesiredReplicas
+		}
+		return maxReplicas
+	}
+	return baseRuntimeReplicas(deployment)
+}
+
+func baseRuntimeReplicas(deployment *v1alpha1.ModelDeployment) int32 {
 	replicas := deployment.Spec.Scaling.MinReplicas
 	if replicas < 1 {
 		replicas = 1
 	}
+	maxReplicas := effectiveMaxReplicas(deployment)
+	if replicas > maxReplicas {
+		return maxReplicas
+	}
 	return replicas
+}
+
+func effectiveMaxReplicas(deployment *v1alpha1.ModelDeployment) int32 {
+	if deployment.Spec.Scaling.MaxReplicas < 1 {
+		return 1
+	}
+	return deployment.Spec.Scaling.MaxReplicas
+}
+
+func autoscalingEnabled(deployment *v1alpha1.ModelDeployment) bool {
+	return deployment.Spec.Scaling.TargetPendingRequests > 0 ||
+		deployment.Spec.Scaling.IdleTimeout != ""
+}
+
+func shouldHoldIdleScaleToZero(deployment *v1alpha1.ModelDeployment) bool {
+	if deployment == nil ||
+		deployment.Spec.Scaling.MinReplicas != 0 ||
+		deployment.Spec.Scaling.IdleTimeout == "" ||
+		deployment.Status.ObservedGeneration < deployment.Generation {
+		return false
+	}
+	ready, found := status.FindCondition(deployment.Status.Conditions, v1alpha1.ConditionReady)
+	return found && ready.Reason == v1alpha1.ReasonIdleScaledToZero
+}
+
+func effectiveIdleTimeout(deployment *v1alpha1.ModelDeployment) (time.Duration, bool) {
+	if deployment.Spec.Scaling.IdleTimeout == "" {
+		return 0, false
+	}
+	timeout, err := time.ParseDuration(deployment.Spec.Scaling.IdleTimeout)
+	if err != nil || timeout <= 0 {
+		return 0, false
+	}
+	return timeout, true
+}
+
+func scalingRequeueAfter(deployment *v1alpha1.ModelDeployment) time.Duration {
+	if !autoscalingEnabled(deployment) {
+		return 0
+	}
+	if timeout, ok := effectiveIdleTimeout(deployment); ok && timeout < waitingRequeueAfter {
+		return timeout
+	}
+	return waitingRequeueAfter
 }
 
 func effectiveGPUReservation(deployment *v1alpha1.ModelDeployment) int64 {
@@ -1489,6 +1779,14 @@ func copyTolerations(input []v1alpha1.Toleration) []v1alpha1.Toleration {
 		}
 	}
 	return result
+}
+
+func copyTimePointer(input *metav1.Time) *metav1.Time {
+	if input == nil {
+		return nil
+	}
+	value := *input
+	return &value
 }
 
 func ensureStringMapValue(values *map[string]string, key, value string) {

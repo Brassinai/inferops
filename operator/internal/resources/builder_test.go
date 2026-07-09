@@ -562,6 +562,18 @@ func TestBuildRuntimeDeploymentVariants(t *testing.T) {
 			},
 		},
 		{
+			name: "active uses controller planned replicas",
+			mutate: func(md *v1alpha1.ModelDeployment, _ *v1alpha1.ModelRuntime) {
+				md.Spec.Scaling.MaxReplicas = 3
+				md.Status.Scaling.DesiredReplicas = 3
+			},
+			check: func(t *testing.T, deployment *appsv1.Deployment) {
+				if got := *deployment.Spec.Replicas; got != 3 {
+					t.Fatalf("replicas = %d, want 3", got)
+				}
+			},
+		},
+		{
 			name: "CPU only omits GPU",
 			mutate: func(md *v1alpha1.ModelDeployment, _ *v1alpha1.ModelRuntime) {
 				md.Spec.Resources.GPU = nil

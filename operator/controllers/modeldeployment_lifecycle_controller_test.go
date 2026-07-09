@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -109,6 +110,199 @@ func TestLifecycleActiveReservesGPUAndProjectsReadiness(t *testing.T) {
 	}
 	assertLifecycleCondition(t, active.Status.Conditions, v1alpha1.ConditionGPUAssigned, metav1.ConditionTrue, v1alpha1.ReasonGPUCapacityReserved)
 	assertLifecycleCondition(t, active.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionTrue, v1alpha1.ReasonRuntimeReady)
+}
+
+func TestLifecycleScalesReplicasFromPendingRequests(t *testing.T) {
+	t.Parallel()
+
+	deployment := lifecycleDeployment(v1alpha1.ActivationDesiredStateActive, v1alpha1.ActivationWhenFullQueue)
+	deployment.Spec.Scaling.MaxReplicas = 3
+	deployment.Spec.Scaling.TargetPendingRequests = 2
+	cache := lifecycleReadyCache(t, deployment, "gpu-node-1")
+	metrics := fakeRuntimeMetricsScraper{
+		metrics: RuntimeMetrics{PendingRequests: 4, RunningRequests: 1},
+	}
+	c, reconciler := lifecycleTestControllerWithRuntimeMetrics(
+		t,
+		metrics,
+		deployment,
+		lifecycleRuntime(),
+		cache,
+		lifecycleGPUNode("gpu-node-1", 3),
+	)
+
+	reconcileLifecycle(t, reconciler, deployment)
+
+	var runtimeDeployment appsv1.Deployment
+	getObject(t, c, types.NamespacedName{Namespace: deployment.Namespace, Name: "qwen-runtime"}, &runtimeDeployment)
+	if runtimeDeployment.Spec.Replicas == nil || *runtimeDeployment.Spec.Replicas != 3 {
+		t.Fatalf("runtime replicas = %#v, want 3", runtimeDeployment.Spec.Replicas)
+	}
+	var updated v1alpha1.ModelDeployment
+	getObject(t, c, client.ObjectKeyFromObject(deployment), &updated)
+	if updated.Status.Scaling.DesiredReplicas != 3 {
+		t.Fatalf("status scaling desiredReplicas = %d, want 3", updated.Status.Scaling.DesiredReplicas)
+	}
+	if updated.Status.Scaling.PendingRequests != 4 || updated.Status.Scaling.RunningRequests != 1 {
+		t.Fatalf("status scaling observed requests = %#v, want pending=4 running=1", updated.Status.Scaling)
+	}
+}
+
+func TestLifecycleCapsReplicaScaleUpByGPUCapacity(t *testing.T) {
+	t.Parallel()
+
+	deployment := lifecycleDeployment(v1alpha1.ActivationDesiredStateActive, v1alpha1.ActivationWhenFullQueue)
+	deployment.Spec.Scaling.MaxReplicas = 4
+	deployment.Spec.Scaling.TargetPendingRequests = 1
+	cache := lifecycleReadyCache(t, deployment, "gpu-node-1")
+	metrics := fakeRuntimeMetricsScraper{
+		metrics: RuntimeMetrics{PendingRequests: 4},
+	}
+	c, reconciler := lifecycleTestControllerWithRuntimeMetrics(
+		t,
+		metrics,
+		deployment,
+		lifecycleRuntime(),
+		cache,
+		lifecycleGPUNode("gpu-node-1", 2),
+	)
+
+	reconcileLifecycle(t, reconciler, deployment)
+
+	var runtimeDeployment appsv1.Deployment
+	getObject(t, c, types.NamespacedName{Namespace: deployment.Namespace, Name: "qwen-runtime"}, &runtimeDeployment)
+	if runtimeDeployment.Spec.Replicas == nil || *runtimeDeployment.Spec.Replicas != 2 {
+		t.Fatalf("runtime replicas = %#v, want capacity cap of 2", runtimeDeployment.Spec.Replicas)
+	}
+	var updated v1alpha1.ModelDeployment
+	getObject(t, c, client.ObjectKeyFromObject(deployment), &updated)
+	if !updated.Status.Scaling.CapacityLimited {
+		t.Fatal("status scaling capacityLimited = false, want true")
+	}
+	if updated.Status.Scaling.Reason != v1alpha1.ReasonScalingCapacityCapped {
+		t.Fatalf("status scaling reason = %q, want %q", updated.Status.Scaling.Reason, v1alpha1.ReasonScalingCapacityCapped)
+	}
+	if updated.Status.Scaling.DesiredReplicas != 2 {
+		t.Fatalf("status scaling desiredReplicas = %d, want 2", updated.Status.Scaling.DesiredReplicas)
+	}
+}
+
+func TestLifecycleIdleScaleToZero(t *testing.T) {
+	t.Parallel()
+
+	deployment := lifecycleDeployment(v1alpha1.ActivationDesiredStateActive, v1alpha1.ActivationWhenFullQueue)
+	deployment.Spec.Scaling.MinReplicas = 0
+	deployment.Spec.Scaling.MaxReplicas = 1
+	deployment.Spec.Scaling.IdleTimeout = "1s"
+	lastActivity := metav1.NewTime(time.Now().Add(-2 * time.Second))
+	deployment.Status.Scaling.LastActivityTime = &lastActivity
+	cache := lifecycleReadyCache(t, deployment, "gpu-node-1")
+	c, reconciler := lifecycleTestControllerWithRuntimeMetrics(
+		t,
+		fakeRuntimeMetricsScraper{},
+		deployment,
+		lifecycleRuntime(),
+		cache,
+		lifecycleGPUNode("gpu-node-1", 1),
+	)
+
+	reconcileLifecycle(t, reconciler, deployment)
+
+	var runtimeDeployment appsv1.Deployment
+	getObject(t, c, types.NamespacedName{Namespace: deployment.Namespace, Name: "qwen-runtime"}, &runtimeDeployment)
+	if runtimeDeployment.Spec.Replicas == nil || *runtimeDeployment.Spec.Replicas != 0 {
+		t.Fatalf("runtime replicas = %#v, want 0", runtimeDeployment.Spec.Replicas)
+	}
+	var updated v1alpha1.ModelDeployment
+	getObject(t, c, client.ObjectKeyFromObject(deployment), &updated)
+	if updated.Status.Phase != v1alpha1.ModelDeploymentPhaseCached {
+		t.Fatalf("phase = %q, want Cached", updated.Status.Phase)
+	}
+	if updated.Status.Scaling.DesiredReplicas != 0 {
+		t.Fatalf("status scaling desiredReplicas = %d, want 0", updated.Status.Scaling.DesiredReplicas)
+	}
+	if updated.Status.Scaling.Reason != v1alpha1.ReasonIdleScaledToZero {
+		t.Fatalf("status scaling reason = %q, want %q", updated.Status.Scaling.Reason, v1alpha1.ReasonIdleScaledToZero)
+	}
+	assertLifecycleCondition(t, updated.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse, v1alpha1.ReasonIdleScaledToZero)
+}
+
+func TestLifecycleIdleScaleToZeroDoesNotBounceOnMissingMetrics(t *testing.T) {
+	t.Parallel()
+
+	deployment := lifecycleDeployment(v1alpha1.ActivationDesiredStateActive, v1alpha1.ActivationWhenFullQueue)
+	deployment.Spec.Scaling.MinReplicas = 0
+	deployment.Spec.Scaling.MaxReplicas = 1
+	deployment.Spec.Scaling.IdleTimeout = "1s"
+	lastActivity := metav1.NewTime(time.Now().Add(-2 * time.Second))
+	deployment.Status.ObservedGeneration = deployment.Generation
+	deployment.Status.Phase = v1alpha1.ModelDeploymentPhaseCached
+	deployment.Status.Scaling = v1alpha1.ScalingStatus{
+		DesiredReplicas:  0,
+		LastActivityTime: &lastActivity,
+	}
+	deployment.Status.Conditions = []v1alpha1.Condition{{
+		Type:               v1alpha1.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: deployment.Generation,
+		Reason:             v1alpha1.ReasonIdleScaledToZero,
+		Message:            "Model is cached and scaled to zero",
+	}}
+	cache := lifecycleReadyCache(t, deployment, "gpu-node-1")
+	c, reconciler := lifecycleTestControllerWithRuntimeMetrics(
+		t,
+		fakeRuntimeMetricsScraper{err: errors.New("no runtime endpoints")},
+		deployment,
+		lifecycleRuntime(),
+		cache,
+		lifecycleGPUNode("gpu-node-1", 1),
+	)
+
+	reconcileLifecycle(t, reconciler, deployment)
+
+	var runtimeDeployment appsv1.Deployment
+	getObject(t, c, types.NamespacedName{Namespace: deployment.Namespace, Name: "qwen-runtime"}, &runtimeDeployment)
+	if runtimeDeployment.Spec.Replicas == nil || *runtimeDeployment.Spec.Replicas != 0 {
+		t.Fatalf("runtime replicas = %#v, want held at 0", runtimeDeployment.Spec.Replicas)
+	}
+	var updated v1alpha1.ModelDeployment
+	getObject(t, c, client.ObjectKeyFromObject(deployment), &updated)
+	if updated.Status.Scaling.DesiredReplicas != 0 {
+		t.Fatalf("status scaling desiredReplicas = %d, want 0", updated.Status.Scaling.DesiredReplicas)
+	}
+	if updated.Status.Scaling.Reason != v1alpha1.ReasonIdleScaledToZero {
+		t.Fatalf("status scaling reason = %q, want %q", updated.Status.Scaling.Reason, v1alpha1.ReasonIdleScaledToZero)
+	}
+}
+
+func TestLifecycleKeepsFloorWhenScalingMetricsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	deployment := lifecycleDeployment(v1alpha1.ActivationDesiredStateActive, v1alpha1.ActivationWhenFullQueue)
+	deployment.Spec.Scaling.MaxReplicas = 3
+	deployment.Spec.Scaling.TargetPendingRequests = 1
+	cache := lifecycleReadyCache(t, deployment, "gpu-node-1")
+	c, reconciler := lifecycleTestControllerWithRuntimeMetrics(
+		t,
+		fakeRuntimeMetricsScraper{err: errors.New("metrics timeout")},
+		deployment,
+		lifecycleRuntime(),
+		cache,
+		lifecycleGPUNode("gpu-node-1", 3),
+	)
+
+	reconcileLifecycle(t, reconciler, deployment)
+
+	var runtimeDeployment appsv1.Deployment
+	getObject(t, c, types.NamespacedName{Namespace: deployment.Namespace, Name: "qwen-runtime"}, &runtimeDeployment)
+	if runtimeDeployment.Spec.Replicas == nil || *runtimeDeployment.Spec.Replicas != 1 {
+		t.Fatalf("runtime replicas = %#v, want safe floor of 1", runtimeDeployment.Spec.Replicas)
+	}
+	var updated v1alpha1.ModelDeployment
+	getObject(t, c, client.ObjectKeyFromObject(deployment), &updated)
+	if updated.Status.Scaling.Reason != v1alpha1.ReasonScalingMetricsUnavailable {
+		t.Fatalf("status scaling reason = %q, want %q", updated.Status.Scaling.Reason, v1alpha1.ReasonScalingMetricsUnavailable)
+	}
 }
 
 func TestLifecycleReadyRuntimeWinsOverStaleFailureCondition(t *testing.T) {
@@ -1231,6 +1425,23 @@ func lifecycleTestControllerWithMetrics(
 	metricsRecorder *recordingControllerMetrics,
 	objects ...client.Object,
 ) (client.Client, *ModelDeploymentController) {
+	return lifecycleTestControllerWithMetricsAndRuntimeMetrics(t, metricsRecorder, nil, objects...)
+}
+
+func lifecycleTestControllerWithRuntimeMetrics(
+	t *testing.T,
+	runtimeMetrics RuntimeMetricsScraper,
+	objects ...client.Object,
+) (client.Client, *ModelDeploymentController) {
+	return lifecycleTestControllerWithMetricsAndRuntimeMetrics(t, nil, runtimeMetrics, objects...)
+}
+
+func lifecycleTestControllerWithMetricsAndRuntimeMetrics(
+	t *testing.T,
+	metricsRecorder *recordingControllerMetrics,
+	runtimeMetrics RuntimeMetricsScraper,
+	objects ...client.Object,
+) (client.Client, *ModelDeploymentController) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
@@ -1256,6 +1467,7 @@ func lifecycleTestControllerWithMetrics(
 			CacheRoot:        "/var/lib/inferops/models",
 			DefaultCacheSize: "20Gi",
 			DownloaderImage:  "ghcr.io/inferops/model-downloader:v0.1.0",
+			MetricsScraper:   runtimeMetrics,
 		},
 		record.NewFakeRecorder(100),
 		recorderMetrics,
@@ -1402,6 +1614,21 @@ func (c *patchCountingClient) Patch(
 		}
 	}
 	return c.Client.Patch(ctx, object, patch, options...)
+}
+
+type fakeRuntimeMetricsScraper struct {
+	metrics RuntimeMetrics
+	err     error
+}
+
+func (s fakeRuntimeMetricsScraper) ScrapeRuntimeMetrics(
+	context.Context,
+	string,
+	string,
+	int32,
+	string,
+) (RuntimeMetrics, error) {
+	return s.metrics, s.err
 }
 
 func lifecycleDeployment(

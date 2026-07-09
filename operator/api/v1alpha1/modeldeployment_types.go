@@ -52,6 +52,7 @@ type ModelDeploymentStatus struct {
 	Replacement        *ReplacementStatus   `json:"replacement,omitempty"`
 	Cache              ModelCacheSummary    `json:"cache,omitempty"`
 	Replicas           ReplicaStatus        `json:"replicas,omitempty"`
+	Scaling            ScalingStatus        `json:"scaling,omitempty"`
 	Model              ModelStatus          `json:"model,omitempty"`
 	Conditions         []Condition          `json:"conditions,omitempty"`
 }
@@ -161,6 +162,9 @@ const (
 	ReasonRuntimeCreating             = "RuntimeCreating"
 	ReasonRuntimeReady                = "RuntimeReady"
 	ReasonRuntimeUnavailable          = "RuntimeUnavailable"
+	ReasonIdleScaledToZero            = "IdleScaledToZero"
+	ReasonScalingMetricsUnavailable   = "ScalingMetricsUnavailable"
+	ReasonScalingCapacityCapped       = "ScalingCapacityCapped"
 	ReasonRouteEnabled                = "RouteEnabled"
 	ReasonRouteDisabled               = "RouteDisabled"
 )
@@ -254,6 +258,13 @@ const (
 type ScalingSpec struct {
 	MinReplicas int32 `json:"minReplicas,omitempty"`
 	MaxReplicas int32 `json:"maxReplicas,omitempty"`
+	// TargetPendingRequests enables runtime-metrics-driven scale-up when the
+	// selected runtime exposes a bounded pending request metric.
+	// +kubebuilder:validation:Minimum=1
+	TargetPendingRequests int32 `json:"targetPendingRequests,omitempty"`
+	// IdleTimeout scales an active deployment to zero replicas after runtime
+	// metrics report no running or pending work for the configured duration.
+	IdleTimeout string `json:"idleTimeout,omitempty"`
 }
 
 // RoutingSpec controls exposure through the InferOps gateway.
@@ -331,6 +342,17 @@ type ModelCacheSummary struct {
 type ReplicaStatus struct {
 	Desired int32 `json:"desired,omitempty"`
 	Ready   int32 `json:"ready,omitempty"`
+}
+
+// ScalingStatus reports the controller's replica planning decision.
+type ScalingStatus struct {
+	DesiredReplicas  int32        `json:"desiredReplicas,omitempty"`
+	PendingRequests  int64        `json:"pendingRequests,omitempty"`
+	RunningRequests  int64        `json:"runningRequests,omitempty"`
+	LastActivityTime *metav1.Time `json:"lastActivityTime,omitempty"`
+	CapacityLimited  bool         `json:"capacityLimited,omitempty"`
+	Reason           string       `json:"reason,omitempty"`
+	Message          string       `json:"message,omitempty"`
 }
 
 // ModelStatus reports whether the model is loaded by the runtime.
@@ -480,6 +502,9 @@ func (in *ModelDeploymentStatus) DeepCopyInto(out *ModelDeploymentStatus) {
 	if in.Replacement != nil {
 		out.Replacement = new(ReplacementStatus)
 		in.Replacement.DeepCopyInto(out.Replacement)
+	}
+	if in.Scaling.LastActivityTime != nil {
+		out.Scaling.LastActivityTime = in.Scaling.LastActivityTime.DeepCopy()
 	}
 	if in.Conditions != nil {
 		out.Conditions = make([]Condition, len(in.Conditions))
