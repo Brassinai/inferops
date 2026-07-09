@@ -56,6 +56,15 @@ func TestValidateModelDeployment(t *testing.T) {
 			d.Spec.Runtime.TensorParallelSize = 2
 		}, wantErr: true},
 		{name: "invalid scaling bounds", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Scaling.MinReplicas = 2 }, wantErr: true},
+		{name: "invalid pending request target", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Scaling.TargetPendingRequests = -1
+		}, wantErr: true},
+		{name: "invalid idle timeout", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Scaling.IdleTimeout = "soon"
+		}, wantErr: true},
+		{name: "zero idle timeout", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Scaling.IdleTimeout = "0s"
+		}, wantErr: true},
 		{name: "active with zero maximum replicas", mutate: func(d *v1alpha1.ModelDeployment) {
 			d.Spec.Activation.DesiredState = v1alpha1.ActivationDesiredStateActive
 			d.Spec.Scaling.MinReplicas = 0

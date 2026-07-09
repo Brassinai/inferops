@@ -19,6 +19,8 @@ DEFAULT_PRIORITY = 50
 DEFAULT_DRAIN_TIMEOUT = "5m"
 DEFAULT_MIN_REPLICAS = 0
 DEFAULT_MAX_REPLICAS = 1
+DEFAULT_TARGET_PENDING_REQUESTS = None
+DEFAULT_IDLE_TIMEOUT = None
 DEFAULT_MAX_MODEL_LEN = 4096
 DEFAULT_ROUTE_ENABLED = True
 DEFAULT_OPENAI_COMPATIBLE = True
@@ -50,6 +52,8 @@ _ALLOWED_MODEL_OPTIONS = frozenset(
         "drain_timeout",
         "min_replicas",
         "max_replicas",
+        "target_pending_requests",
+        "idle_timeout",
         "max_model_len",
         "route_path",
         "route_enabled",
@@ -126,6 +130,8 @@ class ModelConfig:
     drain_timeout: str
     min_replicas: int
     max_replicas: int
+    target_pending_requests: int | None
+    idle_timeout: str | None
     max_model_len: int
     route_path: str
     route_enabled: bool
@@ -206,6 +212,10 @@ def normalize_model_config(
     min_replicas = _normalize_non_negative_int(raw.get("min_replicas", DEFAULT_MIN_REPLICAS), field_name="min_replicas")
     if max_replicas < min_replicas:
         raise ValueError("max_replicas must be greater than or equal to min_replicas")
+    target_pending_requests = _normalize_optional_positive_int(
+        raw.get("target_pending_requests", DEFAULT_TARGET_PENDING_REQUESTS),
+        field_name="target_pending_requests",
+    )
 
     gpu_count, gpu_vendor, gpu_type = _normalize_gpu(
         gpu=raw.get("gpu", DEFAULT_GPU_COUNT),
@@ -232,6 +242,8 @@ def normalize_model_config(
         drain_timeout=_normalize_duration(raw.get("drain_timeout", DEFAULT_DRAIN_TIMEOUT), field_name="drain_timeout"),
         min_replicas=min_replicas,
         max_replicas=max_replicas,
+        target_pending_requests=target_pending_requests,
+        idle_timeout=_normalize_optional_duration(raw.get("idle_timeout", DEFAULT_IDLE_TIMEOUT), field_name="idle_timeout"),
         max_model_len=_normalize_positive_int(raw.get("max_model_len", DEFAULT_MAX_MODEL_LEN), field_name="max_model_len"),
         route_path=_normalize_route_path(_value_or_default(raw.get("route_path"), f"/models/{name}")),
         route_enabled=_normalize_bool(raw.get("route_enabled", DEFAULT_ROUTE_ENABLED), field_name="route_enabled"),
@@ -286,6 +298,12 @@ def _normalize_positive_int(value: Any, *, field_name: str) -> int:
     return value
 
 
+def _normalize_optional_positive_int(value: Any, *, field_name: str) -> int | None:
+    if value is None:
+        return None
+    return _normalize_positive_int(value, field_name=field_name)
+
+
 def _normalize_non_negative_int(value: Any, *, field_name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"{field_name} must be an integer greater than or equal to 0")
@@ -305,6 +323,12 @@ def _normalize_duration(value: Any, *, field_name: str) -> str:
     if _VALID_DURATION_RE.fullmatch(normalized) is None:
         raise ValueError(f"{field_name} must look like a duration such as 5m or 30s")
     return normalized
+
+
+def _normalize_optional_duration(value: Any, *, field_name: str) -> str | None:
+    if value is None:
+        return None
+    return _normalize_duration(value, field_name=field_name)
 
 
 def _normalize_route_path(value: Any) -> str:

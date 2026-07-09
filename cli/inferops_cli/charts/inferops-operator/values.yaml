@@ -34,6 +34,10 @@ networkPolicy:
   # Empty keeps the named metrics, health, and webhook ports reachable from
   # any source. Supply peers to restrict them to monitoring/control-plane pods.
   ingressFrom: []
+  # Ports the operator may scrape on InferOps-managed runtime pods for
+  # capacity-aware scaling. Add custom ModelRuntime metrics ports here.
+  runtimeMetricsPorts:
+    - 8000
   # Replace these common Kubernetes API Service IPs with the exact /32 or
   # /128 advertised as KUBERNETES_SERVICE_HOST in this cluster.
   apiServerCIDRs:

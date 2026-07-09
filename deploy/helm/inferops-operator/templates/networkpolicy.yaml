@@ -38,6 +38,20 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: inferops
+              app.kubernetes.io/managed-by: inferops-operator
+              app.kubernetes.io/component: model-runtime
+      {{- if not .Values.networkPolicy.runtimeMetricsPorts }}
+      {{- fail "networkPolicy.runtimeMetricsPorts must contain at least one runtime metrics port" }}
+      {{- end }}
+      ports:
+        {{- range .Values.networkPolicy.runtimeMetricsPorts }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
     {{- if not .Values.networkPolicy.apiServerCIDRs }}
     {{- fail "networkPolicy.apiServerCIDRs must contain at least one Kubernetes API CIDR" }}
     {{- end }}

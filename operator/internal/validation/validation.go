@@ -127,6 +127,22 @@ func ValidateModelDeployment(deployment v1alpha1.ModelDeployment) error {
 	if deployment.Spec.Scaling.MaxReplicas < deployment.Spec.Scaling.MinReplicas {
 		return errors.New("spec.scaling.maxReplicas must be greater than or equal to minReplicas")
 	}
+	if deployment.Spec.Scaling.TargetPendingRequests < 0 {
+		return errors.New("spec.scaling.targetPendingRequests must not be negative")
+	}
+	if deployment.Spec.Scaling.IdleTimeout != "" {
+		idleTimeout, err := time.ParseDuration(deployment.Spec.Scaling.IdleTimeout)
+		if err != nil {
+			return fmt.Errorf(
+				"spec.scaling.idleTimeout %q is invalid: %w",
+				deployment.Spec.Scaling.IdleTimeout,
+				err,
+			)
+		}
+		if idleTimeout <= 0 {
+			return errors.New("spec.scaling.idleTimeout must be greater than zero")
+		}
+	}
 	if deployment.Spec.Activation.DesiredState == v1alpha1.ActivationDesiredStateActive &&
 		deployment.Spec.Scaling.MaxReplicas < 1 {
 		return errors.New("spec.scaling.maxReplicas must be at least 1 for active deployments")

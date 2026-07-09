@@ -58,6 +58,15 @@ def _build_model_manifest(model: dict) -> dict:
         runtime["tensorParallelSize"] = model.gpu_count
         runtime["gpuMemoryUtilization"] = DEFAULT_GPU_MEMORY_UTILIZATION
 
+    scaling = {
+        "minReplicas": model.min_replicas,
+        "maxReplicas": model.max_replicas,
+    }
+    if model.target_pending_requests is not None:
+        scaling["targetPendingRequests"] = model.target_pending_requests
+    if model.idle_timeout is not None:
+        scaling["idleTimeout"] = model.idle_timeout
+
     manifest = {
         "apiVersion": "inference.inferops.dev/v1alpha1",
         "kind": "ModelDeployment",
@@ -77,10 +86,7 @@ def _build_model_manifest(model: dict) -> dict:
                 "priority": model.priority,
                 "drainTimeout": model.drain_timeout,
             },
-            "scaling": {
-                "minReplicas": model.min_replicas,
-                "maxReplicas": model.max_replicas,
-            },
+            "scaling": scaling,
             "routing": {
                 "enabled": model.route_enabled,
                 "path": model.route_path,

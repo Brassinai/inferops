@@ -107,6 +107,14 @@ func TestValidateRuntimeNodeFailures(t *testing.T) {
 			},
 			target: ErrInsufficientComputeCapacity,
 		},
+		{
+			name: "insufficient aggregate CPU for planned replicas",
+			mutate: func(deployment *v1alpha1.ModelDeployment, _ *corev1.Node) {
+				deployment.Spec.Scaling.MaxReplicas = 3
+				deployment.Status.Scaling.DesiredReplicas = 3
+			},
+			target: ErrInsufficientComputeCapacity,
+		},
 	}
 	for _, test := range tests {
 		test := test

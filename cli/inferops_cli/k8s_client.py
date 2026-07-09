@@ -1677,6 +1677,20 @@ def _summarize_deployment(deployment: dict[str, Any]) -> dict[str, Any]:
             for key, value in status.get("replicas", {}).items()
             if key in {"desired", "ready"}
         },
+        "scaling": {
+            key: value
+            for key, value in status.get("scaling", {}).items()
+            if key
+            in {
+                "desiredReplicas",
+                "pendingRequests",
+                "runningRequests",
+                "lastActivityTime",
+                "capacityLimited",
+                "reason",
+                "message",
+            }
+        },
         "modelLoaded": bool(status.get("model", {}).get("loaded", False)),
         "observedGeneration": status.get("observedGeneration", 0),
         "generation": metadata.get("generation", 0),

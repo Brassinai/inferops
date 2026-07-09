@@ -146,6 +146,12 @@ spec:
                       format: int32
                       minimum: 0
                       default: 1
+                    targetPendingRequests:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                    idleTimeout:
+                      type: string
                   x-kubernetes-validations:
                     - rule: "self.maxReplicas >= self.minReplicas"
                       message: maxReplicas must be greater than or equal to minReplicas
@@ -314,6 +320,27 @@ spec:
                     ready:
                       type: integer
                       format: int32
+                scaling:
+                  type: object
+                  properties:
+                    desiredReplicas:
+                      type: integer
+                      format: int32
+                    pendingRequests:
+                      type: integer
+                      format: int64
+                    runningRequests:
+                      type: integer
+                      format: int64
+                    lastActivityTime:
+                      type: string
+                      format: date-time
+                    capacityLimited:
+                      type: boolean
+                    reason:
+                      type: string
+                    message:
+                      type: string
                 model:
                   type: object
                   properties:

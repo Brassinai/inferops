@@ -34,6 +34,8 @@ spec:
   scaling:
     minReplicas: 0
     maxReplicas: 1
+    targetPendingRequests: 4
+    idleTimeout: 10m
   routing:
     enabled: true
     path: /models/qwen-chat
@@ -81,6 +83,32 @@ spec:
 - `resources.gpu.vendor` defaults to `nvidia`.
 - `runtime.tensorParallelSize` and `runtime.gpuMemoryUtilization` apply only to GPU workloads.
 - CPU-only workloads must specify `resources.cpu` and `resources.memory`.
+
+### Scaling
+
+`scaling.minReplicas` and `scaling.maxReplicas` bound every controller replica
+decision. Active deployments run at least one replica unless idle scale-to-zero
+is configured and the runtime has been idle for the configured timeout.
+
+`scaling.targetPendingRequests` enables pending-request scale-up from runtime
+Prometheus metrics. For vLLM-compatible runtimes, InferOps reads
+`vllm:num_requests_waiting` and `vllm:num_requests_running` from the resolved
+`ModelRuntime.spec.metricsPath`. If metrics are unavailable, the controller
+keeps the safe replica floor and reports `ScalingMetricsUnavailable` in
+`status.scaling.reason` instead of guessing demand.
+
+GPU deployments are always capped by compatible whole-GPU capacity on the node
+that holds the ready cache. The controller may set
+`status.scaling.capacityLimited=true` and
+`status.scaling.reason=ScalingCapacityCapped` when demand exceeds compatible
+free GPU slots. HPA and KEDA remain optional integrations; they must not bypass
+this operator-side capacity check.
+
+`scaling.idleTimeout` scales an active deployment with `minReplicas: 0` to zero
+runtime replicas after the runtime reports no pending or running requests for
+the timeout. Scale-from-zero needs a later spec update or external signal; the
+gateway does not synthesize demand for a deployment with no ready runtime
+endpoints.
 
 ### Activation policies
 

@@ -91,6 +91,31 @@ class SDKContractTest(unittest.TestCase):
         self.assertEqual(manifest["spec"]["cache"]["size"], "100Gi")
         self.assertEqual(manifest["spec"]["resources"]["cpu"], "8")
 
+    def test_scaling_options_are_rendered_when_enabled(self) -> None:
+        app = App("support")
+
+        @app.model(
+            name="qwen-chat",
+            model="Qwen/Qwen2.5-7B-Instruct",
+            max_replicas=3,
+            target_pending_requests=4,
+            idle_timeout="10m",
+        )
+        class QwenChat:
+            pass
+
+        manifest = build_manifest(app)
+
+        self.assertEqual(
+            manifest["spec"]["scaling"],
+            {
+                "minReplicas": 0,
+                "maxReplicas": 3,
+                "targetPendingRequests": 4,
+                "idleTimeout": "10m",
+            },
+        )
+
     def test_multiple_models_are_sorted_for_deterministic_output(self) -> None:
         app = App("support")
 
@@ -159,6 +184,21 @@ class SDKContractTest(unittest.TestCase):
 
             @app.model(name="qwen-chat", model="Qwen/Qwen2.5-7B-Instruct", min_replicas=2, max_replicas=1)
             class QwenChat:
+                pass
+
+    def test_invalid_scaling_options_are_rejected_early(self) -> None:
+        app = App("support")
+
+        with self.assertRaisesRegex(ValueError, "target_pending_requests must be an integer greater than or equal to 1"):
+
+            @app.model(name="qwen-chat", model="Qwen/Qwen2.5-7B-Instruct", target_pending_requests=0)
+            class QwenChat:
+                pass
+
+        with self.assertRaisesRegex(ValueError, "idle_timeout must look like a duration"):
+
+            @app.model(name="qwen-coder", model="Qwen/Qwen2.5-Coder", idle_timeout="soon")
+            class QwenCoder:
                 pass
 
     def test_invalid_route_path_is_rejected_early(self) -> None:
