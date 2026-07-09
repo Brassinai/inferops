@@ -94,6 +94,14 @@ func run(ctx context.Context) error {
 	}
 
 	metricsRegistry := prometheus.NewRegistry()
+	for _, collector := range []prometheus.Collector{
+		prometheus.NewGoCollector(),
+		prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}),
+	} {
+		if err := metricsRegistry.Register(collector); err != nil {
+			return fmt.Errorf("register gateway process metrics: %w", err)
+		}
+	}
 	metricsRecorder, err := gatewaymetrics.NewRecorder(metricsRegistry)
 	if err != nil {
 		return fmt.Errorf("configure gateway metrics: %w", err)

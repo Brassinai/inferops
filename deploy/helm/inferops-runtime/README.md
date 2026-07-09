@@ -33,5 +33,16 @@ check. Set
 `metrics.prometheusAnnotations=true` to annotate the pod for scraping
 `runtime.metricsPath` on port `8000`.
 
+If Prometheus Operator is installed, enable a standalone runtime
+`ServiceMonitor` without relying on pod annotations:
+
+```bash
+helm template inferops-runtime . \
+  --set metrics.serviceMonitor.enabled=true
+```
+
+The runtime chart keeps observability runtime-neutral: the scrape port is the
+runtime Service's `http` port, and the scrape path is `runtime.metricsPath`.
+
 `runtime.terminationGracePeriodSeconds` bounds the engine's native graceful
 shutdown after the operator and gateway have stopped routing new requests.

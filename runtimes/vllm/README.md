@@ -12,6 +12,13 @@ The upstream server provides:
 - `POST /v1/completions`; and
 - `POST /v1/chat/completions`.
 
+InferOps packages Prometheus Operator scraping and a vLLM-first Grafana
+dashboard in the Helm charts. The dashboard uses vLLM's Prometheus metrics for
+TTFT, generation tokens/sec, waiting requests, requested-token approximation,
+and KV cache pressure. Raw GPU utilization should come from DCGM exporter or an
+equivalent node GPU exporter; OpenTelemetry is a later integration and is not
+required for the MVP runtime path.
+
 ## GPU build
 
 ```bash

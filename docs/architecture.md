@@ -169,9 +169,9 @@ label (default `inferops.dev/gpu-type`). See
 
 MVP-001 does not define or promise GPU slicing, a hosted InferOps control
 plane, automatic eviction without an explicit replacement policy, advanced
-autoscaling, or a dashboard. These non-goals do not exclude vLLM or SGLang;
-multi-runtime support is part of the platform direction, with nano-vLLM as the
-initial packaged implementation.
+autoscaling, or OpenTelemetry export. These non-goals do not exclude vLLM or
+SGLang; multi-runtime support is part of the platform direction, with nano-vLLM
+as the initial packaged implementation.
 
 ## Contract Governance
 

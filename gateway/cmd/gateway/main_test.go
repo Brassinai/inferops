@@ -131,3 +131,26 @@ func TestGatewayHandlerReservesExactDrainPath(t *testing.T) {
 		t.Fatalf("drain requests = %d, proxy requests = %d; want 1 and 1", drainRequests, proxyRequests)
 	}
 }
+
+func TestGatewayHandlerReservesExactMetricsPath(t *testing.T) {
+	t.Parallel()
+	metricsRequests := 0
+	proxyRequests := 0
+	handler := gatewayHandler(
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			metricsRequests++
+		}),
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			proxyRequests++
+		}),
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+	)
+
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/metrics/model", nil))
+
+	if metricsRequests != 1 || proxyRequests != 1 {
+		t.Fatalf("metrics requests = %d, proxy requests = %d; want 1 and 1", metricsRequests, proxyRequests)
+	}
+}

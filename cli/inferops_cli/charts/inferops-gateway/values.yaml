@@ -119,6 +119,13 @@ gatewayAPI:
   hostnames: []
   path: /
 
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  annotations: {}
+
 tailscale:
   enabled: false
   hostname: inferops
