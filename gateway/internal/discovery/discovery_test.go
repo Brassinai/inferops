@@ -283,6 +283,42 @@ func TestSyncRejectsStaleStatusAndUnownedService(t *testing.T) {
 	}
 }
 
+func TestSyncKeepsStableRuntimeRoutableWhenRolloutIsBlocked(t *testing.T) {
+	t.Parallel()
+
+	deployment := readyDeployment()
+	previousGeneration := deployment.Generation
+	deployment.Generation++
+	deployment.Status.ObservedGeneration = deployment.Generation
+	setTestCondition(deployment, v1alpha1.ConditionReady, metav1.ConditionFalse)
+	for index := range deployment.Status.Conditions {
+		if deployment.Status.Conditions[index].Type != v1alpha1.ConditionReady {
+			deployment.Status.Conditions[index].ObservedGeneration = previousGeneration
+		}
+	}
+	deployment.Status.Conditions = append(deployment.Status.Conditions, v1alpha1.Condition{
+		Type:               v1alpha1.ConditionRollout,
+		Status:             metav1.ConditionFalse,
+		ObservedGeneration: deployment.Generation,
+		Reason:             v1alpha1.ReasonRolloutWaitingForCapacity,
+		Message:            "rollout is waiting for spare GPU capacity",
+	})
+	kubernetesClient := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithObjects(deployment, runtimeService(), runtimeEndpointSlice()).
+		Build()
+	registry := routing.NewMemoryRegistry()
+	modelDiscovery := newTestDiscovery(t, kubernetesClient, registry)
+
+	if err := modelDiscovery.Sync(context.Background()); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	backend, _, found := registry.Lookup("/models/qwen-chat/v1/models")
+	if !found || backend.State != routing.StateReady {
+		t.Fatalf("backend = (%+v, %t), want ready stable runtime during blocked rollout", backend, found)
+	}
+}
+
 func TestBackendLifecycleStates(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

@@ -226,6 +226,21 @@ func (b Builder) BuildRuntimeDeployment(
 	}
 
 	labels := BaseLabels(md.Name)
+	annotations := map[string]string{
+		"inferops.dev/runtime-protocol": protocol,
+		"prometheus.io/scrape":          "true",
+		"prometheus.io/path":            metricsPath,
+		"prometheus.io/port":            strconv.FormatInt(int64(port), 10),
+	}
+	if strategy := effectiveRolloutStrategy(md); strategy != v1alpha1.RolloutStrategyRecreate {
+		annotations["inferops.dev/rollout-strategy"] = string(strategy)
+		if strategy == v1alpha1.RolloutStrategyCanary && md.Spec.Rollout.CanaryWeightPercent != nil {
+			annotations["inferops.dev/canary-weight-percent"] = strconv.FormatInt(
+				int64(*md.Spec.Rollout.CanaryWeightPercent),
+				10,
+			)
+		}
+	}
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            templates.RuntimeServiceName(md.Name),
@@ -236,26 +251,45 @@ func (b Builder) BuildRuntimeDeployment(
 		Spec: appsv1.DeploymentSpec{
 			Replicas:                &replicas,
 			ProgressDeadlineSeconds: &progressDeadlineSeconds,
-			Strategy: appsv1.DeploymentStrategy{
-				Type: appsv1.RecreateDeploymentStrategyType,
-			},
+			Strategy:                runtimeDeploymentStrategy(md),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: SelectorLabels(md.Name),
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
-					Annotations: map[string]string{
-						"inferops.dev/runtime-protocol": protocol,
-						"prometheus.io/scrape":          "true",
-						"prometheus.io/path":            metricsPath,
-						"prometheus.io/port":            strconv.FormatInt(int64(port), 10),
-					},
+					Labels:      labels,
+					Annotations: annotations,
 				},
 				Spec: podSpec,
 			},
 		},
 	}, nil
+}
+
+func runtimeDeploymentStrategy(md *v1alpha1.ModelDeployment) appsv1.DeploymentStrategy {
+	strategy := effectiveRolloutStrategy(md)
+	if strategy == v1alpha1.RolloutStrategyRecreate {
+		return appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
+	}
+	maxUnavailable := intstr.FromInt32(0)
+	maxSurge := intstr.FromInt32(1)
+	if strategy == v1alpha1.RolloutStrategyBlueGreen {
+		maxSurge = intstr.FromString("100%")
+	}
+	return appsv1.DeploymentStrategy{
+		Type: appsv1.RollingUpdateDeploymentStrategyType,
+		RollingUpdate: &appsv1.RollingUpdateDeployment{
+			MaxUnavailable: &maxUnavailable,
+			MaxSurge:       &maxSurge,
+		},
+	}
+}
+
+func effectiveRolloutStrategy(md *v1alpha1.ModelDeployment) v1alpha1.RolloutStrategy {
+	if md == nil || md.Spec.Rollout.Strategy == "" {
+		return v1alpha1.RolloutStrategyRecreate
+	}
+	return md.Spec.Rollout.Strategy
 }
 
 // BuildRuntimePodDisruptionBudget returns disruption protection for an active

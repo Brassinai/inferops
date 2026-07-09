@@ -449,6 +449,16 @@ func (r *ModelDeploymentController) reconcile(
 	if err := scheduler.ValidateRuntimeNode(deployment, &runtimeNode); err != nil {
 		return r.handleRuntimePreflightError(ctx, deployment, original, err)
 	}
+	if handled, result, err := r.reconcileRolloutSpareCapacity(
+		ctx,
+		deployment,
+		original,
+		modelRuntime,
+		assignedNode,
+		cacheResult.Path,
+	); handled {
+		return result, err
+	}
 	if _, err := r.ensurePodDisruptionBudget(ctx, deployment); err != nil {
 		if errors.Is(err, errPermanentLifecycle) {
 			if _, deleteErr := r.deleteRuntimeWorkload(ctx, deployment); deleteErr != nil {
@@ -485,6 +495,94 @@ func (r *ModelDeploymentController) reconcile(
 		}
 	}
 	return r.projectRuntimeDeployment(ctx, deployment, original, runtimeDeployment, created)
+}
+
+func (r *ModelDeploymentController) reconcileRolloutSpareCapacity(
+	ctx context.Context,
+	deployment, original *v1alpha1.ModelDeployment,
+	modelRuntime *v1alpha1.ModelRuntime,
+	nodeName, cachePath string,
+) (bool, ctrl.Result, error) {
+	if deployment.Spec.Resources.GPU == nil ||
+		!rolloutRequiresSpareCapacity(deployment) ||
+		effectiveRuntimeReplicas(deployment) < 1 {
+		return false, ctrl.Result{}, nil
+	}
+
+	desired, err := r.builder.BuildRuntimeDeployment(deployment, modelRuntime, nodeName, cachePath)
+	if err != nil {
+		return true, ctrl.Result{}, permanentLifecycleError(fmt.Errorf("build rollout capacity target: %w", err))
+	}
+	var existing appsv1.Deployment
+	key := types.NamespacedName{Namespace: desired.Namespace, Name: desired.Name}
+	if err := r.client.Get(ctx, key, &existing); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, ctrl.Result{}, nil
+		}
+		return true, ctrl.Result{}, fmt.Errorf("get runtime Deployment for rollout capacity check: %w", err)
+	}
+	if err := assertControlledBy(&existing, deployment); err != nil {
+		return true, ctrl.Result{}, permanentLifecycleError(err)
+	}
+	if reflect.DeepEqual(existing.Spec, desired.Spec) || deploymentReplicas(&existing) == 0 {
+		if rolloutRequiresSpareCapacity(deployment) {
+			reason := v1alpha1.ReasonRolloutCapacityReserved
+			message := "Runtime rollout is still progressing with spare GPU capacity reserved"
+			if deploymentReplicas(&existing) == 0 || runtimeDeploymentReady(&existing) {
+				reason = v1alpha1.ReasonRolloutComplete
+				message = "Runtime rollout does not need additional GPU capacity"
+			}
+			setDeploymentCondition(
+				deployment,
+				v1alpha1.ConditionRollout,
+				metav1.ConditionTrue,
+				reason,
+				message,
+			)
+		}
+		return false, ctrl.Result{}, nil
+	}
+
+	requiredSlots := rolloutRequiredGPUSlots(deployment, &existing)
+	if requiredSlots <= effectiveGPUReservation(deployment) {
+		return false, ctrl.Result{}, nil
+	}
+	if err := r.validateGPUCapacity(ctx, deployment, nodeName, requiredSlots); err == nil {
+		setDeploymentCondition(
+			deployment,
+			v1alpha1.ConditionRollout,
+			metav1.ConditionTrue,
+			v1alpha1.ReasonRolloutCapacityReserved,
+			fmt.Sprintf("Reserved capacity for %s rollout requiring %d GPU slot(s)", effectiveRolloutStrategy(deployment), requiredSlots),
+		)
+		return false, ctrl.Result{}, nil
+	} else if !errors.Is(err, scheduler.ErrNoCompatibleGPUNode) &&
+		!errors.Is(err, scheduler.ErrInsufficientGPUCapacity) {
+		return true, ctrl.Result{}, err
+	} else if effectiveRolloutWhenCapacityUnavailable(deployment) == v1alpha1.RolloutWhenCapacityUnavailableReject {
+		message := fmt.Sprintf(
+			"%s rollout rejected because %d compatible GPU slot(s) are required: %v",
+			effectiveRolloutStrategy(deployment),
+			requiredSlots,
+			err,
+		)
+		setRolloutBlockedConditions(deployment, v1alpha1.ReasonRolloutRejected, message)
+		result, patchErr := r.patchDeploymentStatus(ctx, deployment, original, v1alpha1.ReasonRolloutRejected)
+		return true, result, patchErr
+	} else {
+		message := fmt.Sprintf(
+			"%s rollout is queued until %d compatible GPU slot(s) are available: %v",
+			effectiveRolloutStrategy(deployment),
+			requiredSlots,
+			err,
+		)
+		setRolloutBlockedConditions(deployment, v1alpha1.ReasonRolloutWaitingForCapacity, message)
+		result, patchErr := r.patchDeploymentStatus(ctx, deployment, original, v1alpha1.ReasonRolloutWaitingForCapacity)
+		if patchErr == nil {
+			result.RequeueAfter = waitingRequeueAfter
+		}
+		return true, result, patchErr
+	}
 }
 
 func retryableOperationalFailure(deploymentStatus v1alpha1.ModelDeploymentStatus) bool {
@@ -829,6 +927,9 @@ func (r *ModelDeploymentController) ensureRuntimeDeployment(
 	if err := r.client.Patch(ctx, &existing, patch); err != nil {
 		return nil, false, fmt.Errorf("patch runtime Deployment: %w", err)
 	}
+	if existing.Generation <= before.Generation {
+		existing.Generation = before.Generation + 1
+	}
 	return &existing, false, nil
 }
 
@@ -973,6 +1074,43 @@ func (r *ModelDeploymentController) reserveGPU(
 	}, nodes, allocations)
 }
 
+func (r *ModelDeploymentController) validateGPUCapacity(
+	ctx context.Context,
+	deployment *v1alpha1.ModelDeployment,
+	nodeName string,
+	count int64,
+) error {
+	var nodeList corev1.NodeList
+	if err := r.client.List(ctx, &nodeList); err != nil {
+		return fmt.Errorf("list Nodes for rollout capacity: %w", err)
+	}
+	nodes := nodeList.Items
+	if nodeName != "" {
+		nodes = nodesNamed(nodes, nodeName)
+	}
+	allocations, err := r.gpuAllocations(ctx, deployment)
+	if err != nil {
+		return err
+	}
+	_, err = r.gpuPlanner.Plan(scheduler.GPURequest{
+		ResourceName:  gpuResourceName(deployment),
+		Count:         count,
+		Type:          deployment.Spec.Resources.GPU.Type,
+		PreferredNode: nodeName,
+	}, nodes, allocations)
+	return err
+}
+
+func nodesNamed(nodes []corev1.Node, name string) []corev1.Node {
+	filtered := make([]corev1.Node, 0, 1)
+	for i := range nodes {
+		if nodes[i].Name == name {
+			filtered = append(filtered, nodes[i])
+		}
+	}
+	return filtered
+}
+
 func (r *ModelDeploymentController) gpuAllocations(
 	ctx context.Context,
 	self *v1alpha1.ModelDeployment,
@@ -1029,10 +1167,14 @@ func (r *ModelDeploymentController) gpuAllocations(
 					!replacementReservesGPUHandoff(deployment.Status.Replacement))) {
 			continue
 		}
+		count := effectiveGPUReservation(deployment)
+		if rolloutSurgeReservationActive(deployment) {
+			count = rolloutSurgeGPUReservation(deployment)
+		}
 		allocations = append(allocations, scheduler.GPUAllocation{
 			NodeName:     deployment.Status.AssignedNode,
 			ResourceName: gpuResourceName(deployment),
-			Count:        effectiveGPUReservation(deployment),
+			Count:        count,
 		})
 		reservedDeployments[key] = struct{}{}
 	}
@@ -1343,10 +1485,7 @@ func (r *ModelDeploymentController) projectRuntimeDeployment(
 		Desired: desired,
 		Ready:   runtimeDeployment.Status.ReadyReplicas,
 	}
-	if desired > 0 &&
-		runtimeDeployment.Status.ObservedGeneration >= runtimeDeployment.Generation &&
-		runtimeDeployment.Status.ReadyReplicas >= desired &&
-		runtimeDeployment.Status.AvailableReplicas >= desired {
+	if desired > 0 && runtimeDeploymentReady(runtimeDeployment) {
 		deployment.Status.Phase = v1alpha1.ModelDeploymentPhaseActive
 		deployment.Status.Model.Loaded = true
 		setDeploymentCondition(deployment, v1alpha1.ConditionRuntimeReady, metav1.ConditionTrue,
@@ -1375,6 +1514,15 @@ func (r *ModelDeploymentController) projectRuntimeDeployment(
 				deployment.Status.Replacement.Message,
 			)
 			eventReason = v1alpha1.ReasonReplacementSucceeded
+		}
+		if rolloutRequiresSpareCapacity(deployment) {
+			setDeploymentCondition(
+				deployment,
+				v1alpha1.ConditionRollout,
+				metav1.ConditionTrue,
+				v1alpha1.ReasonRolloutComplete,
+				"Runtime rollout has the desired ready replicas",
+			)
 		}
 		observeDuration := original.Status.Phase != v1alpha1.ModelDeploymentPhaseActive &&
 			!runtimeDeployment.CreationTimestamp.IsZero()
@@ -1429,6 +1577,20 @@ func (r *ModelDeploymentController) projectRuntimeDeployment(
 	return result, err
 }
 
+func runtimeDeploymentReady(runtimeDeployment *appsv1.Deployment) bool {
+	if runtimeDeployment == nil {
+		return false
+	}
+	desired := int32(0)
+	if runtimeDeployment.Spec.Replicas != nil {
+		desired = *runtimeDeployment.Spec.Replicas
+	}
+	return desired > 0 &&
+		runtimeDeployment.Status.ObservedGeneration >= runtimeDeployment.Generation &&
+		runtimeDeployment.Status.ReadyReplicas >= desired &&
+		runtimeDeployment.Status.AvailableReplicas >= desired
+}
+
 func (r *ModelDeploymentController) projectReadyCache(
 	deployment *v1alpha1.ModelDeployment,
 	result cachecontract.Result,
@@ -1469,6 +1631,23 @@ func setRuntimeWaitingConditions(deployment *v1alpha1.ModelDeployment, reason, m
 	setDeploymentCondition(deployment, v1alpha1.ConditionModelLoaded, metav1.ConditionFalse, reason, message)
 	setDeploymentCondition(deployment, v1alpha1.ConditionRoutingReady, metav1.ConditionFalse, v1alpha1.ReasonRouteDisabled, message)
 	setReadyFalse(&deployment.Status, reason, message)
+}
+
+func setRolloutBlockedConditions(deployment *v1alpha1.ModelDeployment, reason, message string) {
+	setDeploymentCondition(
+		deployment,
+		v1alpha1.ConditionRollout,
+		metav1.ConditionFalse,
+		reason,
+		message,
+	)
+	setDeploymentCondition(
+		deployment,
+		v1alpha1.ConditionReady,
+		metav1.ConditionFalse,
+		reason,
+		message+"; existing ready runtime remains unchanged",
+	)
 }
 
 func (r *ModelDeploymentController) failDeployment(
@@ -1517,9 +1696,13 @@ func (r *ModelDeploymentController) patchDeploymentStatus(
 		eventType := corev1.EventTypeNormal
 		if deployment.Status.Phase == v1alpha1.ModelDeploymentPhaseFailed ||
 			eventReason == v1alpha1.ReasonReplacementActivationFailed ||
-			eventReason == v1alpha1.ReasonReplacementRollbackFailed {
+			eventReason == v1alpha1.ReasonReplacementRollbackFailed ||
+			eventReason == v1alpha1.ReasonRolloutRejected {
 			eventType = corev1.EventTypeWarning
 			r.metrics.IncFailure("modeldeployment", eventReason)
+		}
+		if eventReason == v1alpha1.ReasonRolloutWaitingForCapacity {
+			eventType = corev1.EventTypeWarning
 		}
 		r.eventRecorder.Eventf(deployment, eventType, eventReason, "%s", message)
 	}
@@ -1693,6 +1876,113 @@ func scalingRequeueAfter(deployment *v1alpha1.ModelDeployment) time.Duration {
 		return timeout
 	}
 	return waitingRequeueAfter
+}
+
+func rolloutRequiresSpareCapacity(deployment *v1alpha1.ModelDeployment) bool {
+	switch effectiveRolloutStrategy(deployment) {
+	case v1alpha1.RolloutStrategyRolling,
+		v1alpha1.RolloutStrategyBlueGreen,
+		v1alpha1.RolloutStrategyCanary:
+		return true
+	default:
+		return false
+	}
+}
+
+func effectiveRolloutStrategy(deployment *v1alpha1.ModelDeployment) v1alpha1.RolloutStrategy {
+	if deployment.Spec.Rollout.Strategy == "" {
+		return v1alpha1.RolloutStrategyRecreate
+	}
+	return deployment.Spec.Rollout.Strategy
+}
+
+func effectiveRolloutWhenCapacityUnavailable(
+	deployment *v1alpha1.ModelDeployment,
+) v1alpha1.RolloutWhenCapacityUnavailable {
+	if deployment.Spec.Rollout.WhenCapacityUnavailable == "" {
+		return v1alpha1.RolloutWhenCapacityUnavailableQueue
+	}
+	return deployment.Spec.Rollout.WhenCapacityUnavailable
+}
+
+func rolloutRequiredGPUSlots(
+	deployment *v1alpha1.ModelDeployment,
+	existing *appsv1.Deployment,
+) int64 {
+	oldSlots := runtimeDeploymentGPUReservation(existing, gpuResourceName(deployment))
+	if oldSlots <= 0 {
+		return effectiveGPUReservation(deployment)
+	}
+	perReplica := int64(deployment.Spec.Resources.GPU.Count)
+	if perReplica < 1 {
+		perReplica = 1
+	}
+	switch effectiveRolloutStrategy(deployment) {
+	case v1alpha1.RolloutStrategyBlueGreen:
+		return oldSlots + effectiveGPUReservation(deployment)
+	case v1alpha1.RolloutStrategyRolling, v1alpha1.RolloutStrategyCanary:
+		return oldSlots + perReplica
+	default:
+		return effectiveGPUReservation(deployment)
+	}
+}
+
+func rolloutSurgeReservationActive(deployment *v1alpha1.ModelDeployment) bool {
+	if deployment == nil || !rolloutRequiresSpareCapacity(deployment) {
+		return false
+	}
+	condition, found := status.FindCondition(deployment.Status.Conditions, v1alpha1.ConditionRollout)
+	return found &&
+		condition.Status == metav1.ConditionTrue &&
+		condition.ObservedGeneration >= deployment.Generation &&
+		condition.Reason == v1alpha1.ReasonRolloutCapacityReserved
+}
+
+func rolloutSurgeGPUReservation(deployment *v1alpha1.ModelDeployment) int64 {
+	steady := effectiveGPUReservation(deployment)
+	if steady <= 0 || deployment.Spec.Resources.GPU == nil {
+		return steady
+	}
+	perReplica := int64(deployment.Spec.Resources.GPU.Count)
+	if perReplica < 1 {
+		perReplica = 1
+	}
+	switch effectiveRolloutStrategy(deployment) {
+	case v1alpha1.RolloutStrategyBlueGreen:
+		return steady * 2
+	case v1alpha1.RolloutStrategyRolling, v1alpha1.RolloutStrategyCanary:
+		return steady + perReplica
+	default:
+		return steady
+	}
+}
+
+func runtimeDeploymentGPUReservation(
+	deployment *appsv1.Deployment,
+	resourceName corev1.ResourceName,
+) int64 {
+	if deployment == nil {
+		return 0
+	}
+	replicas := int64(deploymentReplicas(deployment))
+	if replicas <= 0 {
+		return 0
+	}
+	var perPod int64
+	for i := range deployment.Spec.Template.Spec.Containers {
+		container := &deployment.Spec.Template.Spec.Containers[i]
+		if quantity, found := container.Resources.Requests[resourceName]; found && quantity.Sign() > 0 {
+			perPod += quantity.Value()
+		}
+	}
+	return perPod * replicas
+}
+
+func deploymentReplicas(deployment *appsv1.Deployment) int32 {
+	if deployment == nil || deployment.Spec.Replicas == nil {
+		return 1
+	}
+	return *deployment.Spec.Replicas
 }
 
 func effectiveGPUReservation(deployment *v1alpha1.ModelDeployment) int64 {

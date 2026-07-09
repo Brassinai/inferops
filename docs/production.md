@@ -157,4 +157,9 @@ chart's `podDisruptionBudget` values after accepting the availability impact.
   releases the GPU and the replacement becomes ready. Activation failures
   trigger a best-effort rollback whose outcome is reported in status and
   Events; operators must intervene when rollback also fails.
+- Advanced `Rolling`, `BlueGreen`, and `Canary` rollouts require spare
+  compatible GPU capacity on the cache-local node. Simulated multi-GPU tests
+  protect the scheduler contract, but real hardware release drills must still
+  cover vendor device-plugin failures, physical GPU health faults, and topology
+  constraints.
 - Advanced autoscaling and the self-hosted dashboard UI are not included.

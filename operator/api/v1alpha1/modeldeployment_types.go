@@ -38,6 +38,7 @@ type ModelDeploymentSpec struct {
 	Secrets      SecretReferences     `json:"secrets,omitempty"`
 	Scheduling   SchedulingSpec       `json:"scheduling,omitempty"`
 	Availability AvailabilitySpec     `json:"availability,omitempty"`
+	Rollout      RolloutSpec          `json:"rollout,omitempty"`
 }
 
 // ModelDeploymentStatus reports observed deployment state.
@@ -116,6 +117,9 @@ const (
 	// ConditionReplacement reports an explicitly requested single-GPU
 	// replacement and any rollback attempt.
 	ConditionReplacement = "Replacement"
+	// ConditionRollout reports whether an in-place runtime rollout can proceed
+	// under the configured rollout strategy and currently visible capacity.
+	ConditionRollout = "Rollout"
 	// ConditionReady aggregates the overall readiness of the deployment.
 	ConditionReady = "Ready"
 )
@@ -165,6 +169,10 @@ const (
 	ReasonIdleScaledToZero            = "IdleScaledToZero"
 	ReasonScalingMetricsUnavailable   = "ScalingMetricsUnavailable"
 	ReasonScalingCapacityCapped       = "ScalingCapacityCapped"
+	ReasonRolloutCapacityReserved     = "RolloutCapacityReserved"
+	ReasonRolloutComplete             = "RolloutComplete"
+	ReasonRolloutWaitingForCapacity   = "RolloutWaitingForCapacity"
+	ReasonRolloutRejected             = "RolloutRejected"
 	ReasonRouteEnabled                = "RouteEnabled"
 	ReasonRouteDisabled               = "RouteDisabled"
 )
@@ -359,6 +367,40 @@ type AvailabilitySpec struct {
 	PodDisruptionBudget PodDisruptionBudgetSpec `json:"podDisruptionBudget,omitempty"`
 }
 
+// RolloutSpec controls how runtime pod-template changes are applied. Strategies
+// that keep old and new pods live at the same time require spare compatible GPU
+// capacity before the controller starts the rollout.
+type RolloutSpec struct {
+	// +kubebuilder:validation:Enum=Recreate;Rolling;BlueGreen;Canary
+	Strategy RolloutStrategy `json:"strategy,omitempty"`
+	// +kubebuilder:validation:Enum=Queue;Reject
+	WhenCapacityUnavailable RolloutWhenCapacityUnavailable `json:"whenCapacityUnavailable,omitempty"`
+	// CanaryWeightPercent documents the intended canary traffic share. Gateway
+	// traffic selection still uses spec.routing.policy.weight for the backend.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=99
+	CanaryWeightPercent *int32 `json:"canaryWeightPercent,omitempty"`
+}
+
+// RolloutStrategy selects the pod rollout shape for runtime changes.
+type RolloutStrategy string
+
+const (
+	RolloutStrategyRecreate  RolloutStrategy = "Recreate"
+	RolloutStrategyRolling   RolloutStrategy = "Rolling"
+	RolloutStrategyBlueGreen RolloutStrategy = "BlueGreen"
+	RolloutStrategyCanary    RolloutStrategy = "Canary"
+)
+
+// RolloutWhenCapacityUnavailable selects behavior when a surge rollout cannot
+// fit beside the currently running runtime pods.
+type RolloutWhenCapacityUnavailable string
+
+const (
+	RolloutWhenCapacityUnavailableQueue  RolloutWhenCapacityUnavailable = "Queue"
+	RolloutWhenCapacityUnavailableReject RolloutWhenCapacityUnavailable = "Reject"
+)
+
 // PodDisruptionBudgetSpec configures the managed runtime PodDisruptionBudget.
 // Protection is enabled by default when enabled is omitted.
 type PodDisruptionBudgetSpec struct {
@@ -512,6 +554,10 @@ func (in *ModelDeploymentSpec) DeepCopyInto(out *ModelDeploymentSpec) {
 	if in.Availability.PodDisruptionBudget.MinAvailable != nil {
 		value := *in.Availability.PodDisruptionBudget.MinAvailable
 		out.Availability.PodDisruptionBudget.MinAvailable = &value
+	}
+	if in.Rollout.CanaryWeightPercent != nil {
+		value := *in.Rollout.CanaryWeightPercent
+		out.Rollout.CanaryWeightPercent = &value
 	}
 }
 

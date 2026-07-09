@@ -660,6 +660,46 @@ func TestBuildRuntimeDeploymentVariants(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "rolling rollout strategy",
+			mutate: func(md *v1alpha1.ModelDeployment, _ *v1alpha1.ModelRuntime) {
+				md.Spec.Rollout.Strategy = v1alpha1.RolloutStrategyRolling
+			},
+			check: func(t *testing.T, deployment *appsv1.Deployment) {
+				assertRollingStrategy(t, deployment, 1)
+				if got := deployment.Spec.Template.Annotations["inferops.dev/rollout-strategy"]; got != "Rolling" {
+					t.Fatalf("rollout annotation = %q, want Rolling", got)
+				}
+			},
+		},
+		{
+			name: "blue-green rollout strategy",
+			mutate: func(md *v1alpha1.ModelDeployment, _ *v1alpha1.ModelRuntime) {
+				md.Spec.Rollout.Strategy = v1alpha1.RolloutStrategyBlueGreen
+			},
+			check: func(t *testing.T, deployment *appsv1.Deployment) {
+				if deployment.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType ||
+					deployment.Spec.Strategy.RollingUpdate == nil ||
+					deployment.Spec.Strategy.RollingUpdate.MaxSurge == nil ||
+					deployment.Spec.Strategy.RollingUpdate.MaxSurge.StrVal != "100%" {
+					t.Fatalf("blue-green strategy = %#v, want RollingUpdate maxSurge 100%%", deployment.Spec.Strategy)
+				}
+			},
+		},
+		{
+			name: "canary rollout strategy",
+			mutate: func(md *v1alpha1.ModelDeployment, _ *v1alpha1.ModelRuntime) {
+				weight := int32(20)
+				md.Spec.Rollout.Strategy = v1alpha1.RolloutStrategyCanary
+				md.Spec.Rollout.CanaryWeightPercent = &weight
+			},
+			check: func(t *testing.T, deployment *appsv1.Deployment) {
+				assertRollingStrategy(t, deployment, 1)
+				if got := deployment.Spec.Template.Annotations["inferops.dev/canary-weight-percent"]; got != "20" {
+					t.Fatalf("canary weight annotation = %q, want 20", got)
+				}
+			},
+		},
 	}
 
 	for _, test := range tests {
@@ -1314,6 +1354,18 @@ func assertRequiredCacheNode(t *testing.T, affinity *corev1.Affinity, nodeName s
 		expression.Operator != corev1.NodeSelectorOpIn ||
 		!reflect.DeepEqual(expression.Values, []string{nodeName}) {
 		t.Errorf("node affinity expression = %#v, want hostname In [%s]", expression, nodeName)
+	}
+}
+
+func assertRollingStrategy(t *testing.T, deployment *appsv1.Deployment, maxSurge int) {
+	t.Helper()
+	if deployment.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType ||
+		deployment.Spec.Strategy.RollingUpdate == nil ||
+		deployment.Spec.Strategy.RollingUpdate.MaxUnavailable == nil ||
+		deployment.Spec.Strategy.RollingUpdate.MaxUnavailable.IntVal != 0 ||
+		deployment.Spec.Strategy.RollingUpdate.MaxSurge == nil ||
+		deployment.Spec.Strategy.RollingUpdate.MaxSurge.IntVal != int32(maxSurge) {
+		t.Fatalf("rolling strategy = %#v, want maxUnavailable 0 and maxSurge %d", deployment.Spec.Strategy, maxSurge)
 	}
 }
 

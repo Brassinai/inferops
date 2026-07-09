@@ -164,6 +164,35 @@ func ValidateModelDeployment(deployment v1alpha1.ModelDeployment) error {
 	if err := validateAvailability(deployment); err != nil {
 		return err
 	}
+	if err := validateRollout(deployment.Spec.Rollout); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateRollout(rollout v1alpha1.RolloutSpec) error {
+	switch rollout.Strategy {
+	case "", v1alpha1.RolloutStrategyRecreate, v1alpha1.RolloutStrategyRolling,
+		v1alpha1.RolloutStrategyBlueGreen, v1alpha1.RolloutStrategyCanary:
+	default:
+		return fmt.Errorf("spec.rollout.strategy %q is invalid", rollout.Strategy)
+	}
+	switch rollout.WhenCapacityUnavailable {
+	case "", v1alpha1.RolloutWhenCapacityUnavailableQueue, v1alpha1.RolloutWhenCapacityUnavailableReject:
+	default:
+		return fmt.Errorf(
+			"spec.rollout.whenCapacityUnavailable %q is invalid",
+			rollout.WhenCapacityUnavailable,
+		)
+	}
+	if rollout.CanaryWeightPercent != nil {
+		if *rollout.CanaryWeightPercent < 1 || *rollout.CanaryWeightPercent > 99 {
+			return errors.New("spec.rollout.canaryWeightPercent must be between 1 and 99")
+		}
+		if rollout.Strategy != v1alpha1.RolloutStrategyCanary {
+			return errors.New("spec.rollout.canaryWeightPercent requires strategy Canary")
+		}
+	}
 	return nil
 }
 

@@ -273,6 +273,22 @@ spec:
                           type: integer
                           format: int32
                           minimum: 0
+                rollout:
+                  type: object
+                  properties:
+                    strategy:
+                      type: string
+                      enum: [Recreate, Rolling, BlueGreen, Canary]
+                      default: Recreate
+                    whenCapacityUnavailable:
+                      type: string
+                      enum: [Queue, Reject]
+                      default: Queue
+                    canaryWeightPercent:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                      maximum: 99
             status:
               type: object
               properties:

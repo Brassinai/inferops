@@ -66,6 +66,10 @@ func TestModelDeploymentDeepCopy(t *testing.T) {
 					MinAvailable: int32Pointer(1),
 				},
 			},
+			Rollout: RolloutSpec{
+				Strategy:            RolloutStrategyCanary,
+				CanaryWeightPercent: int32Pointer(10),
+			},
 		},
 		Status: ModelDeploymentStatus{
 			Phase:        ModelDeploymentPhaseActive,
@@ -105,6 +109,7 @@ func TestModelDeploymentDeepCopy(t *testing.T) {
 	copied.Spec.Scheduling.TopologySpreadConstraints[0].TopologyKey = "modified"
 	*copied.Spec.Availability.PodDisruptionBudget.Enabled = false
 	*copied.Spec.Availability.PodDisruptionBudget.MinAvailable = 0
+	*copied.Spec.Rollout.CanaryWeightPercent = 50
 	copied.Status.AssignedGPUs[0] = "modified"
 	copied.Status.DrainStartedAt.Time = copied.Status.DrainStartedAt.Add(time.Hour)
 	copied.Status.Replacement.Target.Name = "modified"
@@ -124,6 +129,10 @@ func TestModelDeploymentDeepCopy(t *testing.T) {
 	if !*original.Spec.Availability.PodDisruptionBudget.Enabled ||
 		*original.Spec.Availability.PodDisruptionBudget.MinAvailable != 1 {
 		t.Error("original availability configuration was mutated")
+	}
+	if original.Spec.Rollout.CanaryWeightPercent == nil ||
+		*original.Spec.Rollout.CanaryWeightPercent != 10 {
+		t.Error("original rollout configuration was mutated")
 	}
 	if original.Status.AssignedGPUs[0] != "gpu-0" {
 		t.Errorf("original assignedGPUs was mutated: got %q", original.Status.AssignedGPUs[0])
