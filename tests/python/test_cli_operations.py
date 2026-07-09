@@ -10,8 +10,13 @@ from types import SimpleNamespace
 import unittest
 
 from inferops_cli import activate, delete, endpoints, models
-from inferops_cli.k8s_client import LiveKubernetesClient
-from inferops_cli.kube import ActivationRequest, ClusterTarget, LogsRequest
+from inferops_cli.k8s_client import LiveKubernetesClient, _summarize_deployment
+from inferops_cli.kube import (
+    ActivationRequest,
+    ClusterTarget,
+    DeactivationRequest,
+    LogsRequest,
+)
 from tests.python.fake_kube_client import FakeKubernetesClient
 
 
@@ -114,6 +119,31 @@ class FakeOperationalCommandsTest(unittest.TestCase):
             "conditions": [],
         }
 
+    def test_status_summary_exposes_replacement_without_secret_references(self) -> None:
+        resource = deployment(phase="Draining")
+        resource["status"]["drainStartedAt"] = "2026-07-04T12:00:00Z"
+        resource["status"]["replacement"] = {
+            "phase": "Draining",
+            "requestGeneration": 7,
+            "target": {
+                "namespace": "team-a",
+                "name": "old-model",
+                "uid": "old-model-uid",
+                "token": "must-not-be-returned",
+            },
+            "startedAt": "2026-07-04T12:00:00Z",
+            "message": "draining old-model",
+            "internalField": "must-not-be-returned",
+        }
+
+        summary = _summarize_deployment(resource)
+
+        self.assertEqual(summary["replacement"]["phase"], "Draining")
+        self.assertEqual(summary["replacement"]["requestGeneration"], 7)
+        self.assertNotIn("internalField", summary["replacement"])
+        self.assertNotIn("token", summary["replacement"]["target"])
+        self.assertNotIn("secrets", summary)
+
     def test_activate_reports_active_and_explicit_replacement_policy(self) -> None:
         stdout, _, code = self._run(
             activate.run,
@@ -124,6 +154,16 @@ class FakeOperationalCommandsTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(payload["outcome"], "active")
         self.assertEqual(payload["deployment"]["whenFull"], "ReplaceOldest")
+        self.assertEqual(
+            [transition["reason"] for transition in payload["transitions"]],
+            [
+                "ReplacementSelected",
+                "ReplacementDraining",
+                "RuntimeStarting",
+                "RuntimeReady",
+            ],
+        )
+        self.assertEqual(payload["deployment"]["replacement"]["phase"], "Completed")
         self.assertEqual(payload["transitions"][-1]["phase"], "Active")
 
     def test_activate_reports_waiting_without_failure_exit(self) -> None:
@@ -201,6 +241,7 @@ class LiveOperationalClientTest(unittest.TestCase):
         class CustomAPI:
             def __init__(self):
                 self.patched_body = None
+                self.field_manager = None
                 self.responses = [
                     deployment(
                         phase="WaitingForGPU",
@@ -224,6 +265,7 @@ class LiveOperationalClientTest(unittest.TestCase):
 
             def patch_namespaced_custom_object(self, **kwargs):
                 self.patched_body = kwargs["body"]
+                self.field_manager = kwargs["field_manager"]
                 return deployment(
                     phase="Active",
                     observed_generation=1,
@@ -258,6 +300,7 @@ class LiveOperationalClientTest(unittest.TestCase):
                 }
             },
         )
+        self.assertEqual(api.field_manager, "inferops-cli")
         self.assertEqual(response["outcome"], "active")
         self.assertEqual(
             [item["phase"] for item in response["transitions"]],
@@ -287,6 +330,37 @@ class LiveOperationalClientTest(unittest.TestCase):
         )
 
         self.assertEqual(response["outcome"], "rejected")
+
+    def test_deactivate_uses_cli_field_manager(self) -> None:
+        class CustomAPI:
+            def __init__(self):
+                self.patched_body = None
+                self.field_manager = None
+
+            def patch_namespaced_custom_object(self, **kwargs):
+                self.patched_body = kwargs["body"]
+                self.field_manager = kwargs["field_manager"]
+                result = deployment(phase="Cached")
+                result["spec"]["activation"]["desiredState"] = "Inactive"
+                return result
+
+        api = CustomAPI()
+        client = live_client(api)
+
+        response = client.deactivate(
+            DeactivationRequest(
+                cluster=client._cluster,
+                name="qwen-chat",
+                wait=False,
+            )
+        )
+
+        self.assertEqual(
+            api.patched_body,
+            {"spec": {"activation": {"desiredState": "Inactive"}}},
+        )
+        self.assertEqual(api.field_manager, "inferops-cli")
+        self.assertEqual(response["outcome"], "requested")
 
     def test_model_and_endpoint_lists_whitelist_fields(self) -> None:
         item = deployment(phase="Active")

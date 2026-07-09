@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -35,6 +36,11 @@ class RuntimeContractTest(unittest.TestCase):
             "for argument do\n"
             '    printf "%s\\n" "$argument" >> "$CAPTURE_PATH"\n'
             "done\n"
+            'if [ "${WAIT_FOR_SIGNAL:-}" = "true" ]; then\n'
+            '    : > "$STARTED_PATH"\n'
+            "    trap 'printf TERM > \"$SIGNAL_PATH\"; exit 0' TERM\n"
+            "    while :; do sleep 1; done\n"
+            "fi\n"
         )
         for command in ("nanovllm", "vllm", "python3", "llama-server"):
             path = self.bin_path / command
@@ -296,6 +302,46 @@ class RuntimeContractTest(unittest.TestCase):
         self.assertIn("vllm/vllm-openai-cpu:", dockerfile)
         self.assertIn("@sha256:", dockerfile)
         self.assertIn("runtimes/vllm/entrypoint.sh", dockerfile)
+
+    def test_vllm_and_sglang_forward_termination_to_engine(self) -> None:
+        for runtime in ("vllm", "sglang"):
+            with self.subTest(runtime=runtime):
+                started_path = self.temp_path / f"{runtime}-started"
+                signal_path = self.temp_path / f"{runtime}-signal"
+                environment = {
+                    "PATH": f"{self.bin_path}:{os.environ['PATH']}",
+                    "CAPTURE_PATH": str(self.capture_path),
+                    "MODEL_PATH": str(self.model_path),
+                    "WAIT_FOR_SIGNAL": "true",
+                    "STARTED_PATH": str(started_path),
+                    "SIGNAL_PATH": str(signal_path),
+                }
+                process = subprocess.Popen(
+                    ["/bin/sh", str(ENTRYPOINTS[runtime])],
+                    env=environment,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                try:
+                    deadline = time.monotonic() + 3
+                    while not started_path.exists() and time.monotonic() < deadline:
+                        if process.poll() is not None:
+                            self.fail(
+                                f"{runtime} adapter exited before signal: "
+                                f"{process.stderr.read() if process.stderr else ''}"
+                            )
+                        time.sleep(0.02)
+                    self.assertTrue(started_path.exists(), "fake engine did not start")
+                    process.terminate()
+                    _, stderr = process.communicate(timeout=3)
+                    self.assertEqual(process.returncode, 0, stderr)
+                    self.assertEqual(signal_path.read_text(encoding="utf-8"), "TERM")
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                    if process.stdout and not process.stdout.closed:
+                        process.communicate(timeout=3)
 
 
 if __name__ == "__main__":

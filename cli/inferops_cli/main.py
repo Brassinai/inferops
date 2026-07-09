@@ -47,12 +47,14 @@ def build_parser() -> CLIArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, client=None) -> int:
     """Run the CLI."""
 
     def action() -> int:
         parser = build_parser()
         args = parser.parse_args(argv)
+        if client is not None:
+            args._client_factory = lambda _cluster: client
         return args.handler(args)
 
     return run_with_cli_errors(action)

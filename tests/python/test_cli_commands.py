@@ -46,6 +46,16 @@ def make_args(**overrides) -> argparse.Namespace:
         "profile": "default",
         "cache_path": None,
         "tailscale_hostname": None,
+        "exposure": None,
+        "ingress_class": None,
+        "ingress_hostname": None,
+        "gateway_name": None,
+        "gateway_namespace": None,
+        "gateway_section_name": None,
+        "gateway_hostname": None,
+        "load_balancer_class": None,
+        "gateway_auth_secret": None,
+        "allow_unauthenticated_exposure": False,
         "charts_dir": None,
         "checks": None,
         "no_wait": False,
@@ -98,6 +108,12 @@ class CLICommandParserTest(unittest.TestCase):
             "--profile",
             "--cache-path",
             "--tailscale-hostname",
+            "--exposure",
+            "--ingress-class",
+            "--gateway-name",
+            "--load-balancer-class",
+            "--gateway-auth-secret",
+            "--allow-unauthenticated-exposure",
             "--charts-dir",
         ):
             self.assertIn(option, install_help)
@@ -141,6 +157,91 @@ class CLICommandParserTest(unittest.TestCase):
 
 
 class CLICommandHandlerTest(unittest.TestCase):
+    def test_main_runs_full_lifecycle_replacement_and_failure_workflow(self) -> None:
+        source = textwrap.dedent(
+            """
+            import inferops
+
+            app = inferops.App("support")
+
+            @app.model(name="qwen-chat", model="Qwen/Qwen2.5-7B-Instruct")
+            class QwenChat:
+                pass
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            app_path = Path(directory) / "app.py"
+            app_path.write_text(source, encoding="utf-8")
+            fake_client = FakeKubernetesClient()
+            common = [
+                "--namespace",
+                "team-a",
+                "--context",
+                "kind-dev",
+                "--output",
+                "json",
+            ]
+
+            deployed, _, deploy_code = self._run_main(
+                ["deploy", str(app_path), *common], fake_client
+            )
+            activated, _, activate_code = self._run_main(
+                [
+                    "activate",
+                    "qwen-chat",
+                    "--when-full",
+                    "ReplaceOldest",
+                    *common,
+                ],
+                fake_client,
+            )
+            status_output, _, status_code = self._run_main(
+                ["status", "qwen-chat", *common], fake_client
+            )
+            deactivated, _, deactivate_code = self._run_main(
+                ["deactivate", "qwen-chat", *common], fake_client
+            )
+
+            key = fake_client._resource_key(
+                ClusterTarget(namespace="team-a", context="kind-dev"),
+                "qwen-chat",
+            )
+            fake_client._activation_outcomes[key] = "rejected"
+            rejected, rejected_error, rejected_code = self._run_main(
+                ["activate", "qwen-chat", "--when-full", "Reject", *common],
+                fake_client,
+            )
+
+        self.assertEqual(
+            (deploy_code, activate_code, status_code, deactivate_code),
+            (0, 0, 0, 0),
+        )
+        self.assertEqual(json.loads(deployed)["deployments"][0]["phase"], "Inactive")
+        self.assertEqual(json.loads(activated)["outcome"], "active")
+        self.assertEqual(
+            json.loads(activated)["deployment"]["whenFull"], "ReplaceOldest"
+        )
+        self.assertEqual(
+            [item["reason"] for item in json.loads(activated)["transitions"]],
+            [
+                "ReplacementSelected",
+                "ReplacementDraining",
+                "RuntimeStarting",
+                "RuntimeReady",
+            ],
+        )
+        status_deployment = json.loads(status_output)["deployment"]
+        self.assertEqual(status_deployment["phase"], "Active")
+        self.assertEqual(status_deployment["replacement"]["phase"], "Completed")
+        self.assertEqual(
+            status_deployment["replacement"]["target"]["name"], "previous-model"
+        )
+        self.assertEqual(json.loads(deactivated)["outcome"], "inactive")
+        self.assertEqual(rejected_code, 1)
+        self.assertEqual(json.loads(rejected)["outcome"], "rejected")
+        self.assertEqual(rejected_error, "")
+
     def test_command_lifecycle_uses_fake_client(self) -> None:
         source = textwrap.dedent(
             """
@@ -486,6 +587,15 @@ class CLICommandHandlerTest(unittest.TestCase):
         stderr = io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
             exit_code = func(args, fake_client)
+        return stdout.getvalue(), stderr.getvalue(), exit_code
+
+    def _run_main(
+        self, argv: list[str], fake_client: FakeKubernetesClient
+    ) -> tuple[str, str, int]:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            exit_code = main.main(argv, client=fake_client)
         return stdout.getvalue(), stderr.getvalue(), exit_code
 
 

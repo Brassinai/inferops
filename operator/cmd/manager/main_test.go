@@ -179,6 +179,32 @@ func TestOperatorConfigFromEnvBuildsDrainChecker(t *testing.T) {
 	}
 }
 
+func TestOperatorConfigFromEnvBuildsEndpointSliceDrainCheckerConfig(t *testing.T) {
+	t.Setenv("INFEROPS_CACHE_ROOT", "/var/lib/inferops/models")
+	t.Setenv("INFEROPS_CACHE_DOWNLOADER_IMAGE", "ghcr.io/inferops/model-downloader:v0.1.0")
+	t.Setenv("INFEROPS_OPERATOR_NAMESPACE", "inferops-system")
+	t.Setenv("INFEROPS_GATEWAY_DRAIN_STATUS_SERVICE_NAME", "inferops-gateway")
+	t.Setenv("INFEROPS_GATEWAY_DRAIN_STATUS_SERVICE_PORT", "8080")
+	t.Setenv("INFEROPS_GATEWAY_DRAIN_STATUS_TOKEN_FILE", "/var/run/inferops/token")
+
+	config, err := operatorConfigFromEnv()
+	if err != nil {
+		t.Fatalf("operatorConfigFromEnv() error = %v", err)
+	}
+	if config.drainChecker != nil {
+		t.Fatalf("drainChecker = %T, want nil before manager client exists", config.drainChecker)
+	}
+	if config.gatewayDrainService == nil {
+		t.Fatal("gatewayDrainService is nil")
+	}
+	if config.gatewayDrainService.Namespace != "inferops-system" ||
+		config.gatewayDrainService.ServiceName != "inferops-gateway" ||
+		config.gatewayDrainService.Port != 8080 ||
+		config.gatewayDrainService.TokenFile != "/var/run/inferops/token" {
+		t.Fatalf("gatewayDrainService = %#v", config.gatewayDrainService)
+	}
+}
+
 func TestDurationFromEnv(t *testing.T) {
 	t.Setenv("INFEROPS_TEST_DURATION", "15s")
 	got, err := durationFromEnv("INFEROPS_TEST_DURATION", time.Minute)

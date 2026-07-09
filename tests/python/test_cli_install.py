@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import subprocess
 import tempfile
@@ -86,6 +87,160 @@ class HelmInstallerTest(unittest.TestCase):
         self.assertIn("profile=default", commands[1])
         self.assertNotIn("tailscale.enabled=true", commands[2])
         self.assertEqual(response["install"]["crds"]["status"], "applied")
+        self.assertEqual(response["install"]["exposure"], "cluster-ip")
+
+    def test_builds_each_portable_gateway_exposure(self) -> None:
+        cases = (
+            (
+                InstallRequest(
+                    cluster=ClusterTarget(namespace="inferops-system"),
+                    profile="default",
+                    exposure="load-balancer",
+                    load_balancer_class="example.com/internal",
+                    gateway_auth_secret="inferops-gateway-token",
+                ),
+                (
+                    "service.type=LoadBalancer",
+                    "service.loadBalancerClass=example.com/internal",
+                    "auth.enabled=true",
+                    "auth.secretName=inferops-gateway-token",
+                ),
+                "load-balancer",
+            ),
+            (
+                InstallRequest(
+                    cluster=ClusterTarget(namespace="inferops-system"),
+                    profile="default",
+                    exposure="ingress",
+                    ingress_class="nginx",
+                    ingress_hostname="models.example.com",
+                    gateway_auth_secret="inferops-gateway-token",
+                ),
+                (
+                    "ingress.enabled=true",
+                    "ingress.className=nginx",
+                    "ingress.hostname=models.example.com",
+                    "auth.enabled=true",
+                    "auth.secretName=inferops-gateway-token",
+                ),
+                "ingress",
+            ),
+            (
+                InstallRequest(
+                    cluster=ClusterTarget(namespace="inferops-system"),
+                    profile="default",
+                    exposure="gateway-api",
+                    gateway_name="public",
+                    gateway_namespace="ingress-system",
+                    gateway_section_name="https",
+                    gateway_hostname="models.example.com",
+                    gateway_auth_secret="inferops-gateway-token",
+                ),
+                (
+                    "gatewayAPI.enabled=true",
+                    "gatewayAPI.parentRefs[0].name=public",
+                    "gatewayAPI.parentRefs[0].namespace=ingress-system",
+                    "gatewayAPI.parentRefs[0].sectionName=https",
+                    "gatewayAPI.hostnames[0]=models.example.com",
+                    "auth.enabled=true",
+                    "auth.secretName=inferops-gateway-token",
+                ),
+                "gateway-api",
+            ),
+        )
+
+        for request, expected_values, expected_exposure in cases:
+            with self.subTest(exposure=expected_exposure):
+                commands: list[list[str]] = []
+
+                def run(command):
+                    commands.append(list(command))
+                    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+                with tempfile.TemporaryDirectory() as directory:
+                    charts_dir = self._make_charts(Path(directory))
+                    request = replace(request, charts_dir=str(charts_dir))
+                    response = HelmInstaller(runner=run).install(request)
+
+                gateway_command = commands[2]
+                for value in expected_values:
+                    self.assertIn(value, gateway_command)
+                self.assertEqual(response["install"]["exposure"], expected_exposure)
+                self.assertTrue(response["install"]["authEnabled"])
+
+    def test_external_exposure_requires_authentication_or_acknowledgement(self) -> None:
+        unauthenticated = InstallRequest(
+            cluster=ClusterTarget(namespace="inferops-system"),
+            profile="default",
+            exposure="ingress",
+            ingress_class="nginx",
+        )
+        with self.assertRaisesRegex(CLIError, "requires --gateway-auth-secret"):
+            HelmInstaller(
+                runner=lambda command: self.fail("Helm should not run")
+            ).install(unauthenticated)
+
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            charts_dir = self._make_charts(Path(directory))
+            response = HelmInstaller(runner=run).install(
+                replace(
+                    unauthenticated,
+                    allow_unauthenticated_exposure=True,
+                    charts_dir=str(charts_dir),
+                )
+            )
+
+        self.assertFalse(response["install"]["authEnabled"])
+        self.assertNotIn("auth.enabled=true", commands[2])
+
+    def test_rejects_incomplete_or_conflicting_exposure_options(self) -> None:
+        requests = (
+            InstallRequest(
+                cluster=ClusterTarget(),
+                profile="default",
+                exposure="ingress",
+            ),
+            InstallRequest(
+                cluster=ClusterTarget(),
+                profile="default",
+                exposure="gateway-api",
+            ),
+            InstallRequest(
+                cluster=ClusterTarget(),
+                profile="default",
+                exposure="cluster-ip",
+                load_balancer_class="example.com/internal",
+            ),
+            InstallRequest(
+                cluster=ClusterTarget(),
+                profile="default",
+                exposure="ingress",
+                ingress_class="nginx",
+                tailscale_hostname="inferops",
+            ),
+            InstallRequest(
+                cluster=ClusterTarget(),
+                profile="default",
+                allow_unauthenticated_exposure=True,
+            ),
+            InstallRequest(
+                cluster=ClusterTarget(),
+                profile="default",
+                exposure="load-balancer",
+                gateway_auth_secret="Invalid_Secret",
+            ),
+        )
+        for request in requests:
+            with self.subTest(request=request), self.assertRaises(CLIError):
+                HelmInstaller(
+                    runner=lambda command: self.fail("Helm should not run")
+                ).install(request)
 
     def test_crd_apply_failure_stops_before_helm(self) -> None:
         commands: list[list[str]] = []

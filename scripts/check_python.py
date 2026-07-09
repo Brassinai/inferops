@@ -7,7 +7,13 @@ import ast
 from pathlib import Path
 
 
-ROOTS = (Path("sdk/python"), Path("cli"), Path("tests/python"), Path("scripts"))
+ROOTS = (
+    Path("sdk/python"),
+    Path("cli"),
+    Path("examples"),
+    Path("tests/python"),
+    Path("scripts"),
+)
 
 
 def main() -> None:

@@ -1,0 +1,52 @@
+{{- if .Values.ingress.enabled }}
+{{- if .Values.tailscale.enabled }}
+{{- fail "ingress.enabled and tailscale.enabled cannot both be true" }}
+{{- end }}
+{{- if ne .Values.ingress.path "/" }}
+{{- fail "ingress.path must be / because the InferOps gateway owns model route prefixes" }}
+{{- end }}
+{{- if ne .Values.ingress.pathType "Prefix" }}
+{{- fail "ingress.pathType must be Prefix so /models/... routes reach the gateway" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "inferops-gateway.fullname" . }}
+  labels:
+    {{- include "inferops-gateway.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- with .Values.ingress.hostname }}
+    - host: {{ . | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: {{ $.Values.ingress.pathType }}
+            backend:
+              service:
+                name: {{ include "inferops-gateway.fullname" $ }}
+                port:
+                  name: http
+    {{- else }}
+    - http:
+        paths:
+          - path: /
+            pathType: {{ $.Values.ingress.pathType }}
+            backend:
+              service:
+                name: {{ include "inferops-gateway.fullname" $ }}
+                port:
+                  name: http
+    {{- end }}
+{{- end }}

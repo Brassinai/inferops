@@ -150,8 +150,9 @@ engine-specific readiness endpoints, such as SGLang's `/health_generate`.
 - CPU-only workloads rely on ordinary Kubernetes CPU and memory scheduling.
 - `Queue` is the default full-capacity behavior and produces `WaitingForGPU`.
   `Reject` produces a terminal `InsufficientGPUCapacity` condition.
-  Replacement values remain explicit permissions but are rejected until the
-  drain/rollback controller is present.
+  Replacement values are explicit permissions for a durable single-GPU
+  drain/activate transaction. A failed replacement activation frees the slot
+  and attempts to restore the prior runtime.
 - Kubernetes and the vendor device plugin choose physical devices. InferOps
   records its node reservation but leaves `assignedGPUs` empty until a trusted
   runtime/device-plugin integration can report physical UUIDs.

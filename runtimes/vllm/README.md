@@ -101,6 +101,14 @@ curl --fail http://localhost:8000/v1/chat/completions \
   --data '{"model":"smollm2-135m","messages":[{"role":"user","content":"Reply with one short sentence."}],"max_tokens":32}'
 ```
 
+Run the automated shared contract:
+
+```bash
+make runtime-conformance \
+  RUNTIME_BASE_URL=http://127.0.0.1:8000 \
+  RUNTIME_MODEL=smollm2-135m
+```
+
 ## Model cache
 
 InferOps mounts one prepared model directory at `MODEL_PATH`. The entrypoint

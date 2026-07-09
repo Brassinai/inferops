@@ -259,6 +259,43 @@ spec:
                   type: array
                   items:
                     type: string
+                drainStartedAt:
+                  type: string
+                  format: date-time
+                replacement:
+                  type: object
+                  properties:
+                    phase:
+                      type: string
+                      enum: [Draining, Activating, Succeeded, Displaced, RollingBack, RolledBack, RollbackFailed]
+                    requestGeneration:
+                      type: integer
+                      format: int64
+                    target:
+                      type: object
+                      required: [namespace, name, uid]
+                      properties:
+                        namespace:
+                          type: string
+                        name:
+                          type: string
+                        uid:
+                          type: string
+                    requestedBy:
+                      type: object
+                      required: [namespace, name, uid]
+                      properties:
+                        namespace:
+                          type: string
+                        name:
+                          type: string
+                        uid:
+                          type: string
+                    startedAt:
+                      type: string
+                      format: date-time
+                    message:
+                      type: string
                 cache:
                   type: object
                   properties:

@@ -13,10 +13,76 @@ serviceAccount:
 rbac:
   create: true
 
+networkPolicy:
+  enabled: true
+  gateway:
+    # Empty permits all sources on the gateway HTTP port. Narrow this to the
+    # ingress controller or tailnet peers in production.
+    ingressFrom: []
+    # Replace these common Kubernetes API Service IPs with the exact /32 or
+    # /128 advertised as KUBERNETES_SERVICE_HOST in this cluster.
+    apiServerCIDRs:
+      - 10.96.0.1/32
+      - 10.43.0.1/32
+      - 10.0.0.1/32
+  runtime:
+    # Add monitoring peers when Prometheus scrapes runtime metrics directly.
+    additionalIngressFrom: []
+    # Runtime weights are prepared by separate cache Jobs, so runtime pods
+    # need no egress by default. Add explicit rules only when required.
+    egress: []
+  dns:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    podSelector:
+      matchLabels:
+        k8s-app: kube-dns
+
+tenancy:
+  access:
+    enabled: false
+    roleName: inferops-team-operator
+    # User and Group subjects preserve individual Kubernetes audit identity.
+    # ServiceAccount subjects must include their namespace.
+    subjects: []
+    allowModelRuntimeWrite: false
+    # Keep deletion platform-admin-only because direct Kubernetes deletes
+    # bypass the CLI's in-use cache checks.
+    allowCacheDelete: false
+  quota:
+    enabled: false
+    hard:
+      pods: "20"
+      requests.cpu: "16"
+      requests.memory: 64Gi
+      limits.cpu: "32"
+      limits.memory: 128Gi
+      count/modeldeployments.inference.inferops.dev: "10"
+      count/modelcaches.inference.inferops.dev: "20"
+  limitRange:
+    enabled: false
+    limits:
+      - type: Container
+        defaultRequest:
+          cpu: 100m
+          memory: 128Mi
+        default:
+          cpu: "8"
+          memory: 32Gi
+
 discovery:
   # Bounds how long a Kubernetes lifecycle or Service change can remain unseen.
   # The gateway rejects values below one second.
   syncInterval: 5s
+
+auth:
+  enabled: false
+  # Name of an existing Secret in the release namespace.
+  secretName: ""
+  # The key contains one bearer token per line.
+  secretKey: token
+  mountPath: /var/run/secrets/inferops-gateway-auth
 
 podDisruptionBudget:
   enabled: true
@@ -30,6 +96,28 @@ service:
   type: ClusterIP
   port: 80
   annotations: {}
+  # Optional settings for cloud or controller-provided LoadBalancer Services.
+  loadBalancerClass: ""
+  loadBalancerSourceRanges: []
+  externalTrafficPolicy: Cluster
+
+ingress:
+  enabled: false
+  # Set this explicitly unless the cluster has a trusted default IngressClass.
+  className: ""
+  annotations: {}
+  hostname: ""
+  path: /
+  pathType: Prefix
+  tls: []
+
+gatewayAPI:
+  enabled: false
+  annotations: {}
+  # References an operator-managed Gateway. The chart creates only HTTPRoute.
+  parentRefs: []
+  hostnames: []
+  path: /
 
 serviceMonitor:
   enabled: false
@@ -72,3 +160,12 @@ securityContext:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+# Generates a release-specific selector so separate gateway releases do not
+# affect one another's topology skew.
+topologySpread:
+  enabled: false
+  maxSkew: 1
+  topologyKey: kubernetes.io/hostname
+  whenUnsatisfiable: DoNotSchedule
+# Advanced additional constraints. Do not combine with topologySpread.enabled.
+topologySpreadConstraints: []

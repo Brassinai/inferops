@@ -19,7 +19,7 @@ PYTHON ?= $(if $(wildcard $(LOCAL_PYTHON)),$(LOCAL_PYTHON),$(SYSTEM_PYTHON))
 GO_FILES := $(shell find . -type f -name '*.go' -not -path './vendor/*' -not -path './.git/*' | sort)
 CHARTS := $(sort $(dir $(wildcard deploy/helm/*/Chart.yaml)))
 
-.PHONY: help setup tools-check fmt fmt-check test vet python-check python-test python-package \
+.PHONY: help setup tools-check fmt fmt-check test vet python-check python-test python-package runtime-conformance runtime-conformance-matrix \
 	model-downloader-build model-downloader-test helm-lint helm-template yaml-check schema-check verify
 
 help:
@@ -34,6 +34,8 @@ help:
 		'  python-check   Parse Python source files' \
 		'  python-test    Run Python unit tests' \
 		'  python-package Build the CLI source distribution and wheel' \
+		'  runtime-conformance Validate a running runtime; requires RUNTIME_BASE_URL and RUNTIME_MODEL' \
+		'  runtime-conformance-matrix Validate live vLLM and SGLang release candidates' \
 		'  model-downloader-build Build the cache downloader container image' \
 		'  model-downloader-test  Run cache downloader unit tests' \
 		'  helm-lint      Lint all Helm charts' \
@@ -96,6 +98,27 @@ python-package:
 	@mkdir -p .verify/dist
 	$(PYTHON) -m build --no-isolation cli --outdir .verify/dist
 
+runtime-conformance:
+	@test -n "$(RUNTIME_BASE_URL)" || { echo "error: RUNTIME_BASE_URL is required"; exit 1; }
+	@test -n "$(RUNTIME_MODEL)" || { echo "error: RUNTIME_MODEL is required"; exit 1; }
+	$(PYTHON) scripts/runtime_conformance.py \
+		--base-url "$(RUNTIME_BASE_URL)" \
+		--model "$(RUNTIME_MODEL)" \
+		$(RUNTIME_CONFORMANCE_ARGS)
+
+runtime-conformance-matrix:
+	@test -n "$(VLLM_BASE_URL)" || { echo "error: VLLM_BASE_URL is required"; exit 1; }
+	@test -n "$(VLLM_MODEL)" || { echo "error: VLLM_MODEL is required"; exit 1; }
+	@test -n "$(SGLANG_BASE_URL)" || { echo "error: SGLANG_BASE_URL is required"; exit 1; }
+	@test -n "$(SGLANG_MODEL)" || { echo "error: SGLANG_MODEL is required"; exit 1; }
+	$(PYTHON) scripts/runtime_conformance.py \
+		--base-url "$(VLLM_BASE_URL)" \
+		--model "$(VLLM_MODEL)"
+	$(PYTHON) scripts/runtime_conformance.py \
+		--base-url "$(SGLANG_BASE_URL)" \
+		--model "$(SGLANG_MODEL)" \
+		--readiness-path /health_generate
+
 model-downloader-build:
 	$(DOCKER) build \
 		--file runtimes/model-downloader/Dockerfile \
@@ -144,6 +167,42 @@ helm-lint:
 		echo "error: operator chart accepted an impossible PodDisruptionBudget"; \
 		exit 1; \
 	fi
+	@if $(HELM) template invalid deploy/helm/inferops-gateway \
+		--set auth.enabled=true >/dev/null 2>&1; then \
+		echo "error: gateway chart accepted auth without a Secret name"; \
+		exit 1; \
+	fi
+	@if $(HELM) template invalid deploy/helm/inferops-gateway \
+		--set ingress.enabled=true --set-string ingress.path=/inferops >/dev/null 2>&1; then \
+		echo "error: gateway chart accepted an ingress path that changes model routes"; \
+		exit 1; \
+	fi
+	@if $(HELM) template invalid deploy/helm/inferops-gateway \
+		--set ingress.enabled=true --set-string ingress.pathType=Exact >/dev/null 2>&1; then \
+		echo "error: gateway chart accepted an ingress path type that drops model routes"; \
+		exit 1; \
+	fi
+	@if $(HELM) template invalid deploy/helm/inferops-gateway \
+		--set gatewayAPI.enabled=true >/dev/null 2>&1; then \
+		echo "error: gateway chart accepted Gateway API without a parent Gateway"; \
+		exit 1; \
+	fi
+	@if $(HELM) template invalid deploy/helm/inferops-gateway \
+		--set-string service.loadBalancerClass=example.com/internal >/dev/null 2>&1; then \
+		echo "error: gateway chart accepted a load balancer class on ClusterIP"; \
+		exit 1; \
+	fi
+	@if $(HELM) template invalid deploy/helm/inferops-gateway \
+		--set service.port=0 >/dev/null 2>&1; then \
+		echo "error: gateway chart accepted an invalid Service port"; \
+		exit 1; \
+	fi
+	@if $(HELM) template invalid deploy/helm/inferops-gateway \
+		--set topologySpread.enabled=true \
+		--set topologySpread.maxSkew=0 >/dev/null 2>&1; then \
+		echo "error: gateway chart accepted invalid topology spread"; \
+		exit 1; \
+	fi
 	@$(HELM) template inferops-operator-ha deploy/helm/inferops-operator \
 		--set replicaCount=2 >/dev/null
 
@@ -177,6 +236,58 @@ helm-template:
 	@$(HELM) template inferops-runtime-observability deploy/helm/inferops-runtime \
 		--set metrics.serviceMonitor.enabled=true \
 		> .verify/helm/inferops-runtime-observability.yaml
+	@$(HELM) template inferops-gateway-auth deploy/helm/inferops-gateway \
+		--set auth.enabled=true \
+		--set-string auth.secretName=inferops-gateway-token \
+		> .verify/helm/inferops-gateway-auth.yaml
+	@$(HELM) template inferops-gateway-nginx deploy/helm/inferops-gateway \
+		--set ingress.enabled=true \
+		--set-string ingress.className=nginx \
+		--set-string ingress.hostname=models.example.com \
+		--set auth.enabled=true \
+		--set-string auth.secretName=inferops-gateway-token \
+		> .verify/helm/inferops-gateway-nginx.yaml
+	@$(HELM) template inferops-gateway-traefik deploy/helm/inferops-gateway \
+		--set ingress.enabled=true \
+		--set-string ingress.className=traefik \
+		--set-string ingress.hostname=models.example.com \
+		--set auth.enabled=true \
+		--set-string auth.secretName=inferops-gateway-token \
+		> .verify/helm/inferops-gateway-traefik.yaml
+	@$(HELM) template inferops-gateway-api deploy/helm/inferops-gateway \
+		--set gatewayAPI.enabled=true \
+		--set-string 'gatewayAPI.parentRefs[0].name=public' \
+		--set-string 'gatewayAPI.hostnames[0]=models.example.com' \
+		--set auth.enabled=true \
+		--set-string auth.secretName=inferops-gateway-token \
+		> .verify/helm/inferops-gateway-api.yaml
+	@$(HELM) template inferops-gateway-istio deploy/helm/inferops-gateway \
+		--namespace inferops-system \
+		--set gatewayAPI.enabled=true \
+		--set-string 'gatewayAPI.parentRefs[0].name=public' \
+		--set-string 'gatewayAPI.parentRefs[0].namespace=istio-ingress' \
+		--set-string 'gatewayAPI.parentRefs[0].sectionName=http' \
+		--set-string 'gatewayAPI.hostnames[0]=models.example.com' \
+		--set auth.enabled=true \
+		--set-string auth.secretName=inferops-gateway-token \
+		> .verify/helm/inferops-gateway-istio.yaml
+	@$(HELM) template inferops-gateway-loadbalancer deploy/helm/inferops-gateway \
+		--set-string service.type=LoadBalancer \
+		--set auth.enabled=true \
+		--set-string auth.secretName=inferops-gateway-token \
+		> .verify/helm/inferops-gateway-loadbalancer.yaml
+	@$(HELM) template inferops-gateway-multinode deploy/helm/inferops-gateway \
+		--values deploy/helm/inferops-gateway/values-multinode.yaml \
+		> .verify/helm/inferops-gateway-multinode.yaml
+	@$(HELM) template inferops-gateway-tenant deploy/helm/inferops-gateway \
+		--namespace team-a \
+		--set tenancy.access.enabled=true \
+		--set-string 'tenancy.access.subjects[0].kind=Group' \
+		--set-string 'tenancy.access.subjects[0].name=inference-team-a' \
+		--set-string 'tenancy.access.subjects[0].apiGroup=rbac.authorization.k8s.io' \
+		--set tenancy.quota.enabled=true \
+		--set tenancy.limitRange.enabled=true \
+		> .verify/helm/inferops-gateway-tenant.yaml
 	@runtime_count=$$(grep -c '^kind: ModelRuntime$$' .verify/helm/inferops-operator.yaml); \
 	[ "$$runtime_count" -eq 4 ] || { \
 		echo "error: operator chart rendered $$runtime_count packaged runtimes, want 4"; \
@@ -190,13 +301,36 @@ helm-template:
 	@grep -q '^kind: ServiceMonitor$$' .verify/helm/inferops-runtime-observability.yaml
 	@grep -q 'inferops-vllm-dashboard.json' .verify/helm/inferops-operator-observability.yaml
 	@$(PYTHON) scripts/check_operator_rbac.py .verify/helm/inferops-operator.yaml
+	@$(PYTHON) scripts/check_tenant_rbac.py .verify/helm/inferops-gateway-tenant.yaml
 	@grep -q 'pathType: Prefix' .verify/helm/inferops-gateway-homelab.yaml
 	@grep -q 'profile: "homelab"' .verify/helm/inferops-operator-homelab.yaml
 	@grep -q 'gpu.required: "true"' .verify/helm/inferops-operator-homelab.yaml
 	@grep -q 'gpu.required: "false"' .verify/helm/inferops-operator.yaml
+	@grep -q 'INFEROPS_GATEWAY_AUTH_TOKEN_FILE' .verify/helm/inferops-gateway-auth.yaml
+	@grep -q 'secretName: "inferops-gateway-token"' .verify/helm/inferops-gateway-auth.yaml
+	@$(PYTHON) scripts/check_gateway_exposure.py --mode tailscale \
+		.verify/helm/inferops-gateway-homelab.yaml
+	@$(PYTHON) scripts/check_gateway_exposure.py --mode ingress \
+		--expected-class nginx --require-auth \
+		.verify/helm/inferops-gateway-nginx.yaml
+	@$(PYTHON) scripts/check_gateway_exposure.py --mode ingress \
+		--expected-class traefik --require-auth \
+		.verify/helm/inferops-gateway-traefik.yaml
+	@$(PYTHON) scripts/check_gateway_exposure.py --mode gateway-api \
+		--require-auth .verify/helm/inferops-gateway-api.yaml
+	@$(PYTHON) scripts/check_gateway_exposure.py --mode gateway-api \
+		--expected-parent-namespace istio-ingress \
+		--require-auth \
+		.verify/helm/inferops-gateway-istio.yaml
+	@$(PYTHON) scripts/check_gateway_exposure.py --mode load-balancer \
+		--require-auth .verify/helm/inferops-gateway-loadbalancer.yaml
+	@$(PYTHON) scripts/check_gateway_exposure.py --mode multi-node \
+		.verify/helm/inferops-gateway-multinode.yaml
 	@grep -q '^kind: ValidatingWebhookConfiguration$$' .verify/helm/inferops-operator.yaml
 	@test "$$(grep -c '^kind: PodDisruptionBudget$$' .verify/helm/inferops-operator.yaml)" -eq 1
 	@test "$$(grep -c '^kind: PodDisruptionBudget$$' .verify/helm/inferops-gateway.yaml)" -eq 1
+	@test "$$(grep -c '^kind: NetworkPolicy$$' .verify/helm/inferops-operator.yaml)" -eq 1
+	@test "$$(grep -c '^kind: NetworkPolicy$$' .verify/helm/inferops-gateway.yaml)" -eq 2
 	@! grep -q 'tailscale.com/hostname' .verify/helm/inferops-gateway-homelab.yaml || { \
 		echo "error: Tailscale Ingress hostname must be configured through spec.tls.hosts"; \
 		exit 1; \

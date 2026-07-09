@@ -29,9 +29,11 @@ The operator needs:
 The gateway needs:
 
 - Read `ModelDeployment` and `Service`
-- Read referenced `Secret` for auth tokens
+- Receive the referenced auth `Secret` through a read-only projected volume
 
 Neither component needs cluster-admin. Keep roles namespace-scoped where possible.
+For per-team RoleBindings, quotas, and the supported shared-operator layout,
+see [Namespace tenancy](tenancy.md).
 
 ## Secrets
 
@@ -51,7 +53,10 @@ reproducible production release. Build the downloader locally with
 ## Network
 
 - Gateway exposes the OpenAI-compatible endpoint.
-- Use `NetworkPolicy` to restrict runtime pods to gateway traffic only.
+- The Helm charts enable NetworkPolicies that restrict runtime ingress to the
+  same-namespace gateway and deny runtime egress by default.
+- Set the exact Kubernetes API Service IP and narrow gateway ingress peers for
+  the target cluster as described in [Namespace tenancy](tenancy.md).
 - Use Tailscale or an ingress controller for external access; do not expose runtime pods directly.
 
 ## Monitoring
@@ -70,6 +75,10 @@ Watch these:
 | Activation failures | `inferops_activation_failures_total` |
 | Cache failures | `inferops_cache_download_failures_total` |
 | Gateway process metrics | Gateway `/metrics` |
+| Gateway request count | `inferops_gateway_requests_total` |
+| Gateway request latency | `inferops_gateway_request_duration_seconds` |
+| Gateway active requests | `inferops_gateway_active_requests` |
+| Gateway upstream failures | `inferops_gateway_upstream_errors_total` |
 | Runtime TTFT | vLLM `vllm:time_to_first_token_seconds` |
 | Runtime tokens/sec | vLLM `vllm:generation_tokens_total` rate |
 | Pending runtime work | vLLM `vllm:num_requests_waiting`; pending-token panels approximate token debt from recent request sizes |
@@ -87,11 +96,17 @@ helm upgrade --install inferops-operator deploy/helm/inferops-operator \
 
 helm upgrade --install inferops-gateway deploy/helm/inferops-gateway \
   --set serviceMonitor.enabled=true
+
+helm upgrade --install inferops-runtime deploy/helm/inferops-runtime \
+  --set metrics.serviceMonitor.enabled=true
 ```
 
 The packaged dashboard is vLLM-first, but runtime scraping is label-based and
-works for any runtime Service that follows the InferOps runtime contract and
-serves Prometheus metrics at its `ModelRuntime.spec.metricsPath`.
+works for runtime Services that follow the InferOps runtime contract and serve
+Prometheus metrics at the configured `serviceMonitor.runtimes.path`. Keep that
+chart value aligned with the deployed `ModelRuntime.spec.metricsPath`; use a
+dedicated ServiceMonitor when one namespace mixes runtimes with different
+metrics paths.
 OpenTelemetry is intentionally not an MVP dependency.
 
 ## Upgrades
@@ -138,6 +153,8 @@ chart's `podDisruptionBudget` values after accepting the availability impact.
 
 - GPU slicing is not supported.
 - No hosted InferOps control plane; all components run in-cluster.
-- Replacement and rollback are not implemented until MVP-108; replacement
-  policy values fail safely instead of evicting a model.
-- Advanced autoscaling and OpenTelemetry export are not in month one.
+- Single-GPU replacement has unavoidable downtime while the current runtime
+  releases the GPU and the replacement becomes ready. Activation failures
+  trigger a best-effort rollback whose outcome is reported in status and
+  Events; operators must intervene when rollback also fails.
+- Advanced autoscaling and the self-hosted dashboard UI are not included.

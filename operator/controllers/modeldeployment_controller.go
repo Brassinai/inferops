@@ -64,6 +64,8 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, deployment *v
 		return ReconcileResult{}, errors.New("event recorder is required")
 	}
 
+	specChangedAfterFailure := deployment.Status.Phase == v1alpha1.ModelDeploymentPhaseFailed &&
+		deployment.Generation > deployment.Status.ObservedGeneration
 	observed := deployment.Status.DeepCopy()
 	observed.ObservedGeneration = deployment.Generation
 	wasValidationBlocked := validationBlocked(*observed)
@@ -154,11 +156,10 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, deployment *v
 
 	// Validation passed.  Leave the phase to downstream reconcilers unless it
 	// has not been initialized or this validation layer previously blocked it.
-	if observed.Phase == "" || wasValidationBlocked {
+	if observed.Phase == "" || wasValidationBlocked || specChangedAfterFailure {
 		observed.Phase = v1alpha1.ModelDeploymentPhasePending
+		setReadyFalse(observed, events.ReasonSpecValidated, "Spec and runtime are valid; awaiting cache and activation")
 	}
-
-	setReadyFalse(observed, events.ReasonSpecValidated, "Spec and runtime are valid; awaiting cache and activation")
 
 	return ReconcileResult{Status: *observed, Runtime: resolved}, nil
 }

@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-var reservedPrefixes = []string{"/healthz", "/readyz"}
+var reservedPrefixes = []string{"/healthz", "/readyz", "/metrics"}
 
 // DefaultModelPrefix is the stable route root for ModelDeployments.
 const DefaultModelPrefix = "/models/"

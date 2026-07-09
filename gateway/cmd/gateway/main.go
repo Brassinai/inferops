@@ -12,11 +12,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/brassinai/inferops/gateway/internal/auth"
 	"github.com/brassinai/inferops/gateway/internal/discovery"
+	gatewaymetrics "github.com/brassinai/inferops/gateway/internal/metrics"
 	"github.com/brassinai/inferops/gateway/internal/proxy"
 	"github.com/brassinai/inferops/gateway/internal/routing"
 	"github.com/brassinai/inferops/internal/health"
 	v1alpha1 "github.com/brassinai/inferops/operator/api/v1alpha1"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
@@ -90,34 +93,77 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("unsupported INFEROPS_GATEWAY_REGISTRY %q", registryMode)
 	}
 
-	gatewayProxy, err := proxy.New(registry)
+	metricsRegistry := prometheus.NewRegistry()
+	for _, collector := range []prometheus.Collector{
+		prometheus.NewGoCollector(),
+		prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}),
+	} {
+		if err := metricsRegistry.Register(collector); err != nil {
+			return fmt.Errorf("register gateway process metrics: %w", err)
+		}
+	}
+	metricsRecorder, err := gatewaymetrics.NewRecorder(metricsRegistry)
+	if err != nil {
+		return fmt.Errorf("configure gateway metrics: %w", err)
+	}
+	gatewayProxy, err := proxy.NewWithMetrics(registry, metricsRecorder)
 	if err != nil {
 		return fmt.Errorf("create gateway proxy: %w", err)
 	}
+	var proxyHandler http.Handler = gatewayProxy
+	var drainHandler http.Handler = http.HandlerFunc(gatewayProxy.ServeDrainStatus)
+	tokenFile := strings.TrimSpace(os.Getenv("INFEROPS_GATEWAY_AUTH_TOKEN_FILE"))
+	if tokenFile != "" {
+		tokenSource, err := auth.NewFileTokenSource(tokenFile)
+		if err != nil {
+			return fmt.Errorf("configure gateway token source: %w", err)
+		}
+		authenticator, err := auth.New(tokenSource)
+		if err != nil {
+			return fmt.Errorf("configure gateway authentication: %w", err)
+		}
+		proxyHandler = authenticator.Wrap(proxyHandler)
+		drainHandler = authenticator.Wrap(drainHandler)
+		ready = readinessWithTokenSource(ready, tokenSource)
+	}
+	proxyHandler = metricsRecorder.Middleware(proxyHandler)
+
 	healthHandler := health.HandlerWithReadiness(ready)
-	return health.RunWithHandler(ctx, address, gatewayHandler(
-		healthHandler,
-		gatewayProxy,
-		http.HandlerFunc(gatewayProxy.ServeDrainStatus),
-		promhttp.Handler(),
-	))
+	metricsHandler := promhttp.HandlerFor(metricsRegistry, promhttp.HandlerOpts{})
+	return health.RunWithHandler(
+		ctx,
+		address,
+		gatewayHandler(healthHandler, metricsHandler, proxyHandler, drainHandler),
+	)
 }
 
-func gatewayHandler(healthHandler, proxyHandler, drainHandler, metricsHandler http.Handler) http.Handler {
+func readinessWithTokenSource(
+	upstreamReady func() bool,
+	source auth.TokenSource,
+) func() bool {
+	return func() bool {
+		if upstreamReady == nil || !upstreamReady() || source == nil {
+			return false
+		}
+		_, err := source.Tokens()
+		return err == nil
+	}
+}
+
+func gatewayHandler(healthHandler, metricsHandler, proxyHandler, drainHandler http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if request.URL != nil &&
-			request.URL.RawPath == "" &&
-			(request.URL.Path == "/healthz" || request.URL.Path == "/readyz") {
-			healthHandler.ServeHTTP(response, request)
-			return
-		}
-		if request.URL != nil && request.URL.RawPath == "" && request.URL.Path == "/drainz" {
-			drainHandler.ServeHTTP(response, request)
-			return
-		}
-		if request.URL != nil && request.URL.RawPath == "" && request.URL.Path == "/metrics" {
-			metricsHandler.ServeHTTP(response, request)
-			return
+		if request.URL != nil && request.URL.RawPath == "" {
+			switch request.URL.Path {
+			case "/healthz", "/readyz":
+				healthHandler.ServeHTTP(response, request)
+				return
+			case "/metrics":
+				metricsHandler.ServeHTTP(response, request)
+				return
+			case "/drainz":
+				drainHandler.ServeHTTP(response, request)
+				return
+			}
 		}
 		proxyHandler.ServeHTTP(response, request)
 	})

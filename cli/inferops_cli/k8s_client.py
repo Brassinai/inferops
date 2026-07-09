@@ -40,6 +40,8 @@ from .kube import (
     StatusRequest,
 )
 
+CLI_FIELD_MANAGER = "inferops-cli"
+
 
 def _load_config(cluster: ClusterTarget) -> None:
     """Load kubeconfig for the selected cluster target."""
@@ -1537,6 +1539,7 @@ class LiveKubernetesClient(KubernetesClient):
                 plural="modeldeployments",
                 name=name,
                 body=body,
+                field_manager=CLI_FIELD_MANAGER,
             )
         except ApiException as exc:
             if _is_not_found(exc):
@@ -1652,7 +1655,7 @@ def _summarize_deployment(deployment: dict[str, Any]) -> dict[str, Any]:
         }
         for condition in status.get("conditions", [])
     ]
-    return {
+    summary = {
         "name": metadata["name"],
         "namespace": metadata.get("namespace", "default"),
         "phase": status.get("phase", "Unknown"),
@@ -1679,6 +1682,25 @@ def _summarize_deployment(deployment: dict[str, Any]) -> dict[str, Any]:
         "generation": metadata.get("generation", 0),
         "conditions": conditions,
     }
+    if status.get("drainStartedAt"):
+        summary["drainStartedAt"] = status["drainStartedAt"]
+    replacement = status.get("replacement")
+    if isinstance(replacement, dict) and replacement:
+        replacement_summary = {
+            key: value
+            for key, value in replacement.items()
+            if key in {"phase", "requestGeneration", "startedAt", "message"}
+        }
+        for reference_key in ("target", "requestedBy"):
+            reference = replacement.get(reference_key)
+            if isinstance(reference, dict):
+                replacement_summary[reference_key] = {
+                    key: value
+                    for key, value in reference.items()
+                    if key in {"namespace", "name", "uid"}
+                }
+        summary["replacement"] = replacement_summary
+    return summary
 
 
 def _status_is_fresh(
