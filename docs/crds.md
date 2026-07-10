@@ -36,10 +36,21 @@ spec:
     maxReplicas: 1
     targetPendingRequests: 4
     idleTimeout: 10m
+  rollout:
+    strategy: Recreate
+    whenCapacityUnavailable: Queue
   routing:
     enabled: true
     path: /models/qwen-chat
     openAICompatible: true
+    policy:
+      routingStrategy: LeastLoaded
+      weight: 100
+      rateLimit:
+        requestsPerMinute: 600
+        burst: 60
+      requestLogging:
+        enabled: false
   cache:
     enabled: true
     type: nodeLocal
@@ -69,8 +80,12 @@ spec:
 | `activation.drainTimeout` | `5m` |
 | `scaling.minReplicas` | `0` |
 | `scaling.maxReplicas` | `1` |
+| `rollout.strategy` | `Recreate` |
+| `rollout.whenCapacityUnavailable` | `Queue` |
 | `routing.enabled` | `true` |
 | `routing.openAICompatible` | `true` |
+| `routing.policy.routingStrategy` | `LeastLoaded` |
+| `routing.policy.weight` | `100` |
 | `cache.enabled` | `true` |
 | `cache.type` | `nodeLocal` |
 | `cache.size` | Operator `cache.defaultSize` (`100Gi` by default) |
@@ -109,6 +124,51 @@ runtime replicas after the runtime reports no pending or running requests for
 the timeout. Scale-from-zero needs a later spec update or external signal; the
 gateway does not synthesize demand for a deployment with no ready runtime
 endpoints.
+
+### Rollouts
+
+`rollout.strategy` accepts `Recreate`, `Rolling`, `BlueGreen`, or `Canary`.
+`Recreate` is the default and avoids GPU surge. `Rolling` and `Canary` require
+at least one spare compatible GPU slot on the cache-local node before the
+runtime Deployment is patched. `BlueGreen` requires enough spare slots to run
+the current and desired replica sets concurrently.
+
+When spare capacity is unavailable, `rollout.whenCapacityUnavailable: Queue`
+keeps the existing ready runtime unchanged and reports
+`RolloutWaitingForCapacity`. `Reject` leaves the existing runtime unchanged and
+reports `RolloutRejected`. Neither policy silently falls back to downtime.
+Single-GPU replacement remains a separate explicit activation policy
+(`ReplaceOldest` or `ReplaceLowestPriority`) with the rollback behavior
+described below.
+
+For canaries, `rollout.canaryWeightPercent` records rollout intent. Gateway
+traffic distribution is controlled by `routing.policy.weight` on deployments
+sharing the same `routing.path`.
+
+### Routing policy
+
+`routing.path` defaults to `/models/<deployment-name>`. Multiple deployments
+can share the same path only when they are deliberately part of one traffic
+set, such as a stable deployment and a canary deployment.
+
+`routing.policy.routingStrategy` accepts `LeastLoaded` or `Weighted`.
+`LeastLoaded` sends new requests to the ready backend with the fewest
+in-flight requests observed by the current gateway process and uses
+`routing.policy.weight` as a tie breaker. `Weighted` uses smooth weighted
+round-robin among ready candidates. Omitted weights behave as `100`; explicit
+`0` keeps the backend out of new traffic while another positive-weight ready
+candidate exists. If every ready candidate has weight `0`, the route returns
+`503` instead of silently choosing one.
+
+`routing.policy.rateLimit.requestsPerMinute` enables a process-local token
+bucket for that backend. `burst` is optional and defaults to the RPM value.
+Use upstream ingress or API gateway policy for globally consistent quotas
+across multiple gateway replicas.
+
+`routing.policy.requestLogging.enabled` writes sanitized request metadata from
+the gateway. Logs include model, namespace, route, method, path, status, and
+duration; request bodies, credential headers, and arbitrary request headers are
+not logged.
 
 ### Activation policies
 
@@ -162,6 +222,7 @@ whether that rollback succeeded. `Queue` and `Reject` never replace a workload.
 | `RuntimeReady` | Managed runtime has its desired ready replicas |
 | `ModelLoaded` | Runtime readiness indicates that the model can receive traffic |
 | `Replacement` | Explicit replacement progress, success, or rollback outcome |
+| `Rollout` | In-place rollout capacity validation and queued/rejected rollout state |
 
 Stable `reason` values are machine-readable; `message` is for operators. `observedGeneration` must match `metadata.generation` for freshness.
 

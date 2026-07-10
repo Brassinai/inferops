@@ -168,6 +168,33 @@ spec:
                     openAICompatible:
                       type: boolean
                       default: true
+                    policy:
+                      type: object
+                      properties:
+                        routingStrategy:
+                          type: string
+                          enum: [LeastLoaded, Weighted]
+                        weight:
+                          type: integer
+                          format: int32
+                          minimum: 0
+                          maximum: 1000000
+                        rateLimit:
+                          type: object
+                          properties:
+                            requestsPerMinute:
+                              type: integer
+                              format: int32
+                              minimum: 1
+                            burst:
+                              type: integer
+                              format: int32
+                              minimum: 0
+                        requestLogging:
+                          type: object
+                          properties:
+                            enabled:
+                              type: boolean
                 cache:
                   type: object
                   default: {}
@@ -246,6 +273,22 @@ spec:
                           type: integer
                           format: int32
                           minimum: 0
+                rollout:
+                  type: object
+                  properties:
+                    strategy:
+                      type: string
+                      enum: [Recreate, Rolling, BlueGreen, Canary]
+                      default: Recreate
+                    whenCapacityUnavailable:
+                      type: string
+                      enum: [Queue, Reject]
+                      default: Queue
+                    canaryWeightPercent:
+                      type: integer
+                      format: int32
+                      minimum: 1
+                      maximum: 99
             status:
               type: object
               properties:

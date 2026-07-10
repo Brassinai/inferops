@@ -77,3 +77,20 @@ kubectl label node gpu-node-1 inferops.dev/gpu-type=a100
 
 Do not enable device-plugin sharing or time slicing when relying on the
 exclusive whole-slot model.
+
+## Rollout capacity validation
+
+`Rolling`, `BlueGreen`, and `Canary` runtime rollouts are blocked unless the
+cache-local node has enough compatible slots for the old runtime plus the
+configured rollout surge. `Queue` leaves the current runtime serving and
+reports `RolloutWaitingForCapacity`; `Reject` leaves it serving and reports
+`RolloutRejected`.
+
+Single-GPU replacement is not an implicit fallback for advanced rollouts. Use
+`activation.whenFull: ReplaceOldest` or `ReplaceLowestPriority` on an explicit
+replacement deployment when downtime-with-rollback is acceptable.
+
+The automated acceptance tests simulate multi-GPU capacity with Kubernetes
+Node allocatable resources. Hardware-only behavior that still needs release
+qualification includes vendor device-plugin failures, physical GPU health
+faults, and real multi-GPU topology or NUMA constraints.

@@ -80,6 +80,10 @@ The gateway chart also provides opt-in `tenancy.access`, `tenancy.quota`, and
 [Namespace tenancy](tenancy.md) to configure the exact Kubernetes API Service
 IP before installation or binding users.
 
+The self-hosted dashboard is packaged as a separate read-only chart,
+`deploy/helm/inferops-dashboard`, so operators can choose their own access
+boundary and authentication layer. See [Self-hosted dashboard](dashboard.md).
+
 The install profile does not choose the engine for every model. Each
 deployment selects a registered runtime and independently declares whether it
 needs GPUs:

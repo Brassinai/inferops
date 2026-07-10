@@ -82,7 +82,7 @@ func TestMemoryRegistryLookupUsesPathBoundariesAndLongestPrefix(t *testing.T) {
 	}
 }
 
-func TestMemoryRegistryReplaceOmitsAmbiguousRoutesAndRefreshesOthers(t *testing.T) {
+func TestMemoryRegistryReplacePublishesCanaryRoutesAndRefreshesOthers(t *testing.T) {
 	t.Parallel()
 	registry := NewMemoryRegistry()
 	if err := registry.Upsert(Backend{Name: "old", State: StateInactive}); err != nil {
@@ -94,11 +94,11 @@ func TestMemoryRegistryReplaceOmitsAmbiguousRoutesAndRefreshesOthers(t *testing.
 		{Name: "second", RoutePrefix: "/shared", State: StateReady, Endpoint: mustURL(t, "http://second.test")},
 		{Name: "safe", State: StateDraining},
 	})
-	if err == nil {
-		t.Fatal("Replace() error = nil, want ambiguous-route error")
+	if err != nil {
+		t.Fatalf("Replace() error = %v", err)
 	}
-	if _, _, found := registry.Lookup("/shared/v1/models"); found {
-		t.Fatal("ambiguous route was published")
+	if backend, _, found := registry.Lookup("/shared/v1/models"); !found || backend.RoutePrefix != "/shared" {
+		t.Fatalf("shared canary route = (%+v, %t), want published", backend, found)
 	}
 	backend, _, found := registry.Lookup("/models/safe/v1/models")
 	if !found || backend.State != StateDraining {
@@ -106,6 +106,109 @@ func TestMemoryRegistryReplaceOmitsAmbiguousRoutesAndRefreshesOthers(t *testing.
 	}
 	if _, _, found := registry.Lookup("/models/old/v1/models"); found {
 		t.Fatal("stale route remained after snapshot replacement")
+	}
+}
+
+func TestMemoryRegistryRejectsDuplicateBackendIdentityOnReplace(t *testing.T) {
+	t.Parallel()
+	registry := NewMemoryRegistry()
+	err := registry.Replace([]Backend{
+		{Namespace: "inferops", Name: "qwen", RoutePrefix: "/models/qwen", State: StateInactive},
+		{Namespace: "inferops", Name: "qwen", RoutePrefix: "/models/qwen", State: StateInactive},
+	})
+	if err == nil {
+		t.Fatal("Replace() error = nil, want duplicate backend error")
+	}
+}
+
+func TestMemoryRegistrySelectsLeastLoadedBackend(t *testing.T) {
+	t.Parallel()
+	registry := NewMemoryRegistry()
+	if err := registry.Replace([]Backend{
+		{Namespace: "inferops", Name: "stable", RoutePrefix: "/models/qwen", State: StateReady, Endpoint: mustURL(t, "http://stable.test")},
+		{Namespace: "inferops", Name: "canary", RoutePrefix: "/models/qwen", State: StateReady, Endpoint: mustURL(t, "http://canary.test")},
+	}); err != nil {
+		t.Fatalf("Replace() error = %v", err)
+	}
+
+	backend, _, found := registry.Select("/models/qwen/v1/models", func(backend Backend) int {
+		if backend.Name == "stable" {
+			return 5
+		}
+		return 1
+	})
+	if !found || backend.Name != "canary" {
+		t.Fatalf("Select() = (%+v, %t), want canary", backend, found)
+	}
+}
+
+func TestMemoryRegistryWeightedSelectionHonorsCanaryWeights(t *testing.T) {
+	t.Parallel()
+	stableWeight := 2
+	canaryWeight := 1
+	registry := NewMemoryRegistry()
+	if err := registry.Replace([]Backend{
+		{
+			Namespace:   "inferops",
+			Name:        "stable",
+			RoutePrefix: "/models/qwen",
+			State:       StateReady,
+			Endpoint:    mustURL(t, "http://stable.test"),
+			Policy:      TrafficPolicy{RoutingStrategy: RoutingStrategyWeighted, Weight: &stableWeight},
+		},
+		{
+			Namespace:   "inferops",
+			Name:        "canary",
+			RoutePrefix: "/models/qwen",
+			State:       StateReady,
+			Endpoint:    mustURL(t, "http://canary.test"),
+			Policy:      TrafficPolicy{RoutingStrategy: RoutingStrategyWeighted, Weight: &canaryWeight},
+		},
+	}); err != nil {
+		t.Fatalf("Replace() error = %v", err)
+	}
+
+	counts := map[string]int{}
+	for range 6 {
+		backend, _, found := registry.Lookup("/models/qwen/v1/models")
+		if !found {
+			t.Fatal("weighted route was not found")
+		}
+		counts[backend.Name]++
+	}
+	if counts["stable"] != 4 || counts["canary"] != 2 {
+		t.Fatalf("weighted selections = %#v, want stable=4 canary=2", counts)
+	}
+}
+
+func TestMemoryRegistryZeroWeightReadyBackendsDoNotReceiveTraffic(t *testing.T) {
+	t.Parallel()
+	zero := 0
+	registry := NewMemoryRegistry()
+	if err := registry.Replace([]Backend{
+		{
+			Namespace:   "inferops",
+			Name:        "stable",
+			RoutePrefix: "/models/qwen",
+			State:       StateReady,
+			Endpoint:    mustURL(t, "http://stable.test"),
+			Policy:      TrafficPolicy{Weight: &zero},
+		},
+		{
+			Namespace:   "inferops",
+			Name:        "canary",
+			RoutePrefix: "/models/qwen",
+			State:       StateReady,
+			Endpoint:    mustURL(t, "http://canary.test"),
+			Policy:      TrafficPolicy{Weight: &zero},
+		},
+	}); err != nil {
+		t.Fatalf("Replace() error = %v", err)
+	}
+
+	backend, _, found := registry.Select("/models/qwen/v1/models", func(Backend) int { return 0 })
+	if !found || backend.State != StateUnavailable || backend.Endpoint != nil {
+		t.Fatalf("Select() = (%+v, %t), want unavailable synthetic backend", backend, found)
 	}
 }
 

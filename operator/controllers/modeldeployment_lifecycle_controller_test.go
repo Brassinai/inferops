@@ -502,6 +502,100 @@ func TestLifecycleGPUWhenFullPolicies(t *testing.T) {
 	}
 }
 
+func TestLifecycleSimulatedMultiGPUCapacityDoesNotOvercommit(t *testing.T) {
+	t.Parallel()
+
+	first := lifecycleDeployment(v1alpha1.ActivationDesiredStateActive, v1alpha1.ActivationWhenFullQueue)
+	first.Name = "first"
+	first.UID = "first-uid"
+	second := lifecycleDeployment(v1alpha1.ActivationDesiredStateActive, v1alpha1.ActivationWhenFullQueue)
+	second.Name = "second"
+	second.UID = "second-uid"
+	third := lifecycleDeployment(v1alpha1.ActivationDesiredStateActive, v1alpha1.ActivationWhenFullQueue)
+	third.Name = "third"
+	third.UID = "third-uid"
+
+	c, reconciler := lifecycleTestController(
+		t,
+		first,
+		second,
+		third,
+		lifecycleRuntime(),
+		lifecycleReadyCache(t, first, "gpu-node-1"),
+		lifecycleReadyCache(t, second, "gpu-node-1"),
+		lifecycleReadyCache(t, third, "gpu-node-1"),
+		lifecycleGPUNode("gpu-node-1", 2),
+	)
+
+	reconcileLifecycle(t, reconciler, first)
+	reconcileLifecycle(t, reconciler, second)
+	reconcileLifecycle(t, reconciler, third)
+
+	var updated v1alpha1.ModelDeployment
+	getObject(t, c, client.ObjectKeyFromObject(first), &updated)
+	if updated.Status.AssignedNode != "gpu-node-1" ||
+		updated.Status.Phase != v1alpha1.ModelDeploymentPhaseActivating {
+		t.Fatalf("first status = phase %q node %q, want Activating on gpu-node-1", updated.Status.Phase, updated.Status.AssignedNode)
+	}
+	getObject(t, c, client.ObjectKeyFromObject(second), &updated)
+	if updated.Status.AssignedNode != "gpu-node-1" ||
+		updated.Status.Phase != v1alpha1.ModelDeploymentPhaseActivating {
+		t.Fatalf("second status = phase %q node %q, want Activating on gpu-node-1", updated.Status.Phase, updated.Status.AssignedNode)
+	}
+	getObject(t, c, client.ObjectKeyFromObject(third), &updated)
+	if updated.Status.Phase != v1alpha1.ModelDeploymentPhaseWaitingForGPU {
+		t.Fatalf("third phase = %q, want WaitingForGPU", updated.Status.Phase)
+	}
+	if updated.Status.AssignedNode != "" {
+		t.Fatalf("third assignedNode = %q, want empty", updated.Status.AssignedNode)
+	}
+
+	allocations, err := reconciler.gpuAllocations(context.Background(), third)
+	if err != nil {
+		t.Fatalf("gpuAllocations() error = %v", err)
+	}
+	var occupied int64
+	for _, allocation := range allocations {
+		occupied += allocation.Count
+	}
+	if occupied != 2 {
+		t.Fatalf("occupied GPU slots = %d, want exactly node capacity 2", occupied)
+	}
+}
+
+func TestLifecycleCacheLocalGPUCapacityWaitsWhenCacheNodeIsFull(t *testing.T) {
+	t.Parallel()
+
+	deployment := lifecycleDeployment(v1alpha1.ActivationDesiredStateActive, v1alpha1.ActivationWhenFullQueue)
+	occupied := lifecycleDeployment(v1alpha1.ActivationDesiredStateActive, v1alpha1.ActivationWhenFullQueue)
+	occupied.Name = "occupied"
+	occupied.UID = "occupied-uid"
+	occupied.Status.Phase = v1alpha1.ModelDeploymentPhaseActive
+	occupied.Status.AssignedNode = "gpu-node-1"
+	cache := lifecycleReadyCache(t, deployment, "gpu-node-1")
+	c, reconciler := lifecycleTestController(
+		t,
+		deployment,
+		occupied,
+		lifecycleRuntime(),
+		cache,
+		lifecycleGPUNode("gpu-node-1", 1),
+		lifecycleGPUNode("gpu-node-2", 1),
+	)
+
+	reconcileLifecycle(t, reconciler, deployment)
+
+	var updated v1alpha1.ModelDeployment
+	getObject(t, c, client.ObjectKeyFromObject(deployment), &updated)
+	if updated.Status.Phase != v1alpha1.ModelDeploymentPhaseWaitingForGPU {
+		t.Fatalf("phase = %q, want WaitingForGPU because cache-local node is full", updated.Status.Phase)
+	}
+	if updated.Status.AssignedNode != "" {
+		t.Fatalf("assignedNode = %q, want empty while cache-local GPU is unavailable", updated.Status.AssignedNode)
+	}
+	assertLifecycleCondition(t, updated.Status.Conditions, v1alpha1.ConditionReady, metav1.ConditionFalse, v1alpha1.ReasonWaitingForGPU)
+}
+
 func TestLifecycleRepeatedReconcileDoesNotChurnRuntime(t *testing.T) {
 	t.Parallel()
 
@@ -526,6 +620,168 @@ func TestLifecycleRepeatedReconcileDoesNotChurnRuntime(t *testing.T) {
 	}
 	if got := c.(*patchCountingClient).modelDeploymentStatusPatches; got != statusPatchesBefore {
 		t.Errorf("ModelDeployment status patch count changed: %d -> %d", statusPatchesBefore, got)
+	}
+}
+
+func TestLifecycleAdvancedRolloutQueuesWithoutSpareGPUCapacity(t *testing.T) {
+	t.Parallel()
+
+	deployment := lifecycleDeployment(v1alpha1.ActivationDesiredStateActive, v1alpha1.ActivationWhenFullQueue)
+	cache := lifecycleReadyCache(t, deployment, "gpu-node-1")
+	c, reconciler := lifecycleTestController(
+		t,
+		deployment,
+		lifecycleRuntime(),
+		cache,
+		lifecycleGPUNode("gpu-node-1", 1),
+	)
+	reconcileLifecycle(t, reconciler, deployment)
+	markLifecycleRuntimeReady(t, c, deployment)
+	reconcileLifecycle(t, reconciler, deployment)
+
+	var runtimeDeployment appsv1.Deployment
+	getObject(t, c, types.NamespacedName{Namespace: deployment.Namespace, Name: "qwen-runtime"}, &runtimeDeployment)
+	originalImage := runtimeDeployment.Spec.Template.Spec.Containers[0].Image
+
+	var latest v1alpha1.ModelDeployment
+	getObject(t, c, client.ObjectKeyFromObject(deployment), &latest)
+	latest.Spec.Runtime.Image = "ghcr.io/inferops/nano-vllm:v0.2.0"
+	latest.Spec.Rollout.Strategy = v1alpha1.RolloutStrategyRolling
+	latest.Generation++
+	if err := c.Update(context.Background(), &latest); err != nil {
+		t.Fatalf("update rollout spec: %v", err)
+	}
+	reconcileLifecycle(t, reconciler, deployment)
+
+	var updated v1alpha1.ModelDeployment
+	getObject(t, c, client.ObjectKeyFromObject(deployment), &updated)
+	if updated.Status.Phase != v1alpha1.ModelDeploymentPhaseActive {
+		t.Fatalf("phase = %q, want Active with previous runtime still serving", updated.Status.Phase)
+	}
+	assertLifecycleCondition(
+		t,
+		updated.Status.Conditions,
+		v1alpha1.ConditionRollout,
+		metav1.ConditionFalse,
+		v1alpha1.ReasonRolloutWaitingForCapacity,
+	)
+	assertLifecycleCondition(
+		t,
+		updated.Status.Conditions,
+		v1alpha1.ConditionReady,
+		metav1.ConditionFalse,
+		v1alpha1.ReasonRolloutWaitingForCapacity,
+	)
+	getObject(t, c, types.NamespacedName{Namespace: deployment.Namespace, Name: "qwen-runtime"}, &runtimeDeployment)
+	if got := runtimeDeployment.Spec.Template.Spec.Containers[0].Image; got != originalImage {
+		t.Fatalf("blocked rollout patched runtime image = %q, want unchanged %q", got, originalImage)
+	}
+	assertRecordedEventReasons(t, reconciler, v1alpha1.ReasonRolloutWaitingForCapacity)
+}
+
+func TestLifecycleAdvancedRolloutStartsWithSpareGPUCapacity(t *testing.T) {
+	t.Parallel()
+
+	deployment := lifecycleDeployment(v1alpha1.ActivationDesiredStateActive, v1alpha1.ActivationWhenFullQueue)
+	cache := lifecycleReadyCache(t, deployment, "gpu-node-1")
+	c, reconciler := lifecycleTestController(
+		t,
+		deployment,
+		lifecycleRuntime(),
+		cache,
+		lifecycleGPUNode("gpu-node-1", 2),
+	)
+	reconcileLifecycle(t, reconciler, deployment)
+	markLifecycleRuntimeReady(t, c, deployment)
+	reconcileLifecycle(t, reconciler, deployment)
+
+	var latest v1alpha1.ModelDeployment
+	getObject(t, c, client.ObjectKeyFromObject(deployment), &latest)
+	latest.Spec.Runtime.Image = "ghcr.io/inferops/nano-vllm:v0.2.0"
+	latest.Spec.Rollout.Strategy = v1alpha1.RolloutStrategyRolling
+	latest.Generation++
+	if err := c.Update(context.Background(), &latest); err != nil {
+		t.Fatalf("update rollout spec: %v", err)
+	}
+	reconcileLifecycle(t, reconciler, deployment)
+
+	var runtimeDeployment appsv1.Deployment
+	getObject(t, c, types.NamespacedName{Namespace: deployment.Namespace, Name: "qwen-runtime"}, &runtimeDeployment)
+	if got := runtimeDeployment.Spec.Template.Spec.Containers[0].Image; got != latest.Spec.Runtime.Image {
+		t.Fatalf("runtime image = %q, want %q", got, latest.Spec.Runtime.Image)
+	}
+	if runtimeDeployment.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType {
+		t.Fatalf("runtime strategy = %q, want RollingUpdate", runtimeDeployment.Spec.Strategy.Type)
+	}
+	var updated v1alpha1.ModelDeployment
+	getObject(t, c, client.ObjectKeyFromObject(deployment), &updated)
+	assertLifecycleCondition(
+		t,
+		updated.Status.Conditions,
+		v1alpha1.ConditionRollout,
+		metav1.ConditionTrue,
+		v1alpha1.ReasonRolloutCapacityReserved,
+	)
+}
+
+func TestLifecycleAdvancedRolloutSurgeReservationPreventsOvercommit(t *testing.T) {
+	t.Parallel()
+
+	deployment := lifecycleDeployment(v1alpha1.ActivationDesiredStateActive, v1alpha1.ActivationWhenFullQueue)
+	contender := lifecycleDeployment(v1alpha1.ActivationDesiredStateActive, v1alpha1.ActivationWhenFullQueue)
+	contender.Name = "contender"
+	contender.UID = "contender-uid"
+	cache := lifecycleReadyCache(t, deployment, "gpu-node-1")
+	contenderCache := lifecycleReadyCache(t, contender, "gpu-node-1")
+	c, reconciler := lifecycleTestController(
+		t,
+		deployment,
+		contender,
+		lifecycleRuntime(),
+		cache,
+		contenderCache,
+		lifecycleGPUNode("gpu-node-1", 2),
+	)
+	reconcileLifecycle(t, reconciler, deployment)
+	markLifecycleRuntimeReady(t, c, deployment)
+	reconcileLifecycle(t, reconciler, deployment)
+
+	var latest v1alpha1.ModelDeployment
+	getObject(t, c, client.ObjectKeyFromObject(deployment), &latest)
+	latest.Spec.Runtime.Image = "ghcr.io/inferops/nano-vllm:v0.2.0"
+	latest.Spec.Rollout.Strategy = v1alpha1.RolloutStrategyRolling
+	latest.Generation++
+	if err := c.Update(context.Background(), &latest); err != nil {
+		t.Fatalf("update rollout spec: %v", err)
+	}
+	reconcileLifecycle(t, reconciler, deployment)
+	reconcileLifecycle(t, reconciler, contender)
+
+	var updated v1alpha1.ModelDeployment
+	getObject(t, c, client.ObjectKeyFromObject(contender), &updated)
+	if updated.Status.Phase != v1alpha1.ModelDeploymentPhaseWaitingForGPU {
+		t.Fatalf("contender phase during rollout = %q, want WaitingForGPU", updated.Status.Phase)
+	}
+	if updated.Status.AssignedNode != "" {
+		t.Fatalf("contender assignedNode during rollout = %q, want empty", updated.Status.AssignedNode)
+	}
+
+	markLifecycleRuntimeReady(t, c, deployment)
+	reconcileLifecycle(t, reconciler, deployment)
+	reconcileLifecycle(t, reconciler, contender)
+
+	getObject(t, c, client.ObjectKeyFromObject(deployment), &updated)
+	assertLifecycleCondition(
+		t,
+		updated.Status.Conditions,
+		v1alpha1.ConditionRollout,
+		metav1.ConditionTrue,
+		v1alpha1.ReasonRolloutComplete,
+	)
+	getObject(t, c, client.ObjectKeyFromObject(contender), &updated)
+	if updated.Status.Phase != v1alpha1.ModelDeploymentPhaseActivating ||
+		updated.Status.AssignedNode != "gpu-node-1" {
+		t.Fatalf("contender status after rollout = phase %q node %q, want Activating on gpu-node-1", updated.Status.Phase, updated.Status.AssignedNode)
 	}
 }
 

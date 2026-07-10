@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -106,7 +107,11 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("configure gateway metrics: %w", err)
 	}
-	gatewayProxy, err := proxy.NewWithMetrics(registry, metricsRecorder)
+	proxyOptions, err := proxyOptionsFromEnvironment()
+	if err != nil {
+		return err
+	}
+	gatewayProxy, err := proxy.NewWithMetricsAndOptions(registry, metricsRecorder, proxyOptions)
 	if err != nil {
 		return fmt.Errorf("create gateway proxy: %w", err)
 	}
@@ -135,6 +140,65 @@ func run(ctx context.Context) error {
 		address,
 		gatewayHandler(healthHandler, metricsHandler, proxyHandler, drainHandler),
 	)
+}
+
+func proxyOptionsFromEnvironment() (proxy.Options, error) {
+	var options proxy.Options
+	requestsPerMinute, err := nonNegativeIntFromEnvironment("INFEROPS_GATEWAY_RATE_LIMIT_RPM")
+	if err != nil {
+		return proxy.Options{}, err
+	}
+	burst, err := nonNegativeIntFromEnvironment("INFEROPS_GATEWAY_RATE_LIMIT_BURST")
+	if err != nil {
+		return proxy.Options{}, err
+	}
+	if requestsPerMinute > 0 || burst > 0 {
+		if requestsPerMinute <= 0 {
+			return proxy.Options{}, errors.New("INFEROPS_GATEWAY_RATE_LIMIT_RPM is required when INFEROPS_GATEWAY_RATE_LIMIT_BURST is set")
+		}
+		options.DefaultRateLimit = &routing.RateLimitPolicy{
+			RequestsPerMinute: requestsPerMinute,
+			Burst:             burst,
+		}
+	}
+	requestLogging, configured, err := optionalBoolFromEnvironment("INFEROPS_GATEWAY_REQUEST_LOGGING")
+	if err != nil {
+		return proxy.Options{}, err
+	}
+	if configured {
+		options.RequestLoggingEnabled = &requestLogging
+	}
+	return options, nil
+}
+
+func nonNegativeIntFromEnvironment(name string) (int, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return 0, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", name, err)
+	}
+	if parsed < 0 {
+		return 0, fmt.Errorf("%s must be non-negative", name)
+	}
+	return parsed, nil
+}
+
+func optionalBoolFromEnvironment(name string) (value bool, configured bool, err error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return false, false, nil
+	}
+	switch strings.ToLower(raw) {
+	case "1", "t", "true", "y", "yes", "on":
+		return true, true, nil
+	case "0", "f", "false", "n", "no", "off":
+		return false, true, nil
+	default:
+		return false, false, fmt.Errorf("%s must be a boolean", name)
+	}
 }
 
 func readinessWithTokenSource(

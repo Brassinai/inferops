@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>InferOps Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>InferOps</h1>
+        <p id="subtitle">Loading cluster state...</p>
+      </div>
+      <button id="refresh" type="button">Refresh</button>
+    </header>
+
+    <main>
+      <section class="stats" aria-label="Summary">
+        <article><span id="deployment-count">0</span><small>Deployments</small></article>
+        <article><span id="cache-count">0</span><small>Caches</small></article>
+        <article><span id="runtime-count">0</span><small>Runtimes</small></article>
+      </section>
+
+      <section>
+        <div class="section-title">
+          <h2>Deployments</h2>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Phase</th>
+                <th>Runtime</th>
+                <th>Activation</th>
+                <th>Scaling</th>
+                <th>Endpoint</th>
+              </tr>
+            </thead>
+            <tbody id="deployments"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="grid">
+        <div>
+          <div class="section-title"><h2>GPUs</h2></div>
+          <div id="gpus" class="cards"></div>
+        </div>
+        <div>
+          <div class="section-title"><h2>Caches</h2></div>
+          <div id="caches" class="cards"></div>
+        </div>
+      </section>
+
+      <section class="grid">
+        <div>
+          <div class="section-title"><h2>Events</h2></div>
+          <div id="events" class="cards"></div>
+        </div>
+        <div>
+          <div class="section-title"><h2>Generated YAML</h2></div>
+          <pre id="yaml"></pre>
+        </div>
+      </section>
+
+      <section>
+        <div class="section-title"><h2>Metrics Queries</h2></div>
+        <div id="metrics" class="query-list"></div>
+      </section>
+    </main>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

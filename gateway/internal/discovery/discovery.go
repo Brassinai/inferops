@@ -228,6 +228,7 @@ func backendFor(
 		RoutePrefix: routePrefix,
 		State:       routing.StateUnavailable,
 		Message:     "model runtime is unavailable",
+		Policy:      routingPolicy(deployment.Spec.Routing.Policy),
 	}
 
 	if deployment.Status.Phase == v1alpha1.ModelDeploymentPhaseDraining {
@@ -273,13 +274,23 @@ func backendFor(
 		backend.Message = "model status is stale"
 		return backend
 	}
-	if !conditionTrueForGeneration(deployment, v1alpha1.ConditionRuntimeReady) ||
-		!conditionTrueForGeneration(deployment, v1alpha1.ConditionModelLoaded) ||
-		!conditionTrueForGeneration(deployment, v1alpha1.ConditionRoutingReady) ||
-		!conditionTrueForGeneration(deployment, v1alpha1.ConditionReady) ||
-		!deployment.Status.Model.Loaded {
-		backend.Message = "model runtime is not ready for routing"
-		return backend
+	if rolloutBlockedWithStableRuntime(deployment) {
+		if !conditionTrue(deployment, v1alpha1.ConditionRuntimeReady) ||
+			!conditionTrue(deployment, v1alpha1.ConditionModelLoaded) ||
+			!conditionTrue(deployment, v1alpha1.ConditionRoutingReady) ||
+			!deployment.Status.Model.Loaded {
+			backend.Message = "previous runtime is not ready while rollout is blocked"
+			return backend
+		}
+	} else {
+		if !conditionTrueForGeneration(deployment, v1alpha1.ConditionRuntimeReady) ||
+			!conditionTrueForGeneration(deployment, v1alpha1.ConditionModelLoaded) ||
+			!conditionTrueForGeneration(deployment, v1alpha1.ConditionRoutingReady) ||
+			!conditionTrueForGeneration(deployment, v1alpha1.ConditionReady) ||
+			!deployment.Status.Model.Loaded {
+			backend.Message = "model runtime is not ready for routing"
+			return backend
+		}
 	}
 	if deployment.Status.Replicas.Desired < 1 ||
 		deployment.Status.Replicas.Ready < deployment.Status.Replicas.Desired {
@@ -339,6 +350,31 @@ func backendFor(
 	backend.State = routing.StateReady
 	backend.Message = ""
 	return backend
+}
+
+func routingPolicy(policy v1alpha1.RoutingPolicySpec) routing.TrafficPolicy {
+	gatewayPolicy := routing.TrafficPolicy{}
+	switch policy.RoutingStrategy {
+	case v1alpha1.RoutingStrategyWeighted:
+		gatewayPolicy.RoutingStrategy = routing.RoutingStrategyWeighted
+	case v1alpha1.RoutingStrategyLeastLoaded:
+		gatewayPolicy.RoutingStrategy = routing.RoutingStrategyLeastLoaded
+	}
+	if policy.Weight != nil {
+		weight := int(*policy.Weight)
+		gatewayPolicy.Weight = &weight
+	}
+	if policy.RateLimit != nil {
+		gatewayPolicy.RateLimit = &routing.RateLimitPolicy{
+			RequestsPerMinute: int(policy.RateLimit.RequestsPerMinute),
+			Burst:             int(policy.RateLimit.Burst),
+		}
+	}
+	if policy.RequestLogging.Enabled != nil {
+		enabled := *policy.RequestLogging.Enabled
+		gatewayPolicy.RequestLogging = &routing.RequestLoggingPolicy{Enabled: &enabled}
+	}
+	return gatewayPolicy
 }
 
 func readyServicesByName(endpointSlices []discoveryv1.EndpointSlice) map[string]bool {
@@ -401,6 +437,31 @@ func conditionTrueForGeneration(deployment *v1alpha1.ModelDeployment, conditionT
 			return condition.Status == metav1.ConditionTrue &&
 				condition.ObservedGeneration >= deployment.Generation
 		}
+	}
+	return false
+}
+
+func conditionTrue(deployment *v1alpha1.ModelDeployment, conditionType string) bool {
+	for _, condition := range deployment.Status.Conditions {
+		if condition.Type == conditionType {
+			return condition.Status == metav1.ConditionTrue
+		}
+	}
+	return false
+}
+
+func rolloutBlockedWithStableRuntime(deployment *v1alpha1.ModelDeployment) bool {
+	if deployment.Status.Phase != v1alpha1.ModelDeploymentPhaseActive {
+		return false
+	}
+	for _, condition := range deployment.Status.Conditions {
+		if condition.Type != v1alpha1.ConditionRollout ||
+			condition.Status != metav1.ConditionFalse ||
+			condition.ObservedGeneration < deployment.Generation {
+			continue
+		}
+		return condition.Reason == v1alpha1.ReasonRolloutWaitingForCapacity ||
+			condition.Reason == v1alpha1.ReasonRolloutRejected
 	}
 	return false
 }

@@ -102,6 +102,30 @@ func TestValidateModelDeployment(t *testing.T) {
 			minAvailable := int32(2)
 			d.Spec.Availability.PodDisruptionBudget.MinAvailable = &minAvailable
 		}, wantErr: true},
+		{name: "valid rolling rollout", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Rollout.Strategy = v1alpha1.RolloutStrategyRolling
+		}},
+		{name: "invalid rollout strategy", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Rollout.Strategy = "Surprise"
+		}, wantErr: true},
+		{name: "invalid rollout capacity policy", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Rollout.WhenCapacityUnavailable = "Evict"
+		}, wantErr: true},
+		{name: "valid canary percent", mutate: func(d *v1alpha1.ModelDeployment) {
+			weight := int32(10)
+			d.Spec.Rollout.Strategy = v1alpha1.RolloutStrategyCanary
+			d.Spec.Rollout.CanaryWeightPercent = &weight
+		}},
+		{name: "canary percent requires canary strategy", mutate: func(d *v1alpha1.ModelDeployment) {
+			weight := int32(10)
+			d.Spec.Rollout.Strategy = v1alpha1.RolloutStrategyRolling
+			d.Spec.Rollout.CanaryWeightPercent = &weight
+		}, wantErr: true},
+		{name: "invalid canary percent", mutate: func(d *v1alpha1.ModelDeployment) {
+			weight := int32(100)
+			d.Spec.Rollout.Strategy = v1alpha1.RolloutStrategyCanary
+			d.Spec.Rollout.CanaryWeightPercent = &weight
+		}, wantErr: true},
 	}
 
 	for _, tt := range tests {
