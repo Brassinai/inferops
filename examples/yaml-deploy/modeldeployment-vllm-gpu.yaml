@@ -1,0 +1,38 @@
+apiVersion: inference.inferops.dev/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: gpu-vllm-qwen
+spec:
+  model:
+    name: gpu-vllm-qwen
+    source: huggingface
+    repo: Qwen/Qwen2.5-7B-Instruct
+    revision: main
+  runtime:
+    ref: vllm
+    maxModelLen: 4096
+    tensorParallelSize: 1
+    gpuMemoryUtilization: 0.85
+  resources:
+    cpu: "8"
+    memory: 32Gi
+    gpu:
+      count: 1
+      vendor: nvidia
+  activation:
+    desiredState: Inactive
+    whenFull: Queue
+    priority: 50
+    drainTimeout: 5m
+  scaling:
+    minReplicas: 0
+    maxReplicas: 1
+  routing:
+    enabled: true
+    path: /models/gpu-vllm-qwen
+    openAICompatible: true
+  cache:
+    enabled: true
+    type: nodeLocal
+    size: 50Gi
+    path: /var/lib/inferops/models
