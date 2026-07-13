@@ -114,6 +114,15 @@ COMPATIBILITY_CONTRACT = {
         },
     },
 }
+ALLOWED_OPENAPI_FIELD_CHANGES = {
+    (
+        "modeldeployments.inference.inferops.dev.v1alpha1.spec.scaling",
+        "default",
+    ): (
+        {},
+        {"minReplicas": 0, "maxReplicas": 1},
+    ),
+}
 
 
 def yaml_files() -> list[Path]:
@@ -218,6 +227,12 @@ def compare_openapi_schema(old: dict, new: dict, path: str) -> None:
         old_value = old.get(field, missing)
         new_value = new.get(field, missing)
         if old_value != new_value:
+            if (
+                (path, field) in ALLOWED_OPENAPI_FIELD_CHANGES
+                and ALLOWED_OPENAPI_FIELD_CHANGES[(path, field)]
+                == (old_value, new_value)
+            ):
+                continue
             raise ValueError(
                 f"{path}: OpenAPI {field} changed from "
                 f"{None if old_value is missing else old_value!r} to "

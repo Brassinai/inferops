@@ -33,6 +33,13 @@ Profiles:
 | `default` | Minimal operator + gateway |
 | `homelab` | Includes cache-path defaults and sensible resource defaults |
 
+Compute profiles:
+
+| Compute profile | Use case |
+| --- | --- |
+| `cpu` | Default. Allows cache placement on any Ready cache-capable node. |
+| `nvidia-gpu` | Requires cache nodes to advertise `nvidia.com/gpu` and makes missing GPU capacity a doctor failure. |
+
 The command first applies the packaged CRDs with server-side apply, then uses
 repeatable `helm upgrade --install` operations with atomic waits. This explicit
 CRD step is required because Helm does not upgrade files from a chart's
@@ -58,6 +65,14 @@ values, security constraints, and acceptance checks.
 InferOps does not install or guess host NVIDIA drivers, the NVIDIA Container
 Toolkit, a device plugin, k3s, or Tailscale. Those host and cluster
 prerequisites must be installed and verified independently.
+
+For NVIDIA GPU homelabs, make GPU placement explicit:
+
+```bash
+inferops install --profile homelab \
+  --compute-profile nvidia-gpu \
+  --cache-path /var/lib/inferops/models
+```
 
 When running a CLI development build outside this repository, use
 `--charts-dir /path/to/inferops/deploy/helm` if the packaged charts cannot be
@@ -127,6 +142,31 @@ inferops deploy app.py --activate --when-full ReplaceOldest
 ```
 
 Idempotent: re-deploying the same app with no changes is a no-op.
+
+### gateway forward
+
+Forward the installed gateway Service to localhost for local testing:
+
+```bash
+inferops gateway forward --context orbstack
+```
+
+Defaults are equivalent to:
+
+```bash
+kubectl --context orbstack --namespace default port-forward \
+  --address 127.0.0.1 svc/inferops-gateway 8080:80
+```
+
+Override ports or namespace when needed:
+
+```bash
+inferops gateway forward \
+  --context orbstack \
+  --namespace inferops-system \
+  --local-port 8081 \
+  --remote-port 80
+```
 
 ### generate
 

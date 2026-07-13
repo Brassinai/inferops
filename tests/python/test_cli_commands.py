@@ -7,6 +7,7 @@ from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import textwrap
 import unittest
@@ -19,6 +20,7 @@ from inferops_cli import (
     deploy,
     doctor,
     endpoints,
+    gateway,
     gpu,
     init,
     install,
@@ -44,6 +46,7 @@ def make_args(**overrides) -> argparse.Namespace:
         "tail": 20,
         "force": False,
         "profile": "default",
+        "compute_profile": "cpu",
         "cache_path": None,
         "tailscale_hostname": None,
         "exposure": None,
@@ -78,6 +81,7 @@ class CLICommandParserTest(unittest.TestCase):
             "deploy",
             "doctor",
             "endpoints",
+            "gateway",
             "gpu",
             "install",
             "logs",
@@ -94,10 +98,12 @@ class CLICommandParserTest(unittest.TestCase):
 
     def test_group_commands_have_help_text(self) -> None:
         gpu_help = self._parse_help(["gpu", "list", "--help"])
+        gateway_help = self._parse_help(["gateway", "forward", "--help"])
         cache_help = self._parse_help(["cache", "delete", "--help"])
         doctor_help = self._parse_help(["doctor", "--help"])
 
         self.assertIn("List GPU capacity, occupancy, and availability", gpu_help)
+        self.assertIn("Forward the InferOps gateway Service", gateway_help)
         self.assertIn("Delete one ModelCache", cache_help)
         self.assertIn("Check Kubernetes API, GPUs, cache, gateway", doctor_help)
 
@@ -157,6 +163,67 @@ class CLICommandParserTest(unittest.TestCase):
 
 
 class CLICommandHandlerTest(unittest.TestCase):
+    def test_gateway_forward_builds_kubectl_port_forward_command(self) -> None:
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0)
+
+        stdout = io.StringIO()
+        args = make_args(
+            namespace="inferops-system",
+            context="orbstack",
+            kubeconfig="/tmp/kubeconfig",
+            service="inferops-gateway",
+            address="127.0.0.1",
+            local_port=8080,
+            remote_port=80,
+        )
+        with redirect_stdout(stdout):
+            exit_code = gateway.run_forward(args, runner=run)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            commands,
+            [
+                [
+                    "kubectl",
+                    "--kubeconfig",
+                    "/tmp/kubeconfig",
+                    "--context",
+                    "orbstack",
+                    "--namespace",
+                    "inferops-system",
+                    "port-forward",
+                    "--address",
+                    "127.0.0.1",
+                    "svc/inferops-gateway",
+                    "8080:80",
+                ]
+            ],
+        )
+        self.assertIn("http://127.0.0.1:8080", stdout.getvalue())
+
+    def test_gateway_forward_rejects_invalid_service_name(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        args = make_args(
+            service="../inferops-gateway",
+            address="127.0.0.1",
+            local_port=8080,
+            remote_port=80,
+        )
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            exit_code = gateway.run_forward(
+                args,
+                runner=lambda command: self.fail("kubectl should not run"),
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("gateway service name is invalid", stderr.getvalue())
+
     def test_main_runs_full_lifecycle_replacement_and_failure_workflow(self) -> None:
         source = textwrap.dedent(
             """
@@ -313,7 +380,11 @@ class CLICommandHandlerTest(unittest.TestCase):
             )
             install_stdout, _, _ = self._run(
                 install.run,
-                make_args(profile="homelab", cache_path="/var/lib/inferops/models"),
+                make_args(
+                    profile="homelab",
+                    compute_profile="nvidia-gpu",
+                    cache_path="/var/lib/inferops/models",
+                ),
                 fake_client,
             )
             delete_stdout, _, _ = self._run(
@@ -346,6 +417,9 @@ class CLICommandHandlerTest(unittest.TestCase):
         self.assertTrue(json.loads(cache_delete_stdout)["deleted"])
         self.assertEqual(json.loads(gpu_stdout)["gpus"], [])
         self.assertEqual(json.loads(install_stdout)["install"]["profile"], "homelab")
+        self.assertEqual(
+            json.loads(install_stdout)["install"]["computeProfile"], "nvidia-gpu"
+        )
         self.assertTrue(json.loads(delete_stdout)["deleted"])
         self.assertTrue(json.loads(delete_stdout)["cachePreserved"])
         self.assertEqual(json.loads(init_stdout)["mode"], "placeholder")

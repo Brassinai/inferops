@@ -78,6 +78,9 @@ inferops deploy app.py
 inferops generate app.py > modeldeployment.yaml
 ```
 
+See [examples/sdk-endpoints](examples/sdk-endpoints) for runnable local
+examples of custom endpoint invocation and Python client calls.
+
 ### CLI
 
 Use the CLI for common deployment operations:
@@ -137,6 +140,7 @@ kubectl apply -f modeldeployment.yaml
 - [Production notes](docs/production.md)
 - [Namespace tenancy](docs/tenancy.md)
 - [Backup and disaster recovery](docs/disaster-recovery.md)
+- [Build and publish images](docs/build.md)
 - [Core platform gate](docs/core-platform-gate.md)
 
 ## Development

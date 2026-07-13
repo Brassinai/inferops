@@ -329,7 +329,7 @@ metadata:
 spec:
   engine: nano-vllm
   protocol: openai
-  defaultImage: ghcr.io/inferops/inferops-runtime:nano-vllm
+  defaultImage: ghcr.io/brassinai/inferops-runtime:nano-vllm
   port: 8000
   healthPath: /health
   readinessPath: /health

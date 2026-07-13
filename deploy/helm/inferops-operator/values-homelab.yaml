@@ -1,14 +1,13 @@
 profile: homelab
 
 gpu:
-  required: true
+  required: false
 
 cache:
   root: /var/lib/inferops/models
   nodeSelector: {}
   capacityAnnotation: inferops.dev/cache-capacity
-  requiredNodeResources:
-    - nvidia.com/gpu
+  requiredNodeResources: []
 
 resources:
   requests:

@@ -12,7 +12,7 @@ from inferops_cli.cluster_resources import gpu_inventory
 from inferops_cli.contracts import CheckStatus, DoctorCheck
 from inferops_cli.errors import CLIError
 from inferops_cli.k8s_client import LiveKubernetesClient
-from inferops_cli.kube import CacheDeleteRequest, ClusterTarget, DoctorRequest
+from inferops_cli.kube import CacheDeleteRequest, ClusterTarget, DeployRequest, DoctorRequest
 
 
 def obj(**values):
@@ -132,6 +132,34 @@ class GPUInventoryTest(unittest.TestCase):
 
 
 class LiveClientSafetyTest(unittest.TestCase):
+    def test_deploy_reports_missing_crds_actionably(self) -> None:
+        client = live_client()
+        client._cluster = ClusterTarget(namespace="default", context="orbstack")
+
+        class CustomObjects:
+            def get_namespaced_custom_object(self, **_kwargs):
+                raise ApiException(status=404, reason="Not Found")
+
+            def create_namespaced_custom_object(self, **_kwargs):
+                raise ApiException(status=404, reason="Not Found")
+
+        client._custom_api = CustomObjects()
+        manifest = {
+            "apiVersion": "inference.inferops.dev/v1alpha1",
+            "kind": "ModelDeployment",
+            "metadata": {"name": "cpu-smollm"},
+            "spec": {"activation": {"desiredState": "Inactive"}},
+        }
+
+        with self.assertRaisesRegex(CLIError, "InferOps CRDs are not available"):
+            client.deploy(
+                DeployRequest(
+                    cluster=client._cluster,
+                    app_path="app.py",
+                    manifests=[manifest],
+                )
+            )
+
     def test_gpu_list_reports_unknown_when_cluster_pod_list_is_forbidden(self) -> None:
         client = live_client()
 

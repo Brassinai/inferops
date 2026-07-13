@@ -26,6 +26,15 @@ def register(subcommands) -> None:
         help="Optional cache root path for profile-specific configuration.",
     )
     parser.add_argument(
+        "--compute-profile",
+        choices=("cpu", "nvidia-gpu"),
+        default="cpu",
+        help=(
+            "Node resource assumptions for cache placement and diagnostics. "
+            "Use nvidia-gpu only when cache nodes advertise nvidia.com/gpu."
+        ),
+    )
+    parser.add_argument(
         "--tailscale-hostname",
         help="Expose the gateway through an installed Tailscale Kubernetes Operator.",
     )
@@ -97,6 +106,7 @@ def run(args, client=None) -> int:
             InstallRequest(
                 cluster=cluster,
                 profile=getattr(args, "profile", "default"),
+                compute_profile=getattr(args, "compute_profile", "cpu"),
                 cache_path=getattr(args, "cache_path", None),
                 tailscale_hostname=getattr(args, "tailscale_hostname", None),
                 exposure=getattr(args, "exposure", None),

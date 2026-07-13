@@ -103,6 +103,15 @@ inferops install --profile homelab \
   --cache-path /var/lib/inferops/models
 ```
 
+This default install is CPU-safe and works for the portable llama.cpp path. For
+an NVIDIA GPU homelab, require cache placement on GPU-capable nodes:
+
+```bash
+inferops install --profile homelab \
+  --compute-profile nvidia-gpu \
+  --cache-path /var/lib/inferops/models
+```
+
 To create a private Tailscale ingress for the gateway after the Tailscale
 operator is ready:
 

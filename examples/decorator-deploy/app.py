@@ -4,13 +4,14 @@ app = inferops.App("customer-support-llm")
 
 
 @app.model(
-    name="qwen-chat",
-    engine="nano-vllm",
+    name="gpu-vllm-qwen",
+    engine="vllm",
     model="Qwen/Qwen2.5-7B-Instruct",
-    gpu="L4",
+    gpu=1,
     min_replicas=0,
-    max_replicas=4,
+    max_replicas=1,
     max_model_len=4096,
+    cache_size="50Gi",
 )
 class QwenChat:
     pass

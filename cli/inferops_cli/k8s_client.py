@@ -68,6 +68,20 @@ def _raise_cli_error(exc: Exception) -> None:
     raise CLIError(f"Kubernetes API error {status}: {reason}")
 
 
+def _raise_modeldeployment_apply_error(exc: Exception, cluster: ClusterTarget) -> None:
+    """Render actionable ModelDeployment apply failures."""
+    status = getattr(exc, "status", None)
+    if status == 404:
+        target = f"context '{cluster.context}'" if cluster.context else "the current kube context"
+        raise CLIError(
+            "failed to apply ModelDeployment: InferOps CRDs are not available in "
+            f"{target} namespace '{cluster.namespace}'. Run 'inferops install' for "
+            "that context, or check that --context and --namespace point to the "
+            "cluster where InferOps is installed."
+        )
+    _raise_cli_error(exc)
+
+
 class LiveKubernetesClient(KubernetesClient):
     """Live Kubernetes client backed by the official Python client."""
 
@@ -145,6 +159,8 @@ class LiveKubernetesClient(KubernetesClient):
         Replace is chosen over patch so the full spec is authoritative and
         stale fields are removed.
         """
+        from kubernetes.client.rest import ApiException
+
         api = self._custom_objects_api
         deployments: list[dict[str, Any]] = []
         for manifest in request.manifests:
@@ -152,26 +168,29 @@ class LiveKubernetesClient(KubernetesClient):
             namespace = self._cluster.namespace
             body = _clean_manifest(manifest)
 
-            exists = self._modeldeployment_exists(name, namespace)
-            if exists:
-                api.replace_namespaced_custom_object(
-                    group="inference.inferops.dev",
-                    version="v1alpha1",
-                    namespace=namespace,
-                    plural="modeldeployments",
-                    name=name,
-                    body=body,
-                )
-                action = "replaced"
-            else:
-                api.create_namespaced_custom_object(
-                    group="inference.inferops.dev",
-                    version="v1alpha1",
-                    namespace=namespace,
-                    plural="modeldeployments",
-                    body=body,
-                )
-                action = "created"
+            try:
+                exists = self._modeldeployment_exists(name, namespace)
+                if exists:
+                    api.replace_namespaced_custom_object(
+                        group="inference.inferops.dev",
+                        version="v1alpha1",
+                        namespace=namespace,
+                        plural="modeldeployments",
+                        name=name,
+                        body=body,
+                    )
+                    action = "replaced"
+                else:
+                    api.create_namespaced_custom_object(
+                        group="inference.inferops.dev",
+                        version="v1alpha1",
+                        namespace=namespace,
+                        plural="modeldeployments",
+                        body=body,
+                    )
+                    action = "created"
+            except ApiException as exc:
+                _raise_modeldeployment_apply_error(exc, self._cluster)
 
             deployments.append(
                 {

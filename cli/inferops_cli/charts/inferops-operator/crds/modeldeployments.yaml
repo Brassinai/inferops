@@ -134,7 +134,9 @@ spec:
                       default: 5m
                 scaling:
                   type: object
-                  default: {}
+                  default:
+                    minReplicas: 0
+                    maxReplicas: 1
                   properties:
                     minReplicas:
                       type: integer

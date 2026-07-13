@@ -5,7 +5,7 @@ metadata:
 spec:
   engine: llama-cpp
   protocol: openai
-  defaultImage: ghcr.io/inferops/llama-cpp:latest
+  defaultImage: ghcr.io/brassinai/llama-cpp:latest
   port: 8000
   healthPath: /health
   readinessPath: /health

@@ -22,6 +22,15 @@ inferops install --profile homelab \
   --cache-path /var/lib/inferops/models
 ```
 
+The default compute profile is CPU-safe for the llama.cpp path. For NVIDIA GPU
+runtime deployments, install with:
+
+```bash
+inferops install --profile homelab \
+  --compute-profile nvidia-gpu \
+  --cache-path /var/lib/inferops/models
+```
+
 The equivalent lower-level commands are:
 
 ```bash

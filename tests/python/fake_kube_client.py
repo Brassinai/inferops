@@ -410,6 +410,7 @@ class FakeKubernetesClient:
             resources.append("ingress/inferops-gateway-tailscale")
         install = {
             "profile": request.profile,
+            "computeProfile": request.compute_profile,
             "namespace": request.cluster.namespace,
             "cachePath": request.cache_path,
             "tailscaleHostname": request.tailscale_hostname,

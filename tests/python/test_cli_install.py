@@ -60,11 +60,39 @@ class HelmInstallerTest(unittest.TestCase):
 
         self.assertIn("cache.root=/mnt/nvme/models", operator_command)
         self.assertIn("profile=homelab", operator_command)
+        self.assertIn("gpu.required=false", operator_command)
+        self.assertIn("cache.requiredNodeResources=[]", operator_command)
         self.assertIn("tailscale.enabled=true", gateway_command)
         self.assertIn("tailscale.hostname=inferops", gateway_command)
         self.assertEqual(response["install"]["cachePath"], "/mnt/nvme/models")
+        self.assertEqual(response["install"]["computeProfile"], "cpu")
         self.assertEqual(response["install"]["tailscaleHostname"], "inferops")
         self.assertIn("modelruntime/llama-cpp", response["install"]["resources"])
+
+    def test_nvidia_gpu_compute_profile_requires_gpu_cache_nodes(self) -> None:
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            charts_dir = self._make_charts(Path(directory), include_homelab_values=True)
+            response = HelmInstaller(runner=run).install(
+                InstallRequest(
+                    cluster=ClusterTarget(namespace="inferops-system"),
+                    profile="homelab",
+                    compute_profile="nvidia-gpu",
+                    charts_dir=str(charts_dir),
+                )
+            )
+
+        operator_command = commands[1]
+        self.assertIn("gpu.required=true", operator_command)
+        self.assertIn(
+            'cache.requiredNodeResources=["nvidia.com/gpu"]', operator_command
+        )
+        self.assertEqual(response["install"]["computeProfile"], "nvidia-gpu")
 
     def test_default_profile_uses_default_cache_root_without_tailscale(self) -> None:
         commands: list[list[str]] = []
@@ -85,9 +113,12 @@ class HelmInstallerTest(unittest.TestCase):
 
         self.assertEqual(response["install"]["cachePath"], "/var/lib/inferops/models")
         self.assertIn("profile=default", commands[1])
+        self.assertIn("gpu.required=false", commands[1])
+        self.assertIn("cache.requiredNodeResources=[]", commands[1])
         self.assertNotIn("tailscale.enabled=true", commands[2])
         self.assertEqual(response["install"]["crds"]["status"], "applied")
         self.assertEqual(response["install"]["exposure"], "cluster-ip")
+        self.assertEqual(response["install"]["computeProfile"], "cpu")
 
     def test_builds_each_portable_gateway_exposure(self) -> None:
         cases = (
@@ -343,6 +374,17 @@ class HelmInstallerTest(unittest.TestCase):
                         charts_dir="/not-used",
                     )
                 )
+
+    def test_rejects_invalid_compute_profile_before_running_helm(self) -> None:
+        with self.assertRaisesRegex(CLIError, "unsupported compute profile"):
+            HelmInstaller(runner=lambda command: self.fail("Helm should not run")).install(
+                InstallRequest(
+                    cluster=ClusterTarget(namespace="inferops-system"),
+                    profile="homelab",
+                    compute_profile="amd-gpu",
+                    charts_dir="/not-used",
+                )
+            )
 
     def test_reports_helm_stderr_without_exposing_command_arguments(self) -> None:
         def fail(command):

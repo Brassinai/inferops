@@ -1,6 +1,6 @@
 image:
-  repository: ghcr.io/inferops/inferops-operator
-  tag: "0.0.0"
+  repository: ghcr.io/brassinai/inferops-operator
+  tag: "v0.1.0"
   pullPolicy: IfNotPresent
 
 replicaCount: 1
@@ -59,7 +59,7 @@ networkPolicy:
 cache:
   root: /var/lib/inferops/models
   defaultSize: 100Gi
-  downloaderImage: ghcr.io/inferops/model-downloader:0.0.0
+  downloaderImage: ghcr.io/brassinai/model-downloader:v0.1.0
   nodeSelector: {}
   capacityAnnotation: inferops.dev/cache-capacity
   requiredNodeResources: []
@@ -121,8 +121,8 @@ modelRuntimes:
     engine: nano-vllm
     protocol: openai
     image:
-      repository: ghcr.io/inferops/nano-vllm
-      tag: "0.0.0"
+      repository: ghcr.io/brassinai/nano-vllm
+      tag: "v0.1.0"
     port: 8000
     healthPath: /health
     readinessPath: /health
@@ -132,8 +132,8 @@ modelRuntimes:
     engine: vllm
     protocol: openai
     image:
-      repository: ghcr.io/inferops/vllm
-      tag: "0.0.0"
+      repository: ghcr.io/brassinai/vllm
+      tag: "v0.1.0"
     port: 8000
     healthPath: /health
     readinessPath: /health
@@ -143,8 +143,8 @@ modelRuntimes:
     engine: sglang
     protocol: openai
     image:
-      repository: ghcr.io/inferops/sglang
-      tag: "0.0.0"
+      repository: ghcr.io/brassinai/sglang
+      tag: "v0.1.0"
     port: 8000
     healthPath: /health
     readinessPath: /health_generate
@@ -154,8 +154,8 @@ modelRuntimes:
     engine: llama-cpp
     protocol: openai
     image:
-      repository: ghcr.io/inferops/llama-cpp
-      tag: "0.0.0"
+      repository: ghcr.io/brassinai/llama-cpp
+      tag: "v0.1.0"
     port: 8000
     healthPath: /health
     readinessPath: /health

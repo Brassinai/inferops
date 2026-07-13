@@ -623,6 +623,42 @@ func TestLifecycleRepeatedReconcileDoesNotChurnRuntime(t *testing.T) {
 	}
 }
 
+func TestLifecycleRuntimeDefaultsDoNotChurnRuntime(t *testing.T) {
+	t.Parallel()
+
+	deployment := lifecycleDeployment(v1alpha1.ActivationDesiredStateActive, v1alpha1.ActivationWhenFullQueue)
+	cache := lifecycleReadyCache(t, deployment, "gpu-node-1")
+	c, reconciler := lifecycleTestController(t, deployment, lifecycleRuntime(), cache, lifecycleGPUNode("gpu-node-1", 2))
+	reconcileLifecycle(t, reconciler, deployment)
+
+	var runtimeDeployment appsv1.Deployment
+	getObject(t, c, types.NamespacedName{Namespace: deployment.Namespace, Name: "qwen-runtime"}, &runtimeDeployment)
+	applyRuntimeDeploymentAPIDefaults(&runtimeDeployment)
+	runtimeDeployment.Status.ObservedGeneration = runtimeDeployment.Generation
+	runtimeDeployment.Status.ReadyReplicas = 1
+	runtimeDeployment.Status.AvailableReplicas = 1
+	runtimeDeployment.Status.UpdatedReplicas = 1
+	if err := c.Update(context.Background(), &runtimeDeployment); err != nil {
+		t.Fatalf("update defaulted runtime Deployment: %v", err)
+	}
+	if err := c.Status().Update(context.Background(), &runtimeDeployment); err != nil {
+		t.Fatalf("update defaulted runtime Deployment status: %v", err)
+	}
+
+	patchesBefore := c.(*patchCountingClient).deploymentPatches
+	reconcileLifecycle(t, reconciler, deployment)
+
+	var updated v1alpha1.ModelDeployment
+	getObject(t, c, client.ObjectKeyFromObject(deployment), &updated)
+	if updated.Status.Phase != v1alpha1.ModelDeploymentPhaseActive {
+		t.Fatalf("phase = %q, want Active", updated.Status.Phase)
+	}
+	if got := c.(*patchCountingClient).deploymentPatches; got != patchesBefore {
+		t.Errorf("runtime Deployment patch count changed: %d -> %d: %v",
+			patchesBefore, got, c.(*patchCountingClient).deploymentPatchData)
+	}
+}
+
 func TestLifecycleAdvancedRolloutQueuesWithoutSpareGPUCapacity(t *testing.T) {
 	t.Parallel()
 
@@ -2117,6 +2153,41 @@ func markLifecycleRuntimeReady(
 	}}
 	if err := c.Status().Update(context.Background(), &runtimeDeployment); err != nil {
 		t.Fatalf("mark runtime ready: %v", err)
+	}
+}
+
+func applyRuntimeDeploymentAPIDefaults(deployment *appsv1.Deployment) {
+	if deployment.Spec.RevisionHistoryLimit == nil {
+		value := int32(10)
+		deployment.Spec.RevisionHistoryLimit = &value
+	}
+	podSpec := &deployment.Spec.Template.Spec
+	if podSpec.RestartPolicy == "" {
+		podSpec.RestartPolicy = corev1.RestartPolicyAlways
+	}
+	if podSpec.DNSPolicy == "" {
+		podSpec.DNSPolicy = corev1.DNSClusterFirst
+	}
+	if podSpec.SchedulerName == "" {
+		podSpec.SchedulerName = corev1.DefaultSchedulerName
+	}
+	for i := range podSpec.Containers {
+		container := &podSpec.Containers[i]
+		if container.TerminationMessagePath == "" {
+			container.TerminationMessagePath = corev1.TerminationMessagePathDefault
+		}
+		if container.TerminationMessagePolicy == "" {
+			container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
+		}
+		defaultProbe(container.StartupProbe)
+		defaultProbe(container.ReadinessProbe)
+		defaultProbe(container.LivenessProbe)
+	}
+}
+
+func defaultProbe(probe *corev1.Probe) {
+	if probe != nil && probe.SuccessThreshold == 0 {
+		probe.SuccessThreshold = 1
 	}
 }
 

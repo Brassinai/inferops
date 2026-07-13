@@ -952,8 +952,8 @@ Render it:
 ```bash
 helm template inferops-gateway ./deploy/helm/inferops-gateway \
   --namespace inferops \
-  --set image.repository=ghcr.io/inferops/inferops-gateway \
-  --set image.tag=0.0.0 \
+  --set image.repository=ghcr.io/brassinai/inferops-gateway \
+  --set image.tag=v0.1.0 \
   --set service.type=ClusterIP \
   --set service.port=80
 ```
@@ -963,8 +963,8 @@ Install it:
 ```bash
 helm upgrade -i inferops-gateway ./deploy/helm/inferops-gateway \
   --namespace inferops \
-  --set image.repository=ghcr.io/inferops/inferops-gateway \
-  --set image.tag=0.0.0 \
+  --set image.repository=ghcr.io/brassinai/inferops-gateway \
+  --set image.tag=v0.1.0 \
   --set service.type=ClusterIP \
   --set service.port=80
 ```

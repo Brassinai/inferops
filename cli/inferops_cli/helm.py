@@ -18,6 +18,7 @@ DEFAULT_CACHE_ROOT = "/var/lib/inferops/models"
 DEFAULT_RELEASES = ("inferops-operator", "inferops-gateway")
 DEFAULT_TIMEOUT = "5m"
 CRD_FIELD_MANAGER = "inferops-cli"
+COMPUTE_PROFILES = {"cpu", "nvidia-gpu"}
 TAILSCALE_HOSTNAME = re.compile(r"^[a-z](?:[a-z0-9-]*[a-z])?$")
 DNS_SUBDOMAIN = re.compile(
     r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$"
@@ -43,6 +44,8 @@ class HelmInstaller:
         """Install or upgrade the charts selected by an install request."""
         if request.profile not in {"default", "homelab"}:
             raise CLIError(f"unsupported install profile: {request.profile}")
+        if request.compute_profile not in COMPUTE_PROFILES:
+            raise CLIError(f"unsupported compute profile: {request.compute_profile}")
 
         cache_root = request.cache_path or DEFAULT_CACHE_ROOT
         _validate_cache_root(cache_root)
@@ -120,6 +123,7 @@ class HelmInstaller:
             "cluster": request.cluster.to_safe_dict(),
             "install": {
                 "profile": request.profile,
+                "computeProfile": request.compute_profile,
                 "namespace": request.cluster.namespace,
                 "cachePath": cache_root,
                 "tailscaleHostname": request.tailscale_hostname,
@@ -194,10 +198,29 @@ def _build_upgrade_command(
                 f"profile={request.profile}",
             )
         )
+        command.extend(_operator_compute_profile_values(request))
     else:
         command.extend(_gateway_exposure_values(request))
         command.extend(_gateway_auth_values(request))
     return command
+
+
+def _operator_compute_profile_values(request: InstallRequest) -> list[str]:
+    if request.compute_profile == "cpu":
+        return [
+            "--set-string",
+            "gpu.required=false",
+            "--set-json",
+            "cache.requiredNodeResources=[]",
+        ]
+    if request.compute_profile == "nvidia-gpu":
+        return [
+            "--set-string",
+            "gpu.required=true",
+            "--set-json",
+            'cache.requiredNodeResources=["nvidia.com/gpu"]',
+        ]
+    raise CLIError(f"unsupported compute profile: {request.compute_profile}")
 
 
 def _gateway_exposure_values(request: InstallRequest) -> list[str]:

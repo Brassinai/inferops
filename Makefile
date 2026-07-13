@@ -2,6 +2,7 @@ GO ?= go
 GOFMT ?= gofmt
 HELM ?= helm
 DOCKER ?= docker
+IMAGE_TAG ?= dev
 
 GO_VERSION ?= 1.22
 PYTHON_VERSION ?= 3.10
@@ -20,7 +21,7 @@ GO_FILES := $(shell find . -type f -name '*.go' -not -path './vendor/*' -not -pa
 CHARTS := $(sort $(dir $(wildcard deploy/helm/*/Chart.yaml)))
 
 .PHONY: help setup tools-check fmt fmt-check test vet python-check python-test python-package runtime-conformance runtime-conformance-matrix \
-	model-downloader-build model-downloader-test helm-lint helm-template yaml-check schema-check verify
+	operator-image gateway-image control-plane-images model-downloader-build model-downloader-test helm-lint helm-template yaml-check schema-check verify
 
 help:
 	@printf '%s\n' \
@@ -36,6 +37,9 @@ help:
 		'  python-package Build the CLI source distribution and wheel' \
 		'  runtime-conformance Validate a running runtime; requires RUNTIME_BASE_URL and RUNTIME_MODEL' \
 		'  runtime-conformance-matrix Validate live vLLM and SGLang release candidates' \
+		'  operator-image Build the operator container image' \
+		'  gateway-image  Build the gateway container image' \
+		'  control-plane-images Build operator and gateway container images' \
 		'  model-downloader-build Build the cache downloader container image' \
 		'  model-downloader-test  Run cache downloader unit tests' \
 		'  helm-lint      Lint all Helm charts' \
@@ -119,10 +123,24 @@ runtime-conformance-matrix:
 		--model "$(SGLANG_MODEL)" \
 		--readiness-path /health_generate
 
+operator-image:
+	$(DOCKER) build \
+		--file operator/Dockerfile \
+		--tag inferops-operator:$(IMAGE_TAG) \
+		.
+
+gateway-image:
+	$(DOCKER) build \
+		--file gateway/Dockerfile \
+		--tag inferops-gateway:$(IMAGE_TAG) \
+		.
+
+control-plane-images: operator-image gateway-image
+
 model-downloader-build:
 	$(DOCKER) build \
 		--file runtimes/model-downloader/Dockerfile \
-		--tag inferops/model-downloader:dev \
+		--tag inferops/model-downloader:$(IMAGE_TAG) \
 		.
 
 model-downloader-test:
@@ -318,7 +336,8 @@ helm-template:
 	@$(PYTHON) scripts/check_tenant_rbac.py .verify/helm/inferops-gateway-tenant.yaml
 	@grep -q 'pathType: Prefix' .verify/helm/inferops-gateway-homelab.yaml
 	@grep -q 'profile: "homelab"' .verify/helm/inferops-operator-homelab.yaml
-	@grep -q 'gpu.required: "true"' .verify/helm/inferops-operator-homelab.yaml
+	@grep -q 'gpu.required: "false"' .verify/helm/inferops-operator-homelab.yaml
+	@grep -q 'INFEROPS_CACHE_REQUIRED_RESOURCES' .verify/helm/inferops-operator-homelab.yaml
 	@grep -q 'gpu.required: "false"' .verify/helm/inferops-operator.yaml
 	@grep -q 'INFEROPS_GATEWAY_AUTH_TOKEN_FILE' .verify/helm/inferops-gateway-auth.yaml
 	@grep -q 'secretName: "inferops-gateway-token"' .verify/helm/inferops-gateway-auth.yaml

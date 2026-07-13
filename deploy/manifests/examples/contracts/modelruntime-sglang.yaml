@@ -5,7 +5,7 @@ metadata:
 spec:
   engine: sglang
   protocol: openai
-  defaultImage: ghcr.io/inferops/sglang:latest
+  defaultImage: ghcr.io/brassinai/sglang:latest
   port: 8000
   healthPath: /health
   readinessPath: /health_generate

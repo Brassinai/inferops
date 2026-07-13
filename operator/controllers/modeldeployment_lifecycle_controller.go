@@ -906,7 +906,7 @@ func (r *ModelDeploymentController) ensureRuntimeDeployment(
 	if err := assertControlledBy(&existing, deployment); err != nil {
 		return nil, false, permanentLifecycleError(err)
 	}
-	changed := !reflect.DeepEqual(existing.Spec, desired.Spec) ||
+	changed := !runtimeDeploymentSpecEqual(existing.Spec, desired.Spec) ||
 		!reflect.DeepEqual(existing.OwnerReferences, desired.OwnerReferences) ||
 		!containsLabels(existing.Labels, desired.Labels)
 	if !changed {
@@ -927,10 +927,11 @@ func (r *ModelDeploymentController) ensureRuntimeDeployment(
 	if err := r.client.Patch(ctx, &existing, patch); err != nil {
 		return nil, false, fmt.Errorf("patch runtime Deployment: %w", err)
 	}
-	if existing.Generation <= before.Generation {
-		existing.Generation = before.Generation + 1
+	var refreshed appsv1.Deployment
+	if err := r.client.Get(ctx, key, &refreshed); err != nil {
+		return nil, false, fmt.Errorf("get patched runtime Deployment: %w", err)
 	}
-	return &existing, false, nil
+	return &refreshed, false, nil
 }
 
 func (r *ModelDeploymentController) ensurePodDisruptionBudget(
@@ -1558,7 +1559,14 @@ func (r *ModelDeploymentController) projectRuntimeDeployment(
 
 	deployment.Status.Phase = v1alpha1.ModelDeploymentPhaseActivating
 	deployment.Status.Model.Loaded = false
-	message := fmt.Sprintf("Runtime has %d/%d ready replicas", runtimeDeployment.Status.ReadyReplicas, desired)
+	message := fmt.Sprintf(
+		"Runtime has %d/%d ready replicas, %d available replicas, observed generation %d/%d",
+		runtimeDeployment.Status.ReadyReplicas,
+		desired,
+		runtimeDeployment.Status.AvailableReplicas,
+		runtimeDeployment.Status.ObservedGeneration,
+		runtimeDeployment.Generation,
+	)
 	setDeploymentCondition(deployment, v1alpha1.ConditionRuntimeReady, metav1.ConditionFalse,
 		v1alpha1.ReasonRuntimeCreating, message)
 	setDeploymentCondition(deployment, v1alpha1.ConditionModelLoaded, metav1.ConditionFalse,
@@ -1589,6 +1597,108 @@ func runtimeDeploymentReady(runtimeDeployment *appsv1.Deployment) bool {
 		runtimeDeployment.Status.ObservedGeneration >= runtimeDeployment.Generation &&
 		runtimeDeployment.Status.ReadyReplicas >= desired &&
 		runtimeDeployment.Status.AvailableReplicas >= desired
+}
+
+func runtimeDeploymentSpecEqual(existing, desired appsv1.DeploymentSpec) bool {
+	return int32PointerValue(existing.Replicas) == int32PointerValue(desired.Replicas) &&
+		int32PointerValue(existing.ProgressDeadlineSeconds) == int32PointerValue(desired.ProgressDeadlineSeconds) &&
+		existing.MinReadySeconds == desired.MinReadySeconds &&
+		reflect.DeepEqual(existing.Strategy, desired.Strategy) &&
+		reflect.DeepEqual(existing.Selector, desired.Selector) &&
+		runtimePodTemplateEqual(existing.Template, desired.Template)
+}
+
+func runtimePodTemplateEqual(existing, desired corev1.PodTemplateSpec) bool {
+	return containsLabels(existing.Labels, desired.Labels) &&
+		containsStringMap(existing.Annotations, desired.Annotations) &&
+		runtimePodSpecEqual(existing.Spec, desired.Spec)
+}
+
+func runtimePodSpecEqual(existing, desired corev1.PodSpec) bool {
+	return boolPointerValue(existing.AutomountServiceAccountToken) == boolPointerValue(desired.AutomountServiceAccountToken) &&
+		boolPointerValue(existing.EnableServiceLinks) == boolPointerValue(desired.EnableServiceLinks) &&
+		int64PointerValue(existing.TerminationGracePeriodSeconds) == int64PointerValue(desired.TerminationGracePeriodSeconds) &&
+		reflect.DeepEqual(existing.NodeSelector, desired.NodeSelector) &&
+		reflect.DeepEqual(existing.Affinity, desired.Affinity) &&
+		reflect.DeepEqual(existing.Tolerations, desired.Tolerations) &&
+		reflect.DeepEqual(existing.TopologySpreadConstraints, desired.TopologySpreadConstraints) &&
+		reflect.DeepEqual(existing.Volumes, desired.Volumes) &&
+		runtimeContainersEqual(existing.Containers, desired.Containers)
+}
+
+func runtimeContainersEqual(existing, desired []corev1.Container) bool {
+	if len(existing) != len(desired) {
+		return false
+	}
+	for i := range desired {
+		if !runtimeContainerEqual(existing[i], desired[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func runtimeContainerEqual(existing, desired corev1.Container) bool {
+	return existing.Name == desired.Name &&
+		existing.Image == desired.Image &&
+		existing.ImagePullPolicy == desired.ImagePullPolicy &&
+		reflect.DeepEqual(existing.Command, desired.Command) &&
+		reflect.DeepEqual(existing.Args, desired.Args) &&
+		reflect.DeepEqual(existing.Ports, desired.Ports) &&
+		reflect.DeepEqual(existing.Env, desired.Env) &&
+		reflect.DeepEqual(existing.Resources, desired.Resources) &&
+		reflect.DeepEqual(existing.SecurityContext, desired.SecurityContext) &&
+		runtimeProbeEqual(existing.StartupProbe, desired.StartupProbe) &&
+		runtimeProbeEqual(existing.ReadinessProbe, desired.ReadinessProbe) &&
+		runtimeProbeEqual(existing.LivenessProbe, desired.LivenessProbe) &&
+		reflect.DeepEqual(existing.VolumeMounts, desired.VolumeMounts)
+}
+
+func runtimeProbeEqual(existing, desired *corev1.Probe) bool {
+	existingCopy := copyProbe(existing)
+	desiredCopy := copyProbe(desired)
+	if existingCopy != nil && existingCopy.SuccessThreshold == 0 {
+		existingCopy.SuccessThreshold = 1
+	}
+	if desiredCopy != nil && desiredCopy.SuccessThreshold == 0 {
+		desiredCopy.SuccessThreshold = 1
+	}
+	return reflect.DeepEqual(existingCopy, desiredCopy)
+}
+
+func copyProbe(probe *corev1.Probe) *corev1.Probe {
+	if probe == nil {
+		return nil
+	}
+	copy := *probe
+	return &copy
+}
+
+func containsStringMap(existing, desired map[string]string) bool {
+	for key, desiredValue := range desired {
+		if existing[key] != desiredValue {
+			return false
+		}
+	}
+	return true
+}
+
+func int32PointerValue(value *int32) int32 {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
+func int64PointerValue(value *int64) int64 {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
+func boolPointerValue(value *bool) bool {
+	return value != nil && *value
 }
 
 func (r *ModelDeploymentController) projectReadyCache(

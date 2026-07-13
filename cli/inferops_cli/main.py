@@ -10,6 +10,7 @@ from . import (
     deploy,
     doctor,
     endpoints,
+    gateway,
     generate,
     gpu,
     init,
@@ -37,6 +38,7 @@ def build_parser() -> CLIArgumentParser:
     deploy.register(subcommands)
     doctor.register(subcommands)
     endpoints.register(subcommands)
+    gateway.register(subcommands)
     generate.register(subcommands)
     gpu.register(subcommands)
     init.register(subcommands)

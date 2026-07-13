@@ -105,6 +105,7 @@ class InstallRequest:
 
     cluster: ClusterTarget
     profile: str
+    compute_profile: str = "cpu"
     cache_path: str | None = None
     tailscale_hostname: str | None = None
     exposure: str | None = None

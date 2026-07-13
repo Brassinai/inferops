@@ -1,13 +1,84 @@
 # YAML Deploy
 
 These examples show direct Kubernetes workflows for deploying OpenAI-compatible
-model endpoints with InferOps. They assume the operator and gateway are already
-installed and that the packaged `ModelRuntime` objects are present.
+model endpoints with InferOps.
+
+Use this guide when you want to run InferOps with the packaged chart defaults
+and published images. If you are forking the project or changing component
+images, use [Build and run locally](LOCAL_BUILD.md) instead.
+
+## Prerequisites
+
+- `inferops` CLI
+- `kubectl`
+- Helm 3.15+
+- a kubeconfig context for the target cluster
+
+When working from a source checkout, install the CLI as described in
+[Build and run locally](LOCAL_BUILD.md).
+
+## Prepare a Homelab Context
+
+InferOps installs into the Kubernetes cluster selected by your kubeconfig. The
+`homelab` profile changes chart defaults; it does not create a cluster or
+switch your context. Check the target before installing:
+
+```bash
+kubectl config current-context
+kubectl config get-contexts
+kubectl cluster-info
+```
+
+For OrbStack, start its Kubernetes cluster and select the `orbstack` context:
+
+```bash
+orb start k8s
+kubectl config use-context orbstack
+kubectl get nodes
+```
+
+InferOps only places node-local model caches on nodes that advertise cache
+capacity. For the CPU example, reserve a small amount of the OrbStack node
+filesystem for InferOps:
+
+```bash
+kubectl --context orbstack annotate node orbstack \
+  inferops.dev/cache-capacity=2Gi \
+  --overwrite
+```
+
+This is declared capacity for InferOps scheduling, not a live disk-space
+measurement.
+
+The cache path must also exist on the Kubernetes node because InferOps uses a
+`hostPath` volume with an explicit directory check. Provision
+`/var/lib/inferops/models` on the node before installing; see
+[Homelab deployment](../../docs/homelab.md) for a Linux node command and
+[Build and run locally](LOCAL_BUILD.md) for an OrbStack helper Pod.
+
+## Install InferOps
+
+Install the operator, gateway, CRDs, and packaged `ModelRuntime` objects with
+the chart default images:
+
+```bash
+inferops install \
+  --context orbstack \
+  --profile homelab \
+  --cache-path /var/lib/inferops/models
+```
+
+If you already switched your global kube context, `--context orbstack` is
+optional:
 
 ```bash
 inferops install --profile homelab \
   --cache-path /var/lib/inferops/models
 ```
+
+The default compute profile is CPU-safe for the llama.cpp example. On an
+NVIDIA GPU homelab where model caches must land on GPU-capable nodes, install
+with `--compute-profile nvidia-gpu`.
 
 Activation is explicit. Applying a manifest declares the model, prepares cache
 state, and keeps the runtime inactive until you request compute.
@@ -18,10 +89,10 @@ Use `modeldeployment-cpu.yaml` for a portable CPU path with llama.cpp and a
 small GGUF model:
 
 ```bash
-kubectl apply -f examples/yaml-deploy/modeldeployment-cpu.yaml
-inferops status cpu-smollm
-inferops activate cpu-smollm --timeout 10m
-inferops status cpu-smollm --watch --timeout 10m
+kubectl --context orbstack apply -f examples/yaml-deploy/modeldeployment-cpu.yaml
+inferops status cpu-smollm --context orbstack
+inferops activate cpu-smollm --context orbstack --timeout 10m
+inferops status cpu-smollm --context orbstack --watch --timeout 10m
 ```
 
 CPU-only deployments:
@@ -36,7 +107,9 @@ CPU-only deployments:
 Call the model through the gateway after the deployment reaches `Active`:
 
 ```bash
-curl -X POST http://<gateway-host>/models/cpu-smollm/v1/chat/completions \
+inferops gateway forward --context orbstack
+
+curl -X POST http://127.0.0.1:8080/models/cpu-smollm/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"cpu-smollm","messages":[{"role":"user","content":"Say hello from CPU llama.cpp."}]}'
 ```
@@ -44,7 +117,7 @@ curl -X POST http://<gateway-host>/models/cpu-smollm/v1/chat/completions \
 Release compute while preserving the node-local cache:
 
 ```bash
-inferops deactivate cpu-smollm
+inferops deactivate cpu-smollm --context orbstack
 ```
 
 ## GPU vLLM
@@ -53,11 +126,13 @@ Use `modeldeployment-vllm-gpu.yaml` when the cluster has an NVIDIA device
 plugin and one free whole GPU:
 
 ```bash
-inferops doctor --check kubernetes-api --check device-plugin --check gpu-capacity
-inferops gpu list
-kubectl apply -f examples/yaml-deploy/modeldeployment-vllm-gpu.yaml
-inferops activate gpu-vllm-qwen --timeout 20m
-inferops status gpu-vllm-qwen --watch --timeout 20m
+inferops install --profile homelab --compute-profile nvidia-gpu \
+  --cache-path /var/lib/inferops/models
+inferops doctor --context orbstack --check kubernetes-api --check device-plugin --check gpu-capacity
+inferops gpu list --context orbstack
+kubectl --context orbstack apply -f examples/yaml-deploy/modeldeployment-vllm-gpu.yaml
+inferops activate gpu-vllm-qwen --context orbstack --timeout 20m
+inferops status gpu-vllm-qwen --context orbstack --watch --timeout 20m
 ```
 
 The vLLM example:
@@ -72,7 +147,7 @@ The vLLM example:
 Call the vLLM endpoint:
 
 ```bash
-curl -X POST http://<gateway-host>/models/gpu-vllm-qwen/v1/chat/completions \
+curl -X POST http://127.0.0.1:8080/models/gpu-vllm-qwen/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"gpu-vllm-qwen","messages":[{"role":"user","content":"Give me one Kubernetes GPU scheduling tip."}]}'
 ```
@@ -81,9 +156,9 @@ If the deployment remains queued, inspect capacity and either free a GPU or
 request an explicit replacement policy:
 
 ```bash
-inferops gpu list
-inferops status gpu-vllm-qwen
-inferops activate gpu-vllm-qwen --when-full ReplaceOldest --timeout 20m
+inferops gpu list --context orbstack
+inferops status gpu-vllm-qwen --context orbstack
+inferops activate gpu-vllm-qwen --context orbstack --when-full ReplaceOldest --timeout 20m
 ```
 
 ## Observability
@@ -91,13 +166,13 @@ inferops activate gpu-vllm-qwen --when-full ReplaceOldest --timeout 20m
 Use the CLI as the terminal observability surface while a deployment reconciles:
 
 ```bash
-inferops models
-inferops status gpu-vllm-qwen --watch --timeout 20m
-inferops endpoints
-inferops cache list
-inferops gpu list
-inferops logs gpu-vllm-qwen --tail 100
-inferops doctor
+inferops models --context orbstack
+inferops status cpu-smollm --context orbstack --watch --timeout 10m
+inferops endpoints --context orbstack
+inferops cache list --context orbstack
+inferops gpu list --context orbstack
+inferops logs cpu-smollm --context orbstack --tail 100
+inferops doctor --context orbstack
 ```
 
 The status watch shows the observed phase, conditions, placement, replica
@@ -105,23 +180,26 @@ state, cache state, and route without exposing referenced Secrets. For deeper
 Kubernetes inspection, use Events and managed pod state:
 
 ```bash
-kubectl get modeldeployments
-kubectl describe modeldeployment gpu-vllm-qwen
-kubectl get pods,svc,endpointslices \
-  -l inferops.dev/modeldeployment=gpu-vllm-qwen
+kubectl --context orbstack get modeldeployments,modelcaches
+kubectl --context orbstack describe modeldeployment cpu-smollm
+kubectl --context orbstack get pods,svc,endpointslices \
+  -l inferops.dev/modeldeployment=cpu-smollm
 ```
 
 Install the optional read-only dashboard when you want a browser view of
-deployments, GPU allocation, caches, endpoints, Events, log selectors, and
-Prometheus query hints:
+deployments, GPU allocation, caches, endpoints, Events, log selectors, generated
+YAML, and Prometheus query hints:
 
 ```bash
 helm upgrade --install inferops-dashboard deploy/helm/inferops-dashboard \
-  --namespace inferops-system \
-  --set-string dashboard.gatewayBaseURL=http://<gateway-host> \
-  --set-string dashboard.prometheusURL=http://<prometheus-host>
+  --kube-context orbstack \
+  --namespace default \
+  --create-namespace \
+  --wait \
+  --timeout 5m \
+  --set-string dashboard.gatewayBaseURL=http://127.0.0.1:8080
 
-kubectl -n inferops-system port-forward svc/inferops-dashboard 8088:8080
+kubectl --context orbstack port-forward svc/inferops-dashboard 8088:8080
 ```
 
 Open `http://127.0.0.1:8088`. The dashboard is read-only in this MVP; keep
