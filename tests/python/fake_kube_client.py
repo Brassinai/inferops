@@ -18,6 +18,7 @@ from inferops_cli.kube import (
     LogsRequest,
     NamedRequest,
     StatusRequest,
+    UpgradeRequest,
 )
 
 
@@ -450,6 +451,33 @@ class FakeKubernetesClient:
             "cluster": request.cluster.to_safe_dict(),
             "install": install,
             "message": "Placeholder install executed against the fake Kubernetes client.",
+        }
+
+    def upgrade(self, request: UpgradeRequest) -> dict[str, Any]:
+        resources = [
+            "crd/modeldeployments.inference.inferops.dev",
+            "deployment/inferops-operator",
+        ]
+        if request.include_dashboard:
+            resources.append("deployment/inferops-dashboard")
+        upgrade = {
+            "namespace": request.cluster.namespace,
+            "tag": request.tag,
+            "operatorImage": request.operator_image_repository,
+            "dashboardImage": (
+                request.dashboard_image_repository
+                if request.include_dashboard
+                else None
+            ),
+            "dashboardIncluded": request.include_dashboard,
+            "observabilityEnabled": request.enable_observability,
+            "resources": resources,
+        }
+        return {
+            "mode": "fake",
+            "cluster": request.cluster.to_safe_dict(),
+            "upgrade": upgrade,
+            "message": "Placeholder upgrade executed against the fake Kubernetes client.",
         }
 
     def delete(self, request: NamedRequest) -> dict[str, Any]:

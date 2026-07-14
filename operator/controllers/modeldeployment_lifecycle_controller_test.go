@@ -634,13 +634,13 @@ func TestLifecycleRuntimeDefaultsDoNotChurnRuntime(t *testing.T) {
 	var runtimeDeployment appsv1.Deployment
 	getObject(t, c, types.NamespacedName{Namespace: deployment.Namespace, Name: "qwen-runtime"}, &runtimeDeployment)
 	applyRuntimeDeploymentAPIDefaults(&runtimeDeployment)
+	if err := c.Update(context.Background(), &runtimeDeployment); err != nil {
+		t.Fatalf("update defaulted runtime Deployment: %v", err)
+	}
 	runtimeDeployment.Status.ObservedGeneration = runtimeDeployment.Generation
 	runtimeDeployment.Status.ReadyReplicas = 1
 	runtimeDeployment.Status.AvailableReplicas = 1
 	runtimeDeployment.Status.UpdatedReplicas = 1
-	if err := c.Update(context.Background(), &runtimeDeployment); err != nil {
-		t.Fatalf("update defaulted runtime Deployment: %v", err)
-	}
 	if err := c.Status().Update(context.Background(), &runtimeDeployment); err != nil {
 		t.Fatalf("update defaulted runtime Deployment status: %v", err)
 	}

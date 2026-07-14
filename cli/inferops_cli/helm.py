@@ -12,10 +12,11 @@ import subprocess
 from typing import Any
 
 from .errors import CLIError
-from .kube import InstallRequest
+from .kube import InstallRequest, UpgradeRequest
 
 DEFAULT_CACHE_ROOT = "/var/lib/inferops/models"
 DEFAULT_RELEASES = ("inferops-operator", "inferops-gateway")
+CONTROL_PLANE_RELEASES = ("inferops-operator", "inferops-dashboard")
 DEFAULT_TIMEOUT = "5m"
 CRD_FIELD_MANAGER = "inferops-cli"
 COMPUTE_PROFILES = {"cpu", "nvidia-gpu"}
@@ -29,6 +30,7 @@ QUALIFIED_NAME = re.compile(
     r"(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*/)?"
     r"[A-Za-z0-9](?:[-_.A-Za-z0-9]*[A-Za-z0-9])?$"
 )
+IMAGE_TAG = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
 EXPOSURE_METHODS = {"cluster-ip", "load-balancer", "ingress", "gateway-api"}
 
 CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
@@ -138,6 +140,97 @@ class HelmInstaller:
             },
         }
 
+    def upgrade(self, request: UpgradeRequest) -> dict[str, Any]:
+        """Upgrade installed operator and dashboard releases to a new image tag."""
+        _validate_image_tag(request.tag)
+        _validate_image_repository("operator image repository", request.operator_image_repository)
+        _validate_image_repository("dashboard image repository", request.dashboard_image_repository)
+
+        releases_to_upgrade = ["inferops-operator"]
+        if request.include_dashboard:
+            releases_to_upgrade.append("inferops-dashboard")
+
+        charts_dir = _resolve_charts_dir(request.charts_dir, releases=tuple(releases_to_upgrade))
+        crds_dir = charts_dir / "inferops-operator" / "crds"
+        if not crds_dir.is_dir() or not any(crds_dir.glob("*.yaml")):
+            raise CLIError(f"operator CRDs not found: {crds_dir}")
+
+        crd_command = _build_crd_apply_command(crds_dir, request)
+        try:
+            crd_result = self._runner(crd_command)
+        except FileNotFoundError as exc:
+            raise CLIError(
+                "kubectl executable not found; install kubectl before upgrading InferOps"
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or "unknown kubectl error").strip()
+            raise CLIError(f"InferOps CRD apply failed: {detail}") from exc
+
+        releases = []
+        for release_name in releases_to_upgrade:
+            chart_dir = charts_dir / release_name
+            if not (chart_dir / "Chart.yaml").is_file():
+                raise CLIError(f"Helm chart not found: {chart_dir}")
+            command = _build_control_plane_upgrade_command(
+                release_name=release_name,
+                chart_dir=chart_dir,
+                request=request,
+            )
+            try:
+                completed = self._runner(command)
+            except FileNotFoundError as exc:
+                raise CLIError(
+                    "helm executable not found; install Helm 3.15 or newer"
+                ) from exc
+            except subprocess.CalledProcessError as exc:
+                detail = (exc.stderr or exc.stdout or "unknown Helm error").strip()
+                raise CLIError(f"Helm upgrade failed: {detail}") from exc
+            releases.append(
+                {
+                    "name": release_name,
+                    "chart": release_name,
+                    "status": "upgraded",
+                    "imageTag": request.tag,
+                    "output": completed.stdout.strip(),
+                }
+            )
+
+        resources = [
+            "crd/modelcaches.inference.inferops.dev",
+            "crd/modeldeployments.inference.inferops.dev",
+            "crd/modelruntimes.inference.inferops.dev",
+            "deployment/inferops-operator",
+        ]
+        if request.include_dashboard:
+            resources.append("deployment/inferops-dashboard")
+        if request.enable_observability:
+            resources.extend(
+                (
+                    "servicemonitor/inferops-operator",
+                    "grafana-dashboard/inferops-platform",
+                    "grafana-dashboard/inferops-vllm",
+                    "grafana-dashboard/inferops-llama-cpp",
+                )
+            )
+
+        return {
+            "cluster": request.cluster.to_safe_dict(),
+            "upgrade": {
+                "namespace": request.cluster.namespace,
+                "tag": request.tag,
+                "operatorImage": request.operator_image_repository,
+                "dashboardImage": request.dashboard_image_repository if request.include_dashboard else None,
+                "dashboardIncluded": request.include_dashboard,
+                "observabilityEnabled": request.enable_observability,
+                "resources": resources,
+                "crds": {
+                    "status": "applied",
+                    "output": crd_result.stdout.strip(),
+                },
+                "releases": releases,
+            },
+        }
+
 
 def _build_crd_apply_command(
     crds_dir: Path,
@@ -202,6 +295,60 @@ def _build_upgrade_command(
     else:
         command.extend(_gateway_exposure_values(request))
         command.extend(_gateway_auth_values(request))
+    return command
+
+
+def _build_control_plane_upgrade_command(
+    release_name: str,
+    chart_dir: Path,
+    request: UpgradeRequest,
+) -> list[str]:
+    command = [
+        "helm",
+        "upgrade",
+        release_name,
+        str(chart_dir),
+        "--namespace",
+        request.cluster.namespace,
+        "--reuse-values",
+        "--wait",
+        "--timeout",
+        DEFAULT_TIMEOUT,
+    ]
+    if request.cluster.kubeconfig:
+        command.extend(("--kubeconfig", request.cluster.kubeconfig))
+    if request.cluster.context:
+        command.extend(("--kube-context", request.cluster.context))
+
+    if release_name == "inferops-operator":
+        command.extend(
+            (
+                "--set-string",
+                "image.repository=" + _escape_helm_string(request.operator_image_repository),
+                "--set-string",
+                "image.tag=" + _escape_helm_string(request.tag),
+            )
+        )
+        if request.enable_observability:
+            command.extend(
+                (
+                    "--set",
+                    "serviceMonitor.enabled=true",
+                    "--set",
+                    "dashboards.enabled=true",
+                )
+            )
+    elif release_name == "inferops-dashboard":
+        command.extend(
+            (
+                "--set-string",
+                "image.repository=" + _escape_helm_string(request.dashboard_image_repository),
+                "--set-string",
+                "image.tag=" + _escape_helm_string(request.tag),
+            )
+        )
+    else:
+        raise CLIError(f"unsupported control-plane release: {release_name}")
     return command
 
 
@@ -308,13 +455,16 @@ def _gateway_auth_values(request: InstallRequest) -> list[str]:
     ]
 
 
-def _resolve_charts_dir(explicit_path: str | None) -> Path:
+def _resolve_charts_dir(
+    explicit_path: str | None,
+    releases: tuple[str, ...] = DEFAULT_RELEASES,
+) -> Path:
     if explicit_path:
-        return _require_charts_dir(Path(explicit_path), "--charts-dir")
+        return _require_charts_dir(Path(explicit_path), "--charts-dir", releases)
 
     environment_path = os.environ.get("INFEROPS_CHARTS_DIR")
     if environment_path:
-        return _require_charts_dir(Path(environment_path), "INFEROPS_CHARTS_DIR")
+        return _require_charts_dir(Path(environment_path), "INFEROPS_CHARTS_DIR", releases)
 
     source_root = Path(__file__).resolve().parents[2]
     candidates = [source_root / "deploy" / "helm"]
@@ -329,7 +479,7 @@ def _resolve_charts_dir(explicit_path: str | None) -> Path:
         resolved = candidate.expanduser().resolve()
         if all(
             (resolved / release / "Chart.yaml").is_file()
-            for release in DEFAULT_RELEASES
+            for release in releases
         ):
             return resolved
 
@@ -340,11 +490,15 @@ def _resolve_charts_dir(explicit_path: str | None) -> Path:
     )
 
 
-def _require_charts_dir(path: Path, source: str) -> Path:
+def _require_charts_dir(
+    path: Path,
+    source: str,
+    releases: tuple[str, ...] = DEFAULT_RELEASES,
+) -> Path:
     resolved = path.expanduser().resolve()
     missing = [
         release
-        for release in DEFAULT_RELEASES
+        for release in releases
         if not (resolved / release / "Chart.yaml").is_file()
     ]
     if missing:
@@ -353,6 +507,24 @@ def _require_charts_dir(path: Path, source: str) -> Path:
             f"({', '.join(missing)}): {resolved}"
         )
     return resolved
+
+
+def _validate_image_tag(tag: str) -> None:
+    if not IMAGE_TAG.fullmatch(tag):
+        raise CLIError(
+            "image tag must be a valid Docker tag: letters, digits, underscores, dots, and hyphens"
+        )
+
+
+def _validate_image_repository(label: str, repository: str) -> None:
+    if (
+        not repository
+        or len(repository) > 255
+        or any(ord(character) < 33 for character in repository)
+        or ":" in repository.rsplit("/", 1)[-1]
+        or "@" in repository
+    ):
+        raise CLIError(f"{label} must be a repository without a tag")
 
 
 def _validate_cache_root(cache_root: str) -> None:

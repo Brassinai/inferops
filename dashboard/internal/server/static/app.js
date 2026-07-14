@@ -31,14 +31,8 @@ function normalizeSnapshot(snapshot) {
     summary: safe.summary || {},
     deployments: asArray(safe.deployments),
     caches: asArray(safe.caches),
-    runtimes: asArray(safe.runtimes),
     gpus: asArray(safe.gpus),
-    endpoints: asArray(safe.endpoints),
     events: asArray(safe.events),
-    metrics: {
-      prometheusUrl: (safe.metrics && safe.metrics.prometheusUrl) || "",
-      queries: asArray(safe.metrics && safe.metrics.queries),
-    },
   };
 }
 

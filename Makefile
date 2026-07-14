@@ -154,7 +154,7 @@ helm-lint:
 			exit 1; \
 		}; \
 	done
-	@for chart in inferops-operator inferops-gateway; do \
+	@for chart in inferops-operator inferops-gateway inferops-dashboard; do \
 		diff -qr "deploy/helm/$$chart" "cli/inferops_cli/charts/$$chart" >/dev/null || { \
 			echo "error: packaged Helm chart is out of sync: $$chart"; \
 			exit 1; \

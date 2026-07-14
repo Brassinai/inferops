@@ -20,6 +20,7 @@ from . import (
     models,
     serve,
     status,
+    upgrade,
 )
 from .errors import run_with_cli_errors
 from .parser import CLIArgumentParser
@@ -50,6 +51,7 @@ def build_parser() -> CLIArgumentParser:
     models.register(subcommands)
     serve.register(subcommands)
     status.register(subcommands)
+    upgrade.register(subcommands)
     return parser
 
 

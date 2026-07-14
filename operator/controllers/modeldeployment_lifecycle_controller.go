@@ -22,6 +22,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -524,7 +525,7 @@ func (r *ModelDeploymentController) reconcileRolloutSpareCapacity(
 	if err := assertControlledBy(&existing, deployment); err != nil {
 		return true, ctrl.Result{}, permanentLifecycleError(err)
 	}
-	if reflect.DeepEqual(existing.Spec, desired.Spec) || deploymentReplicas(&existing) == 0 {
+	if runtimeDeploymentSpecEqual(existing.Spec, desired.Spec) || deploymentReplicas(&existing) == 0 {
 		if rolloutRequiresSpareCapacity(deployment) {
 			reason := v1alpha1.ReasonRolloutCapacityReserved
 			message := "Runtime rollout is still progressing with spare GPU capacity reserved"
@@ -906,8 +907,9 @@ func (r *ModelDeploymentController) ensureRuntimeDeployment(
 	if err := assertControlledBy(&existing, deployment); err != nil {
 		return nil, false, permanentLifecycleError(err)
 	}
-	changed := !runtimeDeploymentSpecEqual(existing.Spec, desired.Spec) ||
-		!reflect.DeepEqual(existing.OwnerReferences, desired.OwnerReferences) ||
+	specChanged := !runtimeDeploymentSpecEqual(existing.Spec, desired.Spec)
+	changed := specChanged ||
+		!ownerReferencesEqual(existing.OwnerReferences, desired.OwnerReferences) ||
 		!containsLabels(existing.Labels, desired.Labels)
 	if !changed {
 		return &existing, false, nil
@@ -930,6 +932,9 @@ func (r *ModelDeploymentController) ensureRuntimeDeployment(
 	var refreshed appsv1.Deployment
 	if err := r.client.Get(ctx, key, &refreshed); err != nil {
 		return nil, false, fmt.Errorf("get patched runtime Deployment: %w", err)
+	}
+	if specChanged && refreshed.Generation <= before.Generation {
+		refreshed.Generation = before.Generation + 1
 	}
 	return &refreshed, false, nil
 }
@@ -1600,12 +1605,26 @@ func runtimeDeploymentReady(runtimeDeployment *appsv1.Deployment) bool {
 }
 
 func runtimeDeploymentSpecEqual(existing, desired appsv1.DeploymentSpec) bool {
+	existingCopy := *existing.DeepCopy()
+	desiredCopy := *desired.DeepCopy()
+	normalizeRuntimeDeploymentSpecDefaults(&existingCopy)
+	normalizeRuntimeDeploymentSpecDefaults(&desiredCopy)
+	existing = existingCopy
+	desired = desiredCopy
 	return int32PointerValue(existing.Replicas) == int32PointerValue(desired.Replicas) &&
+		int32PointerValue(existing.RevisionHistoryLimit) == int32PointerValue(desired.RevisionHistoryLimit) &&
 		int32PointerValue(existing.ProgressDeadlineSeconds) == int32PointerValue(desired.ProgressDeadlineSeconds) &&
 		existing.MinReadySeconds == desired.MinReadySeconds &&
 		reflect.DeepEqual(existing.Strategy, desired.Strategy) &&
 		reflect.DeepEqual(existing.Selector, desired.Selector) &&
 		runtimePodTemplateEqual(existing.Template, desired.Template)
+}
+
+func ownerReferencesEqual(existing, desired []metav1.OwnerReference) bool {
+	if len(existing) == 0 && len(desired) == 0 {
+		return true
+	}
+	return reflect.DeepEqual(existing, desired)
 }
 
 func runtimePodTemplateEqual(existing, desired corev1.PodTemplateSpec) bool {
@@ -1618,6 +1637,9 @@ func runtimePodSpecEqual(existing, desired corev1.PodSpec) bool {
 	return boolPointerValue(existing.AutomountServiceAccountToken) == boolPointerValue(desired.AutomountServiceAccountToken) &&
 		boolPointerValue(existing.EnableServiceLinks) == boolPointerValue(desired.EnableServiceLinks) &&
 		int64PointerValue(existing.TerminationGracePeriodSeconds) == int64PointerValue(desired.TerminationGracePeriodSeconds) &&
+		existing.RestartPolicy == desired.RestartPolicy &&
+		existing.DNSPolicy == desired.DNSPolicy &&
+		existing.SchedulerName == desired.SchedulerName &&
 		reflect.DeepEqual(existing.NodeSelector, desired.NodeSelector) &&
 		reflect.DeepEqual(existing.Affinity, desired.Affinity) &&
 		reflect.DeepEqual(existing.Tolerations, desired.Tolerations) &&
@@ -1646,23 +1668,56 @@ func runtimeContainerEqual(existing, desired corev1.Container) bool {
 		reflect.DeepEqual(existing.Args, desired.Args) &&
 		reflect.DeepEqual(existing.Ports, desired.Ports) &&
 		reflect.DeepEqual(existing.Env, desired.Env) &&
-		reflect.DeepEqual(existing.Resources, desired.Resources) &&
+		apiequality.Semantic.DeepEqual(existing.Resources, desired.Resources) &&
 		reflect.DeepEqual(existing.SecurityContext, desired.SecurityContext) &&
+		existing.TerminationMessagePath == desired.TerminationMessagePath &&
+		existing.TerminationMessagePolicy == desired.TerminationMessagePolicy &&
 		runtimeProbeEqual(existing.StartupProbe, desired.StartupProbe) &&
 		runtimeProbeEqual(existing.ReadinessProbe, desired.ReadinessProbe) &&
 		runtimeProbeEqual(existing.LivenessProbe, desired.LivenessProbe) &&
 		reflect.DeepEqual(existing.VolumeMounts, desired.VolumeMounts)
 }
 
+func normalizeRuntimeDeploymentSpecDefaults(spec *appsv1.DeploymentSpec) {
+	if spec.RevisionHistoryLimit == nil {
+		value := int32(10)
+		spec.RevisionHistoryLimit = &value
+	}
+	podSpec := &spec.Template.Spec
+	if podSpec.RestartPolicy == "" {
+		podSpec.RestartPolicy = corev1.RestartPolicyAlways
+	}
+	if podSpec.DNSPolicy == "" {
+		podSpec.DNSPolicy = corev1.DNSClusterFirst
+	}
+	if podSpec.SchedulerName == "" {
+		podSpec.SchedulerName = corev1.DefaultSchedulerName
+	}
+	for i := range podSpec.Containers {
+		container := &podSpec.Containers[i]
+		if container.TerminationMessagePath == "" {
+			container.TerminationMessagePath = corev1.TerminationMessagePathDefault
+		}
+		if container.TerminationMessagePolicy == "" {
+			container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
+		}
+		normalizeProbeDefaults(container.StartupProbe)
+		normalizeProbeDefaults(container.ReadinessProbe)
+		normalizeProbeDefaults(container.LivenessProbe)
+	}
+}
+
+func normalizeProbeDefaults(probe *corev1.Probe) {
+	if probe != nil && probe.SuccessThreshold == 0 {
+		probe.SuccessThreshold = 1
+	}
+}
+
 func runtimeProbeEqual(existing, desired *corev1.Probe) bool {
 	existingCopy := copyProbe(existing)
 	desiredCopy := copyProbe(desired)
-	if existingCopy != nil && existingCopy.SuccessThreshold == 0 {
-		existingCopy.SuccessThreshold = 1
-	}
-	if desiredCopy != nil && desiredCopy.SuccessThreshold == 0 {
-		desiredCopy.SuccessThreshold = 1
-	}
+	normalizeProbeDefaults(existingCopy)
+	normalizeProbeDefaults(desiredCopy)
 	return reflect.DeepEqual(existingCopy, desiredCopy)
 }
 

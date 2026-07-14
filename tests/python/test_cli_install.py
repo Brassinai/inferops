@@ -10,7 +10,7 @@ import unittest
 
 from inferops_cli.errors import CLIError
 from inferops_cli.helm import HelmInstaller
-from inferops_cli.kube import ClusterTarget, InstallRequest
+from inferops_cli.kube import ClusterTarget, InstallRequest, UpgradeRequest
 
 
 class HelmInstallerTest(unittest.TestCase):
@@ -405,9 +405,90 @@ class HelmInstallerTest(unittest.TestCase):
                     )
                 )
 
+    def test_upgrade_builds_operator_and_dashboard_commands(self) -> None:
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout="upgraded\n", stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            charts_dir = self._make_charts(Path(directory), include_dashboard=True)
+            response = HelmInstaller(runner=run).upgrade(
+                UpgradeRequest(
+                    cluster=ClusterTarget(
+                        namespace="inferops-system",
+                        context="prod",
+                        kubeconfig="/tmp/kubeconfig",
+                    ),
+                    tag="v0.2.0",
+                    enable_observability=True,
+                    charts_dir=str(charts_dir),
+                )
+            )
+
+        self.assertEqual(len(commands), 3)
+        crd_command, operator_command, dashboard_command = commands
+        self.assertEqual(crd_command[0], "kubectl")
+        self.assertIn("--server-side", crd_command)
+        self.assertIn("--context", crd_command)
+        self.assertEqual(operator_command[:3], ["helm", "upgrade", "inferops-operator"])
+        self.assertIn("--reuse-values", operator_command)
+        self.assertIn("image.repository=ghcr.io/brassinai/inferops-operator", operator_command)
+        self.assertIn("image.tag=v0.2.0", operator_command)
+        self.assertIn("serviceMonitor.enabled=true", operator_command)
+        self.assertIn("dashboards.enabled=true", operator_command)
+        self.assertEqual(dashboard_command[:3], ["helm", "upgrade", "inferops-dashboard"])
+        self.assertIn("--reuse-values", dashboard_command)
+        self.assertIn("image.repository=ghcr.io/brassinai/inferops-dashboard", dashboard_command)
+        self.assertIn("image.tag=v0.2.0", dashboard_command)
+        self.assertEqual(response["upgrade"]["tag"], "v0.2.0")
+        self.assertTrue(response["upgrade"]["dashboardIncluded"])
+        self.assertTrue(response["upgrade"]["observabilityEnabled"])
+
+    def test_upgrade_can_skip_dashboard(self) -> None:
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            charts_dir = self._make_charts(Path(directory))
+            response = HelmInstaller(runner=run).upgrade(
+                UpgradeRequest(
+                    cluster=ClusterTarget(namespace="inferops-system"),
+                    tag="v0.2.0",
+                    include_dashboard=False,
+                    charts_dir=str(charts_dir),
+                )
+            )
+
+        self.assertEqual(len(commands), 2)
+        self.assertEqual(commands[1][:3], ["helm", "upgrade", "inferops-operator"])
+        self.assertFalse(response["upgrade"]["dashboardIncluded"])
+
+    def test_upgrade_rejects_tagged_repository(self) -> None:
+        with self.assertRaisesRegex(CLIError, "without a tag"):
+            HelmInstaller(runner=lambda command: self.fail("Helm should not run")).upgrade(
+                UpgradeRequest(
+                    cluster=ClusterTarget(namespace="inferops-system"),
+                    tag="v0.2.0",
+                    operator_image_repository="ghcr.io/brassinai/inferops-operator:v0.1.0",
+                    charts_dir="/not-used",
+                )
+            )
+
     @staticmethod
-    def _make_charts(root: Path, include_homelab_values: bool = False) -> Path:
-        for chart in ("inferops-operator", "inferops-gateway"):
+    def _make_charts(
+        root: Path,
+        include_homelab_values: bool = False,
+        include_dashboard: bool = False,
+    ) -> Path:
+        charts = ["inferops-operator", "inferops-gateway"]
+        if include_dashboard:
+            charts.append("inferops-dashboard")
+        for chart in charts:
             chart_dir = root / chart
             chart_dir.mkdir()
             (chart_dir / "Chart.yaml").write_text(

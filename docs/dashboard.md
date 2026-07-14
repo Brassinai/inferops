@@ -1,8 +1,8 @@
 # Self-Hosted Dashboard
 
 InferOps includes a self-hosted dashboard for operators who want an in-cluster
-view of active model deployments, GPU allocation, caches, endpoints, recent
-Events, log selectors, activation state, and scaling state.
+view of model deployments, GPU allocation, caches, endpoints, recent Events,
+log selectors, activation state, and scaling state.
 
 The dashboard is deliberately not an InferOps-hosted control plane. It runs in
 the user's cluster, talks to the Kubernetes API with its own ServiceAccount, and

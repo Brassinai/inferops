@@ -39,6 +39,7 @@ from .kube import (
     LogsRequest,
     NamedRequest,
     StatusRequest,
+    UpgradeRequest,
 )
 
 CLI_FIELD_MANAGER = "inferops-cli"
@@ -697,6 +698,12 @@ class LiveKubernetesClient(KubernetesClient):
         from .helm import HelmInstaller
 
         return HelmInstaller().install(request)
+
+    def upgrade(self, request: UpgradeRequest) -> dict[str, Any]:
+        """Upgrade installed InferOps control-plane images."""
+        from .helm import HelmInstaller
+
+        return HelmInstaller().upgrade(request)
 
     def delete(self, request: NamedRequest) -> dict[str, Any]:
         """Delete one ModelDeployment."""

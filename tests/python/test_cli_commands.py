@@ -30,6 +30,7 @@ from inferops_cli import (
     models,
     serve,
     status,
+    upgrade,
 )
 from inferops_cli.errors import CLIError
 from inferops_cli.k8s_client import (
@@ -69,6 +70,11 @@ def make_args(**overrides) -> argparse.Namespace:
         "gateway_auth_secret": None,
         "allow_unauthenticated_exposure": False,
         "charts_dir": None,
+        "tag": "dev",
+        "operator_image": "ghcr.io/brassinai/inferops-operator",
+        "dashboard_image": "ghcr.io/brassinai/inferops-dashboard",
+        "skip_dashboard": False,
+        "enable_observability": False,
         "checks": None,
         "no_wait": False,
         "timeout": 300,
@@ -104,6 +110,7 @@ class CLICommandParserTest(unittest.TestCase):
             "models",
             "serve",
             "status",
+            "upgrade",
         ):
             self.assertIn(command, help_text)
 
@@ -144,6 +151,19 @@ class CLICommandParserTest(unittest.TestCase):
             "--charts-dir",
         ):
             self.assertIn(option, install_help)
+
+    def test_upgrade_help_documents_image_options(self) -> None:
+        upgrade_help = self._parse_help(["upgrade", "--help"])
+
+        for option in (
+            "--tag",
+            "--operator-image",
+            "--dashboard-image",
+            "--skip-dashboard",
+            "--enable-observability",
+            "--charts-dir",
+        ):
+            self.assertIn(option, upgrade_help)
 
     def test_main_without_command_returns_usage_exit_code(self) -> None:
         stdout = io.StringIO()
@@ -787,6 +807,11 @@ class CLICommandHandlerTest(unittest.TestCase):
                 ),
                 fake_client,
             )
+            upgrade_stdout, _, _ = self._run(
+                upgrade.run,
+                make_args(tag="v0.2.0", enable_observability=True),
+                fake_client,
+            )
             delete_stdout, _, _ = self._run(
                 delete.run,
                 make_args(name="qwen-chat"),
@@ -819,6 +844,10 @@ class CLICommandHandlerTest(unittest.TestCase):
         self.assertEqual(json.loads(install_stdout)["install"]["profile"], "homelab")
         self.assertEqual(
             json.loads(install_stdout)["install"]["computeProfile"], "nvidia-gpu"
+        )
+        self.assertEqual(json.loads(upgrade_stdout)["upgrade"]["tag"], "v0.2.0")
+        self.assertTrue(
+            json.loads(upgrade_stdout)["upgrade"]["observabilityEnabled"]
         )
         self.assertTrue(json.loads(delete_stdout)["deleted"])
         self.assertTrue(json.loads(delete_stdout)["cachePreserved"])

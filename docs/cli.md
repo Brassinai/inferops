@@ -99,6 +99,38 @@ The self-hosted dashboard is packaged as a separate read-only chart,
 `deploy/helm/inferops-dashboard`, so operators can choose their own access
 boundary and authentication layer. See [Self-hosted dashboard](dashboard.md).
 
+### upgrade
+
+Upgrade installed control-plane images after publishing a new operator or
+dashboard tag:
+
+```bash
+inferops upgrade \
+  --context production \
+  --namespace inferops-system \
+  --tag v0.2.0 \
+  --enable-observability
+```
+
+The command applies packaged CRDs, then runs Helm upgrades with
+`--reuse-values` for:
+
+- `inferops-operator`
+- `inferops-dashboard`
+
+It defaults to `ghcr.io/brassinai/inferops-operator:<tag>` and
+`ghcr.io/brassinai/inferops-dashboard:<tag>`. Override repositories only when
+using a mirror or private registry:
+
+```bash
+inferops upgrade \
+  --tag v0.2.0 \
+  --operator-image registry.example.com/inferops-operator \
+  --dashboard-image registry.example.com/inferops-dashboard
+```
+
+Use `--skip-dashboard` when the dashboard chart is not installed.
+
 The install profile does not choose the engine for every model. Each
 deployment selects a registered runtime and independently declares whether it
 needs GPUs:

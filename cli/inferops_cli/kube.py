@@ -137,6 +137,19 @@ class InstallRequest:
 
 
 @dataclass(frozen=True)
+class UpgradeRequest:
+    """Inputs for a control-plane image upgrade request."""
+
+    cluster: ClusterTarget
+    tag: str
+    operator_image_repository: str = "ghcr.io/brassinai/inferops-operator"
+    dashboard_image_repository: str = "ghcr.io/brassinai/inferops-dashboard"
+    include_dashboard: bool = True
+    enable_observability: bool = False
+    charts_dir: str | None = None
+
+
+@dataclass(frozen=True)
 class CacheDeleteRequest:
     """Inputs for a cache delete request."""
 
@@ -191,6 +204,9 @@ class KubernetesClient(Protocol):
 
     def install(self, request: InstallRequest) -> dict[str, Any]:
         """Install the platform."""
+
+    def upgrade(self, request: UpgradeRequest) -> dict[str, Any]:
+        """Upgrade installed control-plane images."""
 
     def delete(self, request: NamedRequest) -> dict[str, Any]:
         """Delete one deployment."""

@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "inferops-dashboard.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inferops-dashboard.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if not (has .Values.service.type (list "ClusterIP" "NodePort" "LoadBalancer")) }}
+  {{- fail "service.type must be ClusterIP, NodePort, or LoadBalancer" }}
+  {{- end }}
+  {{- if or (lt (int .Values.service.port) 1) (gt (int .Values.service.port) 65535) }}
+  {{- fail "service.port must be between 1 and 65535" }}
+  {{- end }}
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "inferops-dashboard.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
