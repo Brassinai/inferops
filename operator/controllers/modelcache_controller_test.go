@@ -6,6 +6,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/brassinai/inferops/operator/api/v1alpha1"
+	controllermetrics "github.com/brassinai/inferops/operator/internal/metrics"
 	"github.com/brassinai/inferops/operator/internal/resources"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -35,12 +36,22 @@ func testScheme() *runtime.Scheme {
 
 func testReconciler(t *testing.T, c client.Client) *ModelCacheReconciler {
 	t.Helper()
+	return testReconcilerWithMetrics(t, c, nil)
+}
+
+func testReconcilerWithMetrics(
+	t *testing.T,
+	c client.Client,
+	metricsRecorder controllermetrics.Recorder,
+) *ModelCacheReconciler {
+	t.Helper()
 	r, err := NewModelCacheReconciler(
 		c,
 		ModelCacheReconcilerConfig{
 			CacheRoot:               testCacheRoot,
 			DownloaderImage:         testDownloaderImage,
 			CacheCapacityAnnotation: "inferops.dev/cache-capacity",
+			Metrics:                 metricsRecorder,
 		},
 		&record.FakeRecorder{},
 	)
@@ -149,6 +160,57 @@ func TestModelCacheReconcilerCreatesJob(t *testing.T) {
 	}
 	if job.Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"] != "gpu-node-1" {
 		t.Errorf("job node = %q, want gpu-node-1", job.Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"])
+	}
+}
+
+func TestModelCacheReconcilerRecordsCacheInventoryMetrics(t *testing.T) {
+	t.Parallel()
+
+	cache := testCache("qwen-chat")
+	node := readyNode("gpu-node-1", "500Gi")
+	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(cache, node).WithStatusSubresource(cache).Build()
+	metrics := &recordingCacheMetrics{}
+
+	r := testReconcilerWithMetrics(t, c, metrics)
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: cache.Name, Namespace: cache.Namespace}}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	if metrics.phaseCounts[string(v1alpha1.ModelCachePhasePending)] != 1 {
+		t.Fatalf("pending cache count = %v, want 1", metrics.phaseCounts[string(v1alpha1.ModelCachePhasePending)])
+	}
+	if metrics.reservedBytes[string(v1alpha1.ModelCachePhasePending)] != 100*1024*1024*1024 {
+		t.Fatalf("pending reserved bytes = %v, want 100Gi", metrics.reservedBytes[string(v1alpha1.ModelCachePhasePending)])
+	}
+	if metrics.phaseCounts[string(v1alpha1.ModelCachePhaseReady)] != 0 {
+		t.Fatalf("ready cache count = %v, want 0", metrics.phaseCounts[string(v1alpha1.ModelCachePhaseReady)])
+	}
+}
+
+func TestModelCacheReconcilerExcludesDeletingCachesFromInventoryMetrics(t *testing.T) {
+	t.Parallel()
+
+	cache := testCache("qwen-chat")
+	cache.Finalizers = []string{"test.inferops.dev/hold"}
+	deletingAt := metav1.Now()
+	cache.DeletionTimestamp = &deletingAt
+	cache.Status.Phase = v1alpha1.ModelCachePhaseReady
+	cache.Status.ReservedSize = "100Gi"
+	c := fake.NewClientBuilder().WithScheme(testScheme()).WithObjects(cache).WithStatusSubresource(cache).Build()
+	metrics := &recordingCacheMetrics{}
+
+	r := testReconcilerWithMetrics(t, c, metrics)
+	req := reconcile.Request{NamespacedName: types.NamespacedName{Name: cache.Name, Namespace: cache.Namespace}}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	if metrics.phaseCounts[string(v1alpha1.ModelCachePhaseReady)] != 0 {
+		t.Fatalf("ready cache count = %v, want 0", metrics.phaseCounts[string(v1alpha1.ModelCachePhaseReady)])
+	}
+	if metrics.reservedBytes[string(v1alpha1.ModelCachePhaseReady)] != 0 {
+		t.Fatalf("ready reserved bytes = %v, want 0", metrics.reservedBytes[string(v1alpha1.ModelCachePhaseReady)])
 	}
 }
 
@@ -771,6 +833,32 @@ func TestNodeChangeEnqueuesWaitingAndAssignedCaches(t *testing.T) {
 	if !got["waiting"] || !got["assigned"] || got["unrelated"] {
 		t.Fatalf("requests = %#v, want waiting and assigned only", requests)
 	}
+}
+
+type recordingCacheMetrics struct {
+	phaseCounts   map[string]float64
+	reservedBytes map[string]float64
+}
+
+func (*recordingCacheMetrics) SetGPUSlots(string, float64, float64, float64) {}
+func (*recordingCacheMetrics) SetActivationQueueDepth(float64)               {}
+func (m *recordingCacheMetrics) SetModelCacheInventory(
+	phaseCounts map[string]float64,
+	reservedBytes map[string]float64,
+) {
+	m.phaseCounts = copyFloatMap(phaseCounts)
+	m.reservedBytes = copyFloatMap(reservedBytes)
+}
+func (*recordingCacheMetrics) ObserveActivationDuration(time.Duration)    {}
+func (*recordingCacheMetrics) ObserveCacheDownloadDuration(time.Duration) {}
+func (*recordingCacheMetrics) IncFailure(string, string)                  {}
+
+func copyFloatMap(values map[string]float64) map[string]float64 {
+	out := make(map[string]float64, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 
 func conditionByType(conditions []v1alpha1.Condition, conditionType string) (v1alpha1.Condition, bool) {

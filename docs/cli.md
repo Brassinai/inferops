@@ -143,6 +143,63 @@ inferops deploy app.py --activate --when-full ReplaceOldest
 
 Idempotent: re-deploying the same app with no changes is a no-op.
 
+### serve
+
+Serve Python methods declared with `@inferops.web_endpoint` from an app file:
+
+```bash
+inferops serve app.py --gateway-url http://127.0.0.1:8080 --port 9000
+```
+
+The command imports the app, exposes its decorated endpoint methods over HTTP,
+and binds `self.generate()` / `self.generate_stream()` to a live InferOps
+gateway. Keep `inferops gateway forward` running, or pass a reachable gateway
+URL with `--gateway-url`.
+
+Example custom endpoint call:
+
+```bash
+curl -X POST http://127.0.0.1:9000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Explain Kubernetes Services simply."}'
+```
+
+### deploy-endpoints
+
+Deploy custom SDK web endpoints as a normal Kubernetes Deployment and Service.
+Use this after the model runtime has already been deployed with `inferops
+deploy` and activated.
+
+```bash
+inferops deploy-endpoints app.py \
+  --context orbstack \
+  --image ghcr.io/brassinai/my-endpoint-app:v0.1.0 \
+  --build
+```
+
+With `--build`, the command builds the endpoint image with Docker, pushes it,
+then applies the Kubernetes resources. Without `--build`, the image must
+already exist in a registry the cluster can pull from.
+
+The created Deployment runs:
+
+```bash
+inferops serve /app/app.py --host 0.0.0.0 --port 8080
+```
+
+By default the command sets:
+
+```text
+INFEROPS_GATEWAY_URL=http://inferops-gateway.<namespace>.svc
+```
+
+That lets custom handlers call `self.generate()` and `self.generate_stream()`
+against the in-cluster InferOps gateway. The command refuses to deploy an app
+that does not declare any `@inferops.web_endpoint` handlers.
+
+For local clusters that can read from the local Docker image store, use
+`--build --no-push`.
+
 ### gateway forward
 
 Forward the installed gateway Service to localhost for local testing:

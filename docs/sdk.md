@@ -87,6 +87,48 @@ Endpoint semantics:
 - `self.generate(...)` → runtime-agnostic inference call
 - `self.generate_stream(...)` → runtime-agnostic stream
 
+Deploy and activate the model runtime first, then forward the InferOps gateway:
+
+```bash
+inferops deploy app.py
+inferops activate qwen-chat
+inferops gateway forward
+```
+
+Serve the Python endpoints in a separate process:
+
+```bash
+inferops serve app.py --gateway-url http://127.0.0.1:8080 --port 9000
+```
+
+Call the custom endpoint:
+
+```bash
+curl -X POST http://127.0.0.1:9000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Hello"}'
+```
+
+`inferops serve` is the SDK application layer: it imports the app file, exposes
+the decorated methods over HTTP, and binds generation calls to the live gateway.
+The operator still owns the model runtime Deployment and the `/models/<name>/v1`
+OpenAI-compatible route.
+
+To run those Python endpoints inside the cluster, have InferOps build and push
+the endpoint image, then deploy it as a normal Kubernetes app:
+
+```bash
+inferops deploy-endpoints app.py \
+  --image ghcr.io/brassinai/my-endpoint-app:v0.1.0 \
+  --build
+```
+
+`deploy-endpoints` creates a Deployment and Service for the endpoint app. It
+sets `INFEROPS_GATEWAY_URL` to `http://inferops-gateway.<namespace>.svc` by
+default, so custom handlers can call `self.generate()` against the in-cluster
+runtime without a local port-forward. If the image already exists, omit
+`--build`.
+
 ## Decorator options
 
 ```python

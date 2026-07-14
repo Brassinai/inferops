@@ -33,6 +33,7 @@ from .kube import (
     DeactivationRequest,
     DeployRequest,
     DoctorRequest,
+    EndpointAppDeployRequest,
     InstallRequest,
     KubernetesClient,
     LogsRequest,
@@ -201,6 +202,95 @@ class LiveKubernetesClient(KubernetesClient):
                 }
             )
         return {"deployments": deployments}
+
+    def deploy_endpoint_app(self, request: EndpointAppDeployRequest) -> dict[str, Any]:
+        """Create or replace an SDK endpoint app Deployment and Service."""
+        from kubernetes.client.rest import ApiException
+
+        namespace = request.cluster.namespace
+        labels = _endpoint_app_labels(request.name)
+        deployment = _endpoint_app_deployment_body(request, labels)
+        service = _endpoint_app_service_body(request, labels)
+
+        existing_deployment = None
+        existing_service = None
+        try:
+            existing_deployment = self._apps_v1_api.read_namespaced_deployment(
+                request.name,
+                namespace,
+            )
+            _ensure_endpoint_app_owned("Deployment", existing_deployment)
+            _ensure_endpoint_selector_compatible(existing_deployment, request.name)
+        except ApiException as exc:
+            if not _is_not_found(exc):
+                _raise_cli_error(exc)
+
+        try:
+            existing_service = self._core_v1_api.read_namespaced_service(
+                request.name,
+                namespace,
+            )
+            _ensure_endpoint_app_owned("Service", existing_service)
+        except ApiException as exc:
+            if not _is_not_found(exc):
+                _raise_cli_error(exc)
+
+        try:
+            if existing_service is None:
+                self._core_v1_api.create_namespaced_service(
+                    namespace=namespace,
+                    body=service,
+                )
+                service_action = "created"
+            else:
+                service["metadata"]["resourceVersion"] = _metadata_resource_version(
+                    _resource_metadata(existing_service)
+                )
+                _preserve_service_allocated_fields(service, existing_service)
+                self._core_v1_api.replace_namespaced_service(
+                    name=request.name,
+                    namespace=namespace,
+                    body=service,
+                )
+                service_action = "configured"
+        except ApiException as exc:
+            _raise_cli_error(exc)
+
+        try:
+            if existing_deployment is None:
+                self._apps_v1_api.create_namespaced_deployment(
+                    namespace=namespace,
+                    body=deployment,
+                )
+                deployment_action = "created"
+            else:
+                _ensure_endpoint_selector_compatible(deployment, request.name)
+                deployment["metadata"]["resourceVersion"] = _metadata_resource_version(
+                    _resource_metadata(existing_deployment)
+                )
+                self._apps_v1_api.replace_namespaced_deployment(
+                    name=request.name,
+                    namespace=namespace,
+                    body=deployment,
+                )
+                deployment_action = "configured"
+        except ApiException as exc:
+            _raise_cli_error(exc)
+
+        return {
+            "endpointApp": {
+                "name": request.name,
+                "namespace": namespace,
+                "image": request.image,
+                "replicas": request.replicas,
+                "port": request.port,
+                "serviceName": request.name,
+                "gatewayURL": request.gateway_url,
+                "deploymentAction": deployment_action,
+                "serviceAction": service_action,
+            },
+            "cluster": request.cluster.to_safe_dict(),
+        }
 
     def activate(self, request: ActivationRequest) -> dict[str, Any]:
         """Set desiredState to Active and observe the resulting status."""
@@ -1853,6 +1943,242 @@ def _routing_endpoint(name: str, routing: dict[str, Any]) -> str:
     if routing.get("openAICompatible", True) and not path.endswith("/v1"):
         return f"{path}/v1"
     return path
+
+
+def _endpoint_app_labels(name: str) -> dict[str, str]:
+    return {
+        "app.kubernetes.io/name": name,
+        "app.kubernetes.io/part-of": "inferops",
+        "app.kubernetes.io/managed-by": "inferops-cli",
+        "app.kubernetes.io/component": "endpoint-app",
+        "inferops.dev/endpoint-app": "true",
+    }
+
+
+def _ensure_endpoint_app_owned(kind: str, resource: Any) -> None:
+    metadata = _resource_metadata(resource)
+    labels = _metadata_labels(metadata)
+    if (
+        labels.get("app.kubernetes.io/managed-by") != "inferops-cli"
+        or labels.get("inferops.dev/endpoint-app") != "true"
+    ):
+        name = _metadata_name(metadata)
+        raise CLIError(
+            f"{kind} {name!r} already exists but is not managed by inferops "
+            "endpoint deployment; choose --name or delete/rename the existing resource"
+        )
+
+
+def _ensure_endpoint_selector_compatible(resource: Any, name: str) -> None:
+    expected = _endpoint_app_selector(name)
+    if _deployment_selector(resource) != expected:
+        raise CLIError(
+            f"Deployment {name!r} has an incompatible selector and cannot be updated in place"
+        )
+
+
+def _resource_metadata(resource: Any) -> Any:
+    if isinstance(resource, dict):
+        return resource.get("metadata", {})
+    return getattr(resource, "metadata", None)
+
+
+def _metadata_labels(metadata: Any) -> dict[str, str]:
+    if isinstance(metadata, dict):
+        return dict(metadata.get("labels") or {})
+    return dict(getattr(metadata, "labels", None) or {})
+
+
+def _metadata_name(metadata: Any) -> str:
+    if isinstance(metadata, dict):
+        return str(metadata.get("name", ""))
+    return str(getattr(metadata, "name", "") or "")
+
+
+def _metadata_resource_version(metadata: Any) -> str:
+    if isinstance(metadata, dict):
+        return str(metadata.get("resourceVersion", ""))
+    return str(getattr(metadata, "resource_version", "") or "")
+
+
+def _deployment_selector(resource: Any) -> dict[str, str]:
+    if isinstance(resource, dict):
+        return dict(
+            resource.get("spec", {})
+            .get("selector", {})
+            .get("matchLabels", {})
+        )
+    spec = getattr(resource, "spec", None)
+    selector = getattr(spec, "selector", None)
+    return dict(getattr(selector, "match_labels", None) or {})
+
+
+def _preserve_service_allocated_fields(service: dict[str, Any], existing: Any) -> None:
+    existing_spec = _service_spec(existing)
+    spec = service.setdefault("spec", {})
+    for key in (
+        "clusterIP",
+        "clusterIPs",
+        "ipFamilies",
+        "ipFamilyPolicy",
+        "healthCheckNodePort",
+    ):
+        value = existing_spec.get(key)
+        if value not in (None, "", []):
+            spec[key] = value
+
+
+def _service_spec(resource: Any) -> dict[str, Any]:
+    if isinstance(resource, dict):
+        return dict(resource.get("spec") or {})
+    spec = getattr(resource, "spec", None)
+    if spec is None:
+        return {}
+    data: dict[str, Any] = {}
+    for attr, key in (
+        ("cluster_ip", "clusterIP"),
+        ("cluster_ips", "clusterIPs"),
+        ("ip_families", "ipFamilies"),
+        ("ip_family_policy", "ipFamilyPolicy"),
+        ("health_check_node_port", "healthCheckNodePort"),
+    ):
+        value = getattr(spec, attr, None)
+        if value not in (None, "", []):
+            data[key] = value
+    return data
+
+
+def _endpoint_app_deployment_body(
+    request: EndpointAppDeployRequest,
+    labels: dict[str, str],
+) -> dict[str, Any]:
+    env = [
+        {"name": "INFEROPS_GATEWAY_URL", "value": request.gateway_url},
+        {"name": "PORT", "value": str(request.port)},
+    ]
+    env.extend(
+        {"name": name, "value": value}
+        for name, value in sorted(request.env.items())
+    )
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+            "name": request.name,
+            "namespace": request.cluster.namespace,
+            "labels": labels,
+        },
+        "spec": {
+            "replicas": request.replicas,
+            "selector": {"matchLabels": _endpoint_app_selector(request.name)},
+            "template": {
+                "metadata": {"labels": labels},
+                "spec": {
+                    "automountServiceAccountToken": False,
+                    "enableServiceLinks": False,
+                    "securityContext": {
+                        "runAsNonRoot": True,
+                        "runAsUser": 10001,
+                        "runAsGroup": 10001,
+                        "fsGroup": 10001,
+                    },
+                    "containers": [
+                        {
+                            "name": "endpoint",
+                            "image": request.image,
+                            "imagePullPolicy": _endpoint_image_pull_policy(request.image),
+                            "command": ["inferops"],
+                            "args": [
+                                "serve",
+                                request.container_app_path,
+                                "--host",
+                                "0.0.0.0",
+                                "--port",
+                                str(request.port),
+                            ],
+                            "ports": [
+                                {
+                                    "name": "http",
+                                    "containerPort": request.port,
+                                    "protocol": "TCP",
+                                }
+                            ],
+                            "env": env,
+                            "readinessProbe": {
+                                "httpGet": {"path": "/health", "port": "http"},
+                                "periodSeconds": 10,
+                                "timeoutSeconds": 5,
+                                "failureThreshold": 3,
+                            },
+                            "livenessProbe": {
+                                "httpGet": {"path": "/health", "port": "http"},
+                                "periodSeconds": 10,
+                                "timeoutSeconds": 5,
+                                "failureThreshold": 3,
+                            },
+                            "resources": {
+                                "requests": {
+                                    "cpu": "100m",
+                                    "memory": "128Mi",
+                                },
+                                "limits": {
+                                    "cpu": "500m",
+                                    "memory": "512Mi",
+                                },
+                            },
+                            "securityContext": {
+                                "allowPrivilegeEscalation": False,
+                                "capabilities": {"drop": ["ALL"]},
+                                "readOnlyRootFilesystem": False,
+                                "seccompProfile": {"type": "RuntimeDefault"},
+                            },
+                        }
+                    ],
+                },
+            },
+        },
+    }
+
+
+def _endpoint_app_service_body(
+    request: EndpointAppDeployRequest,
+    labels: dict[str, str],
+) -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+            "name": request.name,
+            "namespace": request.cluster.namespace,
+            "labels": labels,
+        },
+        "spec": {
+            "type": "ClusterIP",
+            "selector": _endpoint_app_selector(request.name),
+            "ports": [
+                {
+                    "name": "http",
+                    "port": request.port,
+                    "targetPort": "http",
+                    "protocol": "TCP",
+                }
+            ],
+        },
+    }
+
+
+def _endpoint_app_selector(name: str) -> dict[str, str]:
+    return {
+        "app.kubernetes.io/name": name,
+        "app.kubernetes.io/component": "endpoint-app",
+    }
+
+
+def _endpoint_image_pull_policy(image: str) -> str:
+    lowered = image.lower()
+    if lowered.endswith(":latest") or ":" not in image.rsplit("/", 1)[-1]:
+        return "Always"
+    return "IfNotPresent"
 
 
 def _select_runtime_pod(pods: list[Any]) -> Any:

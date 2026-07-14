@@ -1,18 +1,17 @@
 const state = {
   snapshot: null,
-  yaml: null,
 };
 
-document.getElementById("refresh").addEventListener("click", load);
+document.getElementById("refresh").addEventListener("click", () => {
+  load().catch(showError);
+});
 
 async function load() {
-  const [snapshot, yaml] = await Promise.all([
-    fetchJSON("/api/snapshot"),
-    fetchJSON("/api/generated-yaml"),
-  ]);
-  state.snapshot = snapshot;
-  state.yaml = yaml;
+  setHealth("Loading", "warn");
+  const snapshot = await fetchJSON("/api/snapshot");
+  state.snapshot = normalizeSnapshot(snapshot);
   render();
+  setHealth("Ready", "ok");
 }
 
 async function fetchJSON(path) {
@@ -24,51 +23,92 @@ async function fetchJSON(path) {
   return response.json();
 }
 
+function normalizeSnapshot(snapshot) {
+  const safe = snapshot || {};
+  return {
+    generatedAt: safe.generatedAt || "",
+    namespace: safe.namespace || "unknown",
+    summary: safe.summary || {},
+    deployments: asArray(safe.deployments),
+    caches: asArray(safe.caches),
+    runtimes: asArray(safe.runtimes),
+    gpus: asArray(safe.gpus),
+    endpoints: asArray(safe.endpoints),
+    events: asArray(safe.events),
+    metrics: {
+      prometheusUrl: (safe.metrics && safe.metrics.prometheusUrl) || "",
+      queries: asArray(safe.metrics && safe.metrics.queries),
+    },
+  };
+}
+
 function render() {
-  const { snapshot, yaml } = state;
+  const { snapshot } = state;
+  const activeDeployments = snapshot.deployments.filter((item) => item.phase === "Active").length;
   document.getElementById("subtitle").textContent =
-    `${snapshot.namespace} namespace, refreshed ${snapshot.generatedAt}`;
-  document.getElementById("deployment-count").textContent = snapshot.summary.deployments;
-  document.getElementById("cache-count").textContent = snapshot.summary.caches;
-  document.getElementById("runtime-count").textContent = snapshot.summary.runtimes;
+    `${snapshot.namespace} namespace, refreshed ${formatTime(snapshot.generatedAt)}`;
+  document.getElementById("deployment-count").textContent = snapshot.summary.deployments ?? snapshot.deployments.length;
+  document.getElementById("active-count").textContent = activeDeployments;
+  document.getElementById("cache-count").textContent = snapshot.summary.caches ?? snapshot.caches.length;
+
   renderDeployments(snapshot.deployments);
-  renderCards("gpus", snapshot.gpus, gpuCard);
-  renderCards("caches", snapshot.caches, cacheCard);
-  renderCards("events", snapshot.events, eventCard);
-  document.getElementById("yaml").textContent = yaml.deployments.map((item) => item.yaml).join("\n---\n");
-  renderMetrics(snapshot.metrics);
+  renderCards("deployment-cards", snapshot.deployments, deploymentCard, "No deployments are visible in this namespace.");
+  renderCards("caches", snapshot.caches, cacheCard, "No model caches are registered.");
+  renderCards("gpus", snapshot.gpus, gpuCard, "No GPU resources are visible. CPU-only llama.cpp tests are expected to look like this.");
+  renderCards("events", snapshot.events, eventCard, "No recent Kubernetes Events are visible.");
 }
 
 function renderDeployments(deployments) {
   const body = document.getElementById("deployments");
   body.replaceChildren();
+  if (!deployments.length) {
+    const row = document.createElement("tr");
+    row.innerHTML = `<td colspan="6" class="empty-cell">No ModelDeployments found in this namespace.</td>`;
+    body.append(row);
+    return;
+  }
   for (const deployment of deployments) {
     const row = document.createElement("tr");
     row.innerHTML = `
-      <td><strong>${escapeHTML(deployment.name)}</strong><br><span class="muted">${escapeHTML(deployment.model)}</span></td>
+      <td>
+        <strong>${escapeHTML(deployment.name)}</strong>
+        <span class="subline">${escapeHTML(deployment.model)}</span>
+      </td>
       <td>${pill(deployment.phase)}</td>
-      <td>${escapeHTML(deployment.runtime)}</td>
-      <td>${escapeHTML(deployment.activation.desiredState || "Inactive")}<br><span class="muted">${escapeHTML(deployment.activation.whenFull || "Queue")}</span></td>
-      <td>${deployment.scaling.readyReplicas}/${deployment.scaling.desiredReplicas || deployment.scaling.maxReplicas || 0}<br><span class="muted">${escapeHTML(deployment.scaling.reason || "")}</span></td>
-      <td>${endpointLink(deployment.endpoint)}<br><span class="muted">${escapeHTML(deployment.logs.kubectl)}</span></td>
+      <td>
+        ${escapeHTML(deployment.runtime)}
+        <span class="subline">${deployment.routing && deployment.routing.openAICompatible ? "OpenAI route" : "custom route"}</span>
+      </td>
+      <td>
+        ${numberValue(deployment.scaling && deployment.scaling.readyReplicas)}/${numberValue((deployment.scaling && deployment.scaling.desiredReplicas) || (deployment.scaling && deployment.scaling.maxReplicas))}
+        <span class="subline">${escapeHTML((deployment.scaling && deployment.scaling.reason) || "steady")}</span>
+      </td>
+      <td>
+        ${pill((deployment.cache && deployment.cache.state) || "No cache")}
+        <span class="subline">${gpuLine(deployment.gpu)}</span>
+      </td>
+      <td>
+        ${endpointLink(deployment.endpoint)}
+        <span class="subline">${escapeHTML((deployment.logs && deployment.logs.kubectl) || "")}</span>
+      </td>
     `;
     body.append(row);
   }
 }
 
-function renderCards(id, items, renderer) {
-  const target = document.getElementById(id);
-  target.replaceChildren();
-  if (!items.length) {
-    const empty = document.createElement("article");
-    empty.className = "muted";
-    empty.textContent = "No records visible";
-    target.append(empty);
-    return;
-  }
-  for (const item of items) {
-    target.append(renderer(item));
-  }
+function deploymentCard(item) {
+  const conditions = asArray(item.conditions)
+    .slice(0, 5)
+    .map((condition) => `${condition.type}: ${condition.status}${condition.reason ? ` (${condition.reason})` : ""}`)
+    .join("\n");
+  return card(item.name, [
+    ["Desired", (item.activation && item.activation.desiredState) || "Inactive"],
+    ["Policy", (item.activation && item.activation.whenFull) || "Queue"],
+    ["Route", (item.routing && item.routing.path) || (item.endpoint && item.endpoint.route) || ""],
+    ["Service", (item.endpoint && item.endpoint.service) || ""],
+    ["Cache", `${(item.cache && item.cache.state) || "-"} ${(item.cache && item.cache.nodeName) || ""}`.trim()],
+    ["Conditions", conditions || "-"],
+  ]);
 }
 
 function gpuCard(item) {
@@ -92,10 +132,10 @@ function cacheCard(item) {
 }
 
 function eventCard(item) {
-  return card(`${item.reason} ${item.count ? `(${item.count})` : ""}`, [
+  return card(`${item.reason || "Event"} ${item.count ? `(${item.count})` : ""}`, [
     ["Type", item.type],
     ["Object", item.involvedObject],
-    ["Last seen", item.lastSeen],
+    ["Last seen", formatTime(item.lastSeen)],
     ["Message", item.message],
   ]);
 }
@@ -103,54 +143,94 @@ function eventCard(item) {
 function card(title, rows) {
   const article = document.createElement("article");
   const heading = document.createElement("h3");
-  heading.textContent = title;
+  heading.textContent = title || "Unknown";
   const dl = document.createElement("dl");
   for (const [label, value] of rows) {
     const dt = document.createElement("dt");
     const dd = document.createElement("dd");
     dt.textContent = label;
-    dd.textContent = value || "-";
+    dd.textContent = value === undefined || value === null || value === "" ? "-" : String(value);
     dl.append(dt, dd);
   }
   article.append(heading, dl);
   return article;
 }
 
-function renderMetrics(metrics) {
-  const target = document.getElementById("metrics");
+function renderCards(id, items, renderer, emptyMessage) {
+  const target = document.getElementById(id);
   target.replaceChildren();
-  for (const item of metrics.queries) {
-    const wrapper = document.createElement("div");
-    const name = document.createElement("strong");
-    const query = document.createElement("code");
-    name.textContent = item.name;
-    query.textContent = item.query;
-    wrapper.append(name, query);
-    if (metrics.prometheusUrl) {
-      const link = document.createElement("a");
-      link.href = `${metrics.prometheusUrl}/graph?g0.expr=${encodeURIComponent(item.query)}`;
-      link.textContent = "Open";
-      link.target = "_blank";
-      link.rel = "noreferrer";
-      wrapper.append(link);
-    }
-    target.append(wrapper);
+  const list = asArray(items);
+  if (!list.length) {
+    target.append(emptyArticle(emptyMessage));
+    return;
+  }
+  for (const item of list) {
+    target.append(renderer(item));
   }
 }
 
+function emptyArticle(message) {
+  const article = document.createElement("article");
+  article.className = "empty-state";
+  article.textContent = message || "No records visible.";
+  return article;
+}
+
 function endpointLink(endpoint) {
-  const value = endpoint.gatewayUrl || endpoint.statusUrl || endpoint.route || "-";
-  if (!endpoint.gatewayUrl) {
+  const safe = endpoint || {};
+  const value = safe.gatewayUrl || safe.statusUrl || safe.route || "-";
+  if (!safe.gatewayUrl) {
     return escapeHTML(value);
   }
-  return `<a href="${escapeHTML(endpoint.gatewayUrl)}">${escapeHTML(value)}</a>`;
+  return `<a href="${escapeHTML(safe.gatewayUrl)}">${escapeHTML(value)}</a>`;
+}
+
+function gpuLine(gpu) {
+  const safe = gpu || {};
+  if (!safe.requestedCount) {
+    return "CPU";
+  }
+  const pieces = [`${safe.requestedCount} GPU`];
+  if (safe.vendor) pieces.push(safe.vendor);
+  if (safe.type) pieces.push(safe.type);
+  if (safe.assignedNode) pieces.push(`on ${safe.assignedNode}`);
+  return escapeHTML(pieces.join(" "));
 }
 
 function pill(value) {
   const normalized = String(value || "Unknown");
-  const cls = normalized === "Active" || normalized === "Ready" ? "" :
-    normalized === "Failed" || normalized === "Unavailable" ? " bad" : " warn";
+  const cls = normalized === "Active" || normalized === "Ready"
+    ? ""
+    : normalized === "Failed" || normalized === "Unavailable"
+      ? " bad"
+      : " warn";
   return `<span class="pill${cls}">${escapeHTML(normalized)}</span>`;
+}
+
+function setHealth(label, mode) {
+  const target = document.getElementById("health");
+  target.textContent = label;
+  target.className = `status-dot ${mode || ""}`.trim();
+}
+
+function showError(error) {
+  setHealth("Error", "bad");
+  document.getElementById("subtitle").textContent = error.message;
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function numberValue(value) {
+  return Number.isFinite(Number(value)) ? Number(value) : 0;
+}
+
+function formatTime(value) {
+  if (!value) return "unknown";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
 }
 
 function escapeHTML(value) {
@@ -163,6 +243,4 @@ function escapeHTML(value) {
   }[char]));
 }
 
-load().catch((error) => {
-  document.getElementById("subtitle").textContent = error.message;
-});
+load().catch(showError);

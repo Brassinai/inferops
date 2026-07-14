@@ -18,6 +18,7 @@ from inferops_cli import (
     deactivate,
     delete,
     deploy,
+    deploy_endpoints,
     doctor,
     endpoints,
     gateway,
@@ -27,9 +28,17 @@ from inferops_cli import (
     logs,
     main,
     models,
+    serve,
     status,
 )
-from inferops_cli.kube import ClusterTarget
+from inferops_cli.errors import CLIError
+from inferops_cli.k8s_client import (
+    _endpoint_app_deployment_body,
+    _endpoint_app_labels,
+    _ensure_endpoint_app_owned,
+    _ensure_endpoint_selector_compatible,
+)
+from inferops_cli.kube import ClusterTarget, EndpointAppDeployRequest
 from inferops_cli.output import CommandResult, emit_result
 from tests.python.fake_kube_client import FakeKubernetesClient
 
@@ -64,6 +73,12 @@ def make_args(**overrides) -> argparse.Namespace:
         "no_wait": False,
         "timeout": 300,
         "watch": False,
+        "build": False,
+        "no_push": False,
+        "dockerfile": None,
+        "build_context": None,
+        "app_source": None,
+        "build_platform": None,
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -79,6 +94,7 @@ class CLICommandParserTest(unittest.TestCase):
             "cache",
             "deactivate",
             "deploy",
+            "deploy-endpoints",
             "doctor",
             "endpoints",
             "gateway",
@@ -86,6 +102,7 @@ class CLICommandParserTest(unittest.TestCase):
             "install",
             "logs",
             "models",
+            "serve",
             "status",
         ):
             self.assertIn(command, help_text)
@@ -101,11 +118,15 @@ class CLICommandParserTest(unittest.TestCase):
         gateway_help = self._parse_help(["gateway", "forward", "--help"])
         cache_help = self._parse_help(["cache", "delete", "--help"])
         doctor_help = self._parse_help(["doctor", "--help"])
+        serve_help = self._parse_help(["serve", "--help"])
+        deploy_endpoints_help = self._parse_help(["deploy-endpoints", "--help"])
 
         self.assertIn("List GPU capacity, occupancy, and availability", gpu_help)
         self.assertIn("Forward the InferOps gateway Service", gateway_help)
         self.assertIn("Delete one ModelCache", cache_help)
         self.assertIn("Check Kubernetes API, GPUs, cache, gateway", doctor_help)
+        self.assertIn("@inferops.web_endpoint", serve_help)
+        self.assertIn("@inferops.web_endpoint", deploy_endpoints_help)
 
     def test_install_help_documents_profile_configuration(self) -> None:
         install_help = self._parse_help(["install", "--help"])
@@ -223,6 +244,385 @@ class CLICommandHandlerTest(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertEqual(stdout.getvalue(), "")
         self.assertIn("gateway service name is invalid", stderr.getvalue())
+
+    def test_deploy_endpoints_applies_endpoint_app(self) -> None:
+        source = textwrap.dedent(
+            """
+            import inferops
+
+            app = inferops.App("support")
+
+            @app.model(name="qwen-chat", model="repo/chat")
+            class QwenChat:
+                @inferops.web_endpoint(method="POST", path="/chat")
+                async def chat(self, request):
+                    return await self.generate(request["prompt"])
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            app_path = Path(directory) / "app.py"
+            app_path.write_text(source, encoding="utf-8")
+            fake_client = FakeKubernetesClient()
+            stdout, _, exit_code = self._run(
+                deploy_endpoints.run,
+                make_args(
+                    app=str(app_path),
+                    image="ghcr.io/brassinai/assistant-api:v0.1.0",
+                    name=None,
+                    container_app_path="/app/app.py",
+                    gateway_url=None,
+                    port=8080,
+                    replicas=2,
+                    env=["LOG_LEVEL=debug"],
+                ),
+                fake_client,
+            )
+
+        payload = json.loads(stdout)
+        endpoint_app = payload["endpointApp"]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(endpoint_app["name"], "support-endpoints")
+        self.assertEqual(endpoint_app["image"], "ghcr.io/brassinai/assistant-api:v0.1.0")
+        self.assertEqual(endpoint_app["replicas"], 2)
+        self.assertEqual(endpoint_app["gatewayURL"], "http://inferops-gateway.team-a.svc")
+        self.assertEqual(endpoint_app["routes"][0]["path"], "/chat")
+
+    def test_deploy_endpoints_requires_web_endpoints(self) -> None:
+        source = textwrap.dedent(
+            """
+            import inferops
+
+            app = inferops.App("support")
+
+            @app.model(name="qwen-chat", model="repo/chat")
+            class QwenChat:
+                pass
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            app_path = Path(directory) / "app.py"
+            app_path.write_text(source, encoding="utf-8")
+            fake_client = FakeKubernetesClient()
+            stdout, stderr, exit_code = self._run(
+                deploy_endpoints.run,
+                make_args(
+                    app=str(app_path),
+                    image="ghcr.io/brassinai/assistant-api:v0.1.0",
+                    name=None,
+                    container_app_path="/app/app.py",
+                    gateway_url=None,
+                    port=8080,
+                    replicas=1,
+                    env=[],
+                ),
+                fake_client,
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("@inferops.web_endpoint", stderr)
+
+    def test_deploy_endpoints_does_not_duplicate_endpoint_suffix(self) -> None:
+        source = textwrap.dedent(
+            """
+            import inferops
+
+            app = inferops.App("llama-sdk-endpoints")
+
+            @app.model(name="assistant-llama", model="repo/chat")
+            class Assistant:
+                @inferops.web_endpoint(method="POST", path="/chat")
+                async def chat(self, request):
+                    return await self.generate(request["prompt"])
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            app_path = Path(directory) / "app.py"
+            app_path.write_text(source, encoding="utf-8")
+            stdout, _, exit_code = self._run(
+                deploy_endpoints.run,
+                make_args(
+                    app=str(app_path),
+                    image="ghcr.io/brassinai/llama-sdk-endpoints:v0.1.0",
+                    name=None,
+                    container_app_path="/app/app.py",
+                    gateway_url=None,
+                    port=8080,
+                    replicas=1,
+                    env=[],
+                ),
+                FakeKubernetesClient(),
+            )
+
+        payload = json.loads(stdout)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["endpointApp"]["name"], "llama-sdk-endpoints")
+
+    def test_deploy_endpoints_builds_pushes_then_applies_endpoint_app(self) -> None:
+        source = textwrap.dedent(
+            """
+            import inferops
+
+            app = inferops.App("support")
+
+            @app.model(name="qwen-chat", model="repo/chat")
+            class QwenChat:
+                @inferops.web_endpoint(method="POST", path="/chat")
+                async def chat(self, request):
+                    return await self.generate(request["prompt"])
+            """
+        )
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            app_path = root / "app.py"
+            dockerfile = root / "Dockerfile"
+            app_path.write_text(source, encoding="utf-8")
+            dockerfile.write_text("FROM python:3.11-slim\n", encoding="utf-8")
+            stdout, _, exit_code = self._run(
+                deploy_endpoints.run,
+                make_args(
+                    app=str(app_path),
+                    image="ghcr.io/brassinai/support-endpoints:v0.1.0",
+                    name=None,
+                    container_app_path="/app/app.py",
+                    gateway_url=None,
+                    port=8080,
+                    replicas=1,
+                    env=[],
+                    build=True,
+                    dockerfile=str(dockerfile),
+                    build_context=str(root),
+                ),
+                FakeKubernetesClient(),
+                run,
+            )
+
+        payload = json.loads(stdout)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            commands,
+            [
+                [
+                    "docker",
+                    "build",
+                    "-f",
+                    str(dockerfile),
+                    "--build-arg",
+                    "APP_SOURCE=app.py",
+                    "--build-arg",
+                    "CONTAINER_APP_PATH=/app/app.py",
+                    "-t",
+                    "ghcr.io/brassinai/support-endpoints:v0.1.0",
+                    str(root),
+                ],
+                ["docker", "push", "ghcr.io/brassinai/support-endpoints:v0.1.0"],
+            ],
+        )
+        self.assertTrue(payload["imageBuild"]["built"])
+        self.assertTrue(payload["imageBuild"]["pushed"])
+        self.assertEqual(payload["endpointApp"]["name"], "support-endpoints")
+
+    def test_deploy_endpoints_build_can_skip_push(self) -> None:
+        source = textwrap.dedent(
+            """
+            import inferops
+
+            app = inferops.App("support")
+
+            @app.model(name="qwen-chat", model="repo/chat")
+            class QwenChat:
+                @inferops.web_endpoint(method="POST", path="/chat")
+                async def chat(self, request):
+                    return await self.generate(request["prompt"])
+            """
+        )
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            app_path = root / "app.py"
+            dockerfile = root / "Dockerfile"
+            app_path.write_text(source, encoding="utf-8")
+            dockerfile.write_text("FROM python:3.11-slim\n", encoding="utf-8")
+            stdout, _, exit_code = self._run(
+                deploy_endpoints.run,
+                make_args(
+                    app=str(app_path),
+                    image="support-endpoints:v0.1.0",
+                    name=None,
+                    container_app_path="/app/app.py",
+                    gateway_url=None,
+                    port=8080,
+                    replicas=1,
+                    env=[],
+                    build=True,
+                    no_push=True,
+                    dockerfile=str(dockerfile),
+                    build_context=str(root),
+                ),
+                FakeKubernetesClient(),
+                run,
+            )
+
+        payload = json.loads(stdout)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0][0:2], ["docker", "build"])
+        self.assertFalse(payload["imageBuild"]["pushed"])
+
+    def test_deploy_endpoints_rejects_no_push_without_build(self) -> None:
+        source = textwrap.dedent(
+            """
+            import inferops
+
+            app = inferops.App("support")
+
+            @app.model(name="qwen-chat", model="repo/chat")
+            class QwenChat:
+                @inferops.web_endpoint(method="POST", path="/chat")
+                async def chat(self, request):
+                    return await self.generate(request["prompt"])
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            app_path = Path(directory) / "app.py"
+            app_path.write_text(source, encoding="utf-8")
+            stdout, stderr, exit_code = self._run(
+                deploy_endpoints.run,
+                make_args(
+                    app=str(app_path),
+                    image="ghcr.io/brassinai/support-endpoints:v0.1.0",
+                    name=None,
+                    container_app_path="/app/app.py",
+                    gateway_url=None,
+                    port=8080,
+                    replicas=1,
+                    env=[],
+                    no_push=True,
+                ),
+                FakeKubernetesClient(),
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("--no-push can only be used with --build", stderr)
+
+    def test_deploy_endpoints_resolves_cluster_before_docker_build(self) -> None:
+        source = textwrap.dedent(
+            """
+            import inferops
+
+            app = inferops.App("support")
+
+            @app.model(name="qwen-chat", model="repo/chat")
+            class QwenChat:
+                @inferops.web_endpoint(method="POST", path="/chat")
+                async def chat(self, request):
+                    return await self.generate(request["prompt"])
+            """
+        )
+        commands: list[list[str]] = []
+
+        def fail_factory(cluster):
+            raise CLIError(f"cannot load kube context {cluster.context}")
+
+        def run(command):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            app_path = root / "app.py"
+            dockerfile = root / "Dockerfile"
+            app_path.write_text(source, encoding="utf-8")
+            dockerfile.write_text("FROM python:3.11-slim\n", encoding="utf-8")
+            stdout, stderr, exit_code = self._run(
+                deploy_endpoints.run,
+                make_args(
+                    app=str(app_path),
+                    image="ghcr.io/brassinai/support-endpoints:v0.1.0",
+                    name=None,
+                    container_app_path="/app/app.py",
+                    gateway_url=None,
+                    port=8080,
+                    replicas=1,
+                    env=[],
+                    build=True,
+                    dockerfile=str(dockerfile),
+                    build_context=str(root),
+                    _client_factory=fail_factory,
+                ),
+                None,
+                run,
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout, "")
+        self.assertEqual(commands, [])
+        self.assertIn("cannot load kube context", stderr)
+
+    def test_endpoint_app_deployment_body_uses_secure_bounded_defaults(self) -> None:
+        request = EndpointAppDeployRequest(
+            cluster=ClusterTarget(namespace="team-a", context="kind-dev"),
+            name="support-endpoints",
+            app_path="/workspace/app.py",
+            image="ghcr.io/brassinai/support-endpoints:v0.1.0",
+            container_app_path="/app/app.py",
+            gateway_url="http://inferops-gateway.team-a.svc",
+        )
+        body = _endpoint_app_deployment_body(
+            request,
+            _endpoint_app_labels(request.name),
+        )
+
+        pod_spec = body["spec"]["template"]["spec"]
+        container = pod_spec["containers"][0]
+        self.assertFalse(pod_spec["automountServiceAccountToken"])
+        self.assertTrue(pod_spec["securityContext"]["runAsNonRoot"])
+        self.assertEqual(container["resources"]["requests"]["cpu"], "100m")
+        self.assertEqual(container["resources"]["limits"]["memory"], "512Mi")
+        self.assertEqual(container["securityContext"]["capabilities"]["drop"], ["ALL"])
+
+    def test_endpoint_app_apply_rejects_unowned_or_incompatible_resources(self) -> None:
+        with self.assertRaisesRegex(CLIError, "not managed by inferops"):
+            _ensure_endpoint_app_owned(
+                "Deployment",
+                {"metadata": {"name": "support", "labels": {}}},
+            )
+
+        owned = {
+            "metadata": {
+                "name": "support",
+                "labels": {
+                    "app.kubernetes.io/managed-by": "inferops-cli",
+                    "inferops.dev/endpoint-app": "true",
+                },
+            },
+            "spec": {
+                "selector": {
+                    "matchLabels": {
+                        "app.kubernetes.io/name": "other",
+                        "app.kubernetes.io/component": "endpoint-app",
+                    }
+                }
+            },
+        }
+        with self.assertRaisesRegex(CLIError, "incompatible selector"):
+            _ensure_endpoint_selector_compatible(owned, "support")
 
     def test_main_runs_full_lifecycle_replacement_and_failure_workflow(self) -> None:
         source = textwrap.dedent(
@@ -528,6 +928,8 @@ class CLICommandHandlerTest(unittest.TestCase):
                     payload={
                         "cluster": {"kubeconfigContents": "users:\n- token: abc123"},
                         "token": "abc123",
+                        "apiKey": "abc123",
+                        "INFEROPS_API_KEY": "abc123",
                         "secretData": {"password": "shh"},
                         "secret": {
                             "kind": "Secret",
@@ -655,12 +1057,16 @@ class CLICommandHandlerTest(unittest.TestCase):
         self.assertFalse(payload.get("nodeFilesModified"))
 
     def _run(
-        self, func, args: argparse.Namespace, fake_client: FakeKubernetesClient
+        self,
+        func,
+        args: argparse.Namespace,
+        fake_client: FakeKubernetesClient,
+        *extra_args,
     ) -> tuple[str, str, int]:
         stdout = io.StringIO()
         stderr = io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
-            exit_code = func(args, fake_client)
+            exit_code = func(args, fake_client, *extra_args)
         return stdout.getvalue(), stderr.getvalue(), exit_code
 
     def _run_main(

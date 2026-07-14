@@ -12,14 +12,26 @@
         <h1>InferOps</h1>
         <p id="subtitle">Loading cluster state...</p>
       </div>
-      <button id="refresh" type="button">Refresh</button>
+      <div class="topbar-actions">
+        <span id="health" class="status-dot">Loading</span>
+        <button id="refresh" type="button">Refresh</button>
+      </div>
     </header>
 
     <main>
-      <section class="stats" aria-label="Summary">
-        <article><span id="deployment-count">0</span><small>Deployments</small></article>
-        <article><span id="cache-count">0</span><small>Caches</small></article>
-        <article><span id="runtime-count">0</span><small>Runtimes</small></article>
+      <section class="summary-grid" aria-label="Summary">
+        <article>
+          <span id="deployment-count">0</span>
+          <small>Deployments</small>
+        </article>
+        <article>
+          <span id="active-count">0</span>
+          <small>Active</small>
+        </article>
+        <article>
+          <span id="cache-count">0</span>
+          <small>Caches</small>
+        </article>
       </section>
 
       <section>
@@ -33,8 +45,8 @@
                 <th>Name</th>
                 <th>Phase</th>
                 <th>Runtime</th>
-                <th>Activation</th>
-                <th>Scaling</th>
+                <th>Replicas</th>
+                <th>Cache / GPU</th>
                 <th>Endpoint</th>
               </tr>
             </thead>
@@ -45,8 +57,8 @@
 
       <section class="grid">
         <div>
-          <div class="section-title"><h2>GPUs</h2></div>
-          <div id="gpus" class="cards"></div>
+          <div class="section-title"><h2>Workload Detail</h2></div>
+          <div id="deployment-cards" class="cards"></div>
         </div>
         <div>
           <div class="section-title"><h2>Caches</h2></div>
@@ -56,18 +68,13 @@
 
       <section class="grid">
         <div>
-          <div class="section-title"><h2>Events</h2></div>
-          <div id="events" class="cards"></div>
+          <div class="section-title"><h2>GPU Capacity</h2></div>
+          <div id="gpus" class="cards"></div>
         </div>
         <div>
-          <div class="section-title"><h2>Generated YAML</h2></div>
-          <pre id="yaml"></pre>
+          <div class="section-title"><h2>Recent Events</h2></div>
+          <div id="events" class="cards"></div>
         </div>
-      </section>
-
-      <section>
-        <div class="section-title"><h2>Metrics Queries</h2></div>
-        <div id="metrics" class="query-list"></div>
       </section>
     </main>
 

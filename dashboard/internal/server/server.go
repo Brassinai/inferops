@@ -512,13 +512,90 @@ func sortSnapshot(snapshot *Snapshot) {
 
 func defaultMetricQueries() []MetricQuery {
 	return []MetricQuery{
-		{Name: "Gateway requests", Query: "sum(rate(inferops_gateway_requests_total[5m])) by (model)"},
-		{Name: "Gateway latency p95", Query: "histogram_quantile(0.95, sum(rate(inferops_gateway_request_duration_seconds_bucket[5m])) by (le, model))"},
-		{Name: "Active requests", Query: "sum(inferops_gateway_active_requests) by (model)"},
-		{Name: "GPU slots available", Query: "sum(inferops_gpu_slots_available) by (node, resource)"},
-		{Name: "Activation duration p95", Query: "histogram_quantile(0.95, sum(rate(inferops_model_activation_duration_seconds_bucket[30m])) by (le))"},
-		{Name: "Runtime waiting requests", Query: "sum(vllm:num_requests_waiting) by (model_name)"},
-		{Name: "Runtime tokens per second", Query: "sum(rate(vllm:generation_tokens_total[5m])) by (model_name)"},
+		{
+			Name:        "TTFT p95",
+			Category:    "Runtime",
+			Description: "vLLM time to first token. llama.cpp versions may not expose a TTFT histogram.",
+			Query:       "histogram_quantile(0.95, sum(rate(vllm:time_to_first_token_seconds_bucket[5m])) by (le, model_name))",
+		},
+		{
+			Name:        "Generation tokens/sec",
+			Category:    "Runtime",
+			Description: "Decode throughput from vLLM or llama.cpp runtime counters.",
+			Query:       "sum(rate(vllm:generation_tokens_total[5m])) by (model_name) or sum(rate(llamacpp:tokens_predicted_total[5m]))",
+		},
+		{
+			Name:        "Prompt tokens/sec",
+			Category:    "Runtime",
+			Description: "Prompt ingestion throughput from vLLM or llama.cpp runtime counters.",
+			Query:       "sum(rate(vllm:prompt_tokens_total[5m])) by (model_name) or sum(rate(llamacpp:prompt_tokens_total[5m]))",
+		},
+		{
+			Name:        "Waiting requests",
+			Category:    "Queue",
+			Description: "Runtime-side queued request pressure.",
+			Query:       "sum(vllm:num_requests_waiting) by (model_name) or sum(llamacpp:requests_deferred)",
+		},
+		{
+			Name:        "Cache availability",
+			Category:    "Cache",
+			Description: "ModelCache count by lifecycle phase. Ready caches are available for activation.",
+			Query:       "sum(inferops_modelcache_phase_count) by (phase)",
+		},
+		{
+			Name:        "Cache reserved storage",
+			Category:    "Cache",
+			Description: "Total model-cache storage reserved by lifecycle phase.",
+			Query:       "sum(inferops_modelcache_reserved_bytes) by (phase)",
+		},
+		{
+			Name:        "Cache download p95",
+			Category:    "Cache",
+			Description: "Downloader Job duration from creation to verified cache completion.",
+			Query:       "histogram_quantile(0.95, sum(rate(inferops_cache_download_duration_seconds_bucket[30m])) by (le))",
+		},
+		{
+			Name:        "Cache download failures",
+			Category:    "Cache",
+			Description: "Terminal cache download failures by stable reason.",
+			Query:       "sum(rate(inferops_cache_download_failures_total[30m])) by (reason)",
+		},
+		{
+			Name:        "Active requests",
+			Category:    "Gateway",
+			Description: "Requests currently in flight through the InferOps gateway.",
+			Query:       "sum(inferops_gateway_active_requests)",
+		},
+		{
+			Name:        "Gateway latency p95",
+			Category:    "Gateway",
+			Description: "End-to-end gateway request duration.",
+			Query:       "histogram_quantile(0.95, sum(rate(inferops_gateway_request_duration_seconds_bucket[5m])) by (le, method))",
+		},
+		{
+			Name:        "Gateway request rate",
+			Category:    "Gateway",
+			Description: "Gateway request throughput by bounded HTTP method and status code.",
+			Query:       "sum(rate(inferops_gateway_requests_total[5m])) by (method, status_code)",
+		},
+		{
+			Name:        "Gateway upstream errors",
+			Category:    "Gateway",
+			Description: "Runtime upstream failures grouped by stable reason.",
+			Query:       "sum(rate(inferops_gateway_upstream_errors_total[5m])) by (reason)",
+		},
+		{
+			Name:        "GPU slots available",
+			Category:    "Capacity",
+			Description: "Scheduler-visible GPU capacity tracked by InferOps.",
+			Query:       "sum(inferops_gpu_slots_available) by (resource)",
+		},
+		{
+			Name:        "Activation duration p95",
+			Category:    "Rollout",
+			Description: "Time from activation request to ready runtime.",
+			Query:       "histogram_quantile(0.95, sum(rate(inferops_model_activation_duration_seconds_bucket[30m])) by (le))",
+		},
 	}
 }
 

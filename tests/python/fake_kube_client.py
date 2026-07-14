@@ -13,6 +13,7 @@ from inferops_cli.kube import (
     DeactivationRequest,
     DeployRequest,
     DoctorRequest,
+    EndpointAppDeployRequest,
     InstallRequest,
     LogsRequest,
     NamedRequest,
@@ -36,6 +37,7 @@ class FakeKubernetesClient:
         self._deployments: dict[_ResourceKey, dict[str, Any]] = {}
         self._caches: dict[_ResourceKey, dict[str, Any]] = {}
         self._installs: list[dict[str, Any]] = []
+        self._endpoint_apps: dict[_ResourceKey, dict[str, Any]] = {}
         self._gpus: list[dict[str, Any]] = []
         self._doctor_checks: list[dict[str, Any]] = []
         self._cache_deletable: bool = True
@@ -99,6 +101,30 @@ class FakeKubernetesClient:
             "whenFull": request.when_full,
             "deployments": sorted(deployments, key=lambda item: item["name"]),
             "message": "Deployment applied to the fake Kubernetes client.",
+        }
+
+    def deploy_endpoint_app(self, request: EndpointAppDeployRequest) -> dict[str, Any]:
+        key = self._resource_key(request.cluster, request.name)
+        action = "created" if key not in self._endpoint_apps else "configured"
+        endpoint_app = {
+            "name": request.name,
+            "namespace": request.cluster.namespace,
+            "image": request.image,
+            "replicas": request.replicas,
+            "port": request.port,
+            "serviceName": request.name,
+            "gatewayURL": request.gateway_url,
+            "containerAppPath": request.container_app_path,
+            "env": dict(request.env),
+            "deploymentAction": action,
+            "serviceAction": action,
+        }
+        self._endpoint_apps[key] = endpoint_app
+        return {
+            "mode": "fake",
+            "cluster": request.cluster.to_safe_dict(),
+            "endpointApp": endpoint_app.copy(),
+            "message": "Endpoint app applied to the fake Kubernetes client.",
         }
 
     def activate(self, request: ActivationRequest) -> dict[str, Any]:

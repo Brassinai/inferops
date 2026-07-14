@@ -327,7 +327,9 @@ helm-template:
 	@grep -q '^kind: ServiceMonitor$$' .verify/helm/inferops-operator-observability.yaml
 	@grep -q '^kind: ServiceMonitor$$' .verify/helm/inferops-gateway-observability.yaml
 	@grep -q '^kind: ServiceMonitor$$' .verify/helm/inferops-runtime-observability.yaml
+	@grep -q 'inferops-platform-dashboard.json' .verify/helm/inferops-operator-observability.yaml
 	@grep -q 'inferops-vllm-dashboard.json' .verify/helm/inferops-operator-observability.yaml
+	@grep -q 'inferops-llama-cpp-dashboard.json' .verify/helm/inferops-operator-observability.yaml
 	@grep -q '^kind: Deployment$$' .verify/helm/inferops-dashboard.yaml
 	@grep -q '^kind: NetworkPolicy$$' .verify/helm/inferops-dashboard.yaml
 	@grep -q '^kind: ClusterRole$$' .verify/helm/inferops-dashboard.yaml
@@ -379,6 +381,8 @@ yaml-check:
 
 schema-check: helm-template
 	$(KUBECONFORM) -strict -summary -ignore-missing-schemas deploy/manifests/crds
-	$(KUBECONFORM) -strict -summary -ignore-missing-schemas deploy/manifests/examples examples .verify/helm
+	$(KUBECONFORM) -strict -summary -ignore-missing-schemas \
+		-ignore-filename-pattern '(^|.*/)\.inferops/.*' \
+		deploy/manifests/examples examples .verify/helm
 
 verify: tools-check fmt-check test vet python-check python-test python-package helm-lint yaml-check schema-check

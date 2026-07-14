@@ -1861,6 +1861,8 @@ func (*recordingControllerMetrics) SetGPUSlots(string, float64, float64, float64
 func (m *recordingControllerMetrics) SetActivationQueueDepth(depth float64) {
 	m.queueDepth = depth
 }
+func (*recordingControllerMetrics) SetModelCacheInventory(map[string]float64, map[string]float64) {
+}
 func (*recordingControllerMetrics) ObserveActivationDuration(time.Duration)    {}
 func (*recordingControllerMetrics) ObserveCacheDownloadDuration(time.Duration) {}
 func (*recordingControllerMetrics) IncFailure(string, string)                  {}

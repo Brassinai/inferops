@@ -8,6 +8,7 @@ from . import (
     deactivate,
     delete,
     deploy,
+    deploy_endpoints,
     doctor,
     endpoints,
     gateway,
@@ -17,6 +18,7 @@ from . import (
     install,
     logs,
     models,
+    serve,
     status,
 )
 from .errors import run_with_cli_errors
@@ -36,6 +38,7 @@ def build_parser() -> CLIArgumentParser:
     deactivate.register(subcommands)
     delete.register(subcommands)
     deploy.register(subcommands)
+    deploy_endpoints.register(subcommands)
     doctor.register(subcommands)
     endpoints.register(subcommands)
     gateway.register(subcommands)
@@ -45,6 +48,7 @@ def build_parser() -> CLIArgumentParser:
     install.register(subcommands)
     logs.register(subcommands)
     models.register(subcommands)
+    serve.register(subcommands)
     status.register(subcommands)
     return parser
 

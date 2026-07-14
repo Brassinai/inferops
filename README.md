@@ -38,10 +38,11 @@ class QwenChat:
     pass
 ```
 
-Call the built-in inference API through the SDK client:
+Call the built-in inference API through the SDK client. Point `base_url` at a
+model route exposed by the InferOps gateway:
 
 ```python
-client = inferops.Client(base_url="https://api.example.com", api_key="...")
+client = inferops.Client(base_url="http://127.0.0.1:8080/models/qwen-chat")
 
 response = client.responses.create(
     model="qwen-chat",
@@ -76,10 +77,13 @@ with `streaming=True` so the endpoint contract stays explicit.
 ```bash
 inferops deploy app.py
 inferops generate app.py > modeldeployment.yaml
+inferops serve app.py --gateway-url http://127.0.0.1:8080 --port 9000
+inferops deploy-endpoints app.py --image ghcr.io/brassinai/my-endpoint-app:v0.1.0 --build
 ```
 
 See [examples/sdk-endpoints](examples/sdk-endpoints) for runnable local
-examples of custom endpoint invocation and Python client calls.
+and in-cluster examples of serving custom endpoints and making Python client
+calls.
 
 ### CLI
 
@@ -92,6 +96,9 @@ inferops activate support-bot
 inferops status support-bot
 inferops models
 inferops endpoints
+inferops gateway forward
+inferops serve app.py
+inferops deploy-endpoints app.py --image ghcr.io/brassinai/my-endpoint-app:v0.1.0 --build
 inferops logs support-bot
 inferops deactivate support-bot
 inferops delete support-bot

@@ -13,6 +13,7 @@ import yaml
 REDACTED = "***REDACTED***"
 SENSITIVE_KEYS = {
     "accesstoken",
+    "apikey",
     "authorization",
     "bearertoken",
     "certificateauthoritydata",
@@ -20,6 +21,7 @@ SENSITIVE_KEYS = {
     "clientkeydata",
     "data",
     "idtoken",
+    "inferopsapikey",
     "kubeconfig",
     "kubeconfigcontent",
     "kubeconfigcontents",

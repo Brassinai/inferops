@@ -40,6 +40,21 @@ class DeployRequest:
 
 
 @dataclass(frozen=True)
+class EndpointAppDeployRequest:
+    """Inputs for deploying SDK endpoint handlers as a Kubernetes app."""
+
+    cluster: ClusterTarget
+    name: str
+    app_path: str
+    image: str
+    container_app_path: str
+    gateway_url: str
+    port: int = 8080
+    replicas: int = 1
+    env: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class NamedRequest:
     """Inputs for commands that target one named deployment."""
 
@@ -143,6 +158,9 @@ class KubernetesClient(Protocol):
 
     def deploy(self, request: DeployRequest) -> dict[str, Any]:
         """Apply one application deployment request."""
+
+    def deploy_endpoint_app(self, request: EndpointAppDeployRequest) -> dict[str, Any]:
+        """Apply one SDK endpoint app Deployment and Service."""
 
     def activate(self, request: ActivationRequest) -> dict[str, Any]:
         """Activate one deployment."""

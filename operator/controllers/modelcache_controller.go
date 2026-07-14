@@ -139,6 +139,9 @@ func (r *ModelCacheReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	var cache v1alpha1.ModelCache
 	if err := r.client.Get(ctx, req.NamespacedName, &cache); err != nil {
 		if apierrors.IsNotFound(err) {
+			if observeErr := r.observeCacheInventory(ctx, nil); observeErr != nil {
+				logger.Error(observeErr, "could not update model cache inventory metrics")
+			}
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("get ModelCache: %w", err)
@@ -147,6 +150,9 @@ func (r *ModelCacheReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if !cache.DeletionTimestamp.IsZero() {
 		// There is no data-cleanup finalizer. The object deletes immediately and
 		// leaves hostPath data in place.
+		if observeErr := r.observeCacheInventory(ctx, &cache); observeErr != nil {
+			logger.Error(observeErr, "could not update model cache inventory metrics")
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -704,6 +710,9 @@ func (r *ModelCacheReconciler) patchStatus(
 ) (ctrl.Result, error) {
 	changed := statusChanged(original.Status, cache.Status)
 	if !changed {
+		if err := r.observeCacheInventory(ctx, cache); err != nil {
+			log.FromContext(ctx).Error(err, "could not update model cache inventory metrics")
+		}
 		return r.requeueForCachePhase(cache.Status.Phase), nil
 	}
 
@@ -725,8 +734,81 @@ func (r *ModelCacheReconciler) patchStatus(
 		original.Status.Phase != v1alpha1.ModelCachePhaseFailed {
 		r.metrics.IncFailure("modelcache", eventReason)
 	}
+	if err := r.observeCacheInventory(ctx, cache); err != nil {
+		log.FromContext(ctx).Error(err, "could not update model cache inventory metrics")
+	}
 
 	return r.requeueForCachePhase(cache.Status.Phase), nil
+}
+
+func (r *ModelCacheReconciler) observeCacheInventory(
+	ctx context.Context,
+	current *v1alpha1.ModelCache,
+) error {
+	var caches v1alpha1.ModelCacheList
+	if err := r.client.List(ctx, &caches); err != nil {
+		return fmt.Errorf("list model caches for inventory metrics: %w", err)
+	}
+
+	phaseCounts, reservedBytes := emptyCacheInventory()
+	seenCurrent := false
+	for i := range caches.Items {
+		cache := &caches.Items[i]
+		if current != nil &&
+			cache.Namespace == current.Namespace &&
+			cache.Name == current.Name {
+			cache = current
+			seenCurrent = true
+		}
+		if !cache.DeletionTimestamp.IsZero() {
+			continue
+		}
+		addCacheInventory(cache, phaseCounts, reservedBytes)
+	}
+	if current != nil && !seenCurrent && current.DeletionTimestamp.IsZero() {
+		addCacheInventory(current, phaseCounts, reservedBytes)
+	}
+
+	r.metrics.SetModelCacheInventory(phaseCounts, reservedBytes)
+	return nil
+}
+
+func emptyCacheInventory() (map[string]float64, map[string]float64) {
+	phaseCounts := map[string]float64{}
+	reservedBytes := map[string]float64{}
+	for _, phase := range []string{
+		string(v1alpha1.ModelCachePhasePending),
+		string(v1alpha1.ModelCachePhaseDownloading),
+		string(v1alpha1.ModelCachePhaseReady),
+		string(v1alpha1.ModelCachePhaseFailed),
+		"Unknown",
+	} {
+		phaseCounts[phase] = 0
+		reservedBytes[phase] = 0
+	}
+	return phaseCounts, reservedBytes
+}
+
+func addCacheInventory(
+	cache *v1alpha1.ModelCache,
+	phaseCounts map[string]float64,
+	reservedBytes map[string]float64,
+) {
+	phase := string(cache.Status.Phase)
+	if phase == "" {
+		phase = "Unknown"
+	}
+	phaseCounts[phase]++
+
+	size := cache.Status.ReservedSize
+	if size == "" {
+		size = cache.Status.Size
+	}
+	quantity, err := resource.ParseQuantity(size)
+	if err != nil || quantity.Sign() <= 0 {
+		return
+	}
+	reservedBytes[phase] += float64(quantity.Value())
 }
 
 func (r *ModelCacheReconciler) requeueForCachePhase(phase v1alpha1.ModelCachePhase) ctrl.Result {

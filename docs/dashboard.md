@@ -1,9 +1,8 @@
 # Self-Hosted Dashboard
 
 InferOps includes a self-hosted dashboard for operators who want an in-cluster
-view of model deployments, GPU allocation, caches, endpoints, recent Events,
-metrics queries, log selectors, activation state, scaling state, and sanitized
-generated YAML.
+view of active model deployments, GPU allocation, caches, endpoints, recent
+Events, log selectors, activation state, and scaling state.
 
 The dashboard is deliberately not an InferOps-hosted control plane. It runs in
 the user's cluster, talks to the Kubernetes API with its own ServiceAccount, and
@@ -51,14 +50,28 @@ cluster.
 - `GET /api/snapshot` returns deployments, caches, runtimes, GPU summaries,
   endpoint summaries, recent Events, log selectors, and Prometheus query hints.
 - `GET /api/generated-yaml` returns sanitized `ModelDeployment` manifests for
-  currently visible deployments.
+  currently visible deployments. This endpoint is kept for API consumers and is
+  not shown in the default dashboard UI.
 - `GET /healthz` and `GET /readyz` support Kubernetes probes.
+
+## Metrics And Grafana
+
+When `serviceMonitor.enabled=true` and `dashboards.enabled=true` are set on the
+operator chart, Grafana sidecar installations can discover:
+
+- `InferOps / Platform` for runtime-independent cache, activation, GPU, and
+  gateway signals.
+- `InferOps / vLLM Runtime` for vLLM-native request, token, TTFT, and KV-cache
+  metrics.
+- `InferOps / llama.cpp Runtime` for llama.cpp-native token and request metrics.
+
+See `docs/observability.md` for the metric naming, label-cardinality, and
+runtime-dashboard standards.
 
 ## Limitations
 
 - The dashboard is read-only; activation and scaling changes remain explicit
   `kubectl`, CLI, SDK, or GitOps updates.
-- Metrics are query links and hints. Prometheus remains the source of truth for
-  time-series data.
+- Grafana and Prometheus remain the source of truth for time-series data.
 - GPU request totals are computed from pods visible in the dashboard namespace;
   Node capacity is cluster-visible through the minimal Node read permission.

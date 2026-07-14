@@ -11,6 +11,7 @@ import (
 type Recorder interface {
 	SetGPUSlots(resource string, total, occupied, available float64)
 	SetActivationQueueDepth(depth float64)
+	SetModelCacheInventory(phaseCounts, reservedBytes map[string]float64)
 	ObserveActivationDuration(duration time.Duration)
 	ObserveCacheDownloadDuration(duration time.Duration)
 	IncFailure(controller, reason string)
@@ -21,9 +22,11 @@ type NoOpRecorder struct{}
 
 func (NoOpRecorder) SetGPUSlots(string, float64, float64, float64) {}
 func (NoOpRecorder) SetActivationQueueDepth(float64)               {}
-func (NoOpRecorder) ObserveActivationDuration(time.Duration)       {}
-func (NoOpRecorder) ObserveCacheDownloadDuration(time.Duration)    {}
-func (NoOpRecorder) IncFailure(string, string)                     {}
+func (NoOpRecorder) SetModelCacheInventory(map[string]float64, map[string]float64) {
+}
+func (NoOpRecorder) ObserveActivationDuration(time.Duration)    {}
+func (NoOpRecorder) ObserveCacheDownloadDuration(time.Duration) {}
+func (NoOpRecorder) IncFailure(string, string)                  {}
 
 // ControllerMetrics owns Prometheus collectors for lifecycle controllers.
 // Labels deliberately exclude object names, repositories, and UIDs.
@@ -32,6 +35,8 @@ type ControllerMetrics struct {
 	gpuSlotsOccupied    *prometheus.GaugeVec
 	gpuSlotsAvailable   *prometheus.GaugeVec
 	activationQueue     prometheus.Gauge
+	modelCachePhases    *prometheus.GaugeVec
+	modelCacheReserved  *prometheus.GaugeVec
 	activationDuration  prometheus.Histogram
 	cacheDownload       prometheus.Histogram
 	reconciliationError *prometheus.CounterVec
@@ -59,6 +64,14 @@ func NewControllerMetrics(registerer prometheus.Registerer) (*ControllerMetrics,
 			Name: "inferops_activation_queue_depth",
 			Help: "Model deployments currently waiting for GPU capacity.",
 		}),
+		modelCachePhases: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "inferops_modelcache_phase_count",
+			Help: "ModelCache objects by observed lifecycle phase.",
+		}, []string{"phase"}),
+		modelCacheReserved: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "inferops_modelcache_reserved_bytes",
+			Help: "Reserved model-cache storage bytes by observed lifecycle phase.",
+		}, []string{"phase"}),
 		activationDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "inferops_model_activation_duration_seconds",
 			Help:    "Time from runtime Deployment creation to readiness.",
@@ -87,6 +100,8 @@ func NewControllerMetrics(registerer prometheus.Registerer) (*ControllerMetrics,
 		metrics.gpuSlotsOccupied,
 		metrics.gpuSlotsAvailable,
 		metrics.activationQueue,
+		metrics.modelCachePhases,
+		metrics.modelCacheReserved,
 		metrics.activationDuration,
 		metrics.cacheDownload,
 		metrics.reconciliationError,
@@ -109,6 +124,15 @@ func (m *ControllerMetrics) SetGPUSlots(resource string, total, occupied, availa
 
 func (m *ControllerMetrics) SetActivationQueueDepth(depth float64) {
 	m.activationQueue.Set(depth)
+}
+
+func (m *ControllerMetrics) SetModelCacheInventory(phaseCounts, reservedBytes map[string]float64) {
+	for phase, count := range phaseCounts {
+		m.modelCachePhases.WithLabelValues(phase).Set(count)
+	}
+	for phase, bytes := range reservedBytes {
+		m.modelCacheReserved.WithLabelValues(phase).Set(bytes)
+	}
 }
 
 func (m *ControllerMetrics) ObserveActivationDuration(duration time.Duration) {

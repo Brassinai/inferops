@@ -1,0 +1,188 @@
+{{- if .Values.dashboards.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "inferops-operator.fullname" . }}-llama-cpp-dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inferops-operator.labels" . | nindent 4 }}
+    {{- with .Values.dashboards.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.dashboards.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  inferops-llama-cpp-dashboard.json: |-
+    {
+      "uid": "inferops-llama-cpp",
+      "title": "InferOps / llama.cpp Runtime",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "tags": ["inferops", "llama-cpp"],
+      "time": {
+        "from": "now-1h",
+        "to": "now"
+      },
+      "templating": {
+        "list": [
+          {
+            "name": "target",
+            "type": "query",
+            "datasource": {"type": "prometheus", "uid": "prometheus"},
+            "query": "label_values(llamacpp:tokens_predicted_total, job)",
+            "includeAll": false,
+            "multi": false,
+            "refresh": 1
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "timeseries",
+          "title": "Generation tokens/sec",
+          "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (job) (rate(llamacpp:tokens_predicted_total{job=~\"$target\"}[$__rate_interval]))",
+              "legendFormat": "{{`{{job}}`}}"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "tok/s"}}
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "Prompt tokens/sec",
+          "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (job) (rate(llamacpp:prompt_tokens_total{job=~\"$target\"}[$__rate_interval]))",
+              "legendFormat": "{{`{{job}}`}}"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "tok/s"}}
+        },
+        {
+          "id": 3,
+          "type": "timeseries",
+          "title": "Queued requests",
+          "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (job) (llamacpp:requests_deferred{job=~\"$target\"})",
+              "legendFormat": "{{`{{job}}`}}"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "short"}}
+        },
+        {
+          "id": 4,
+          "type": "timeseries",
+          "title": "Processing requests",
+          "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (job) (llamacpp:requests_processing{job=~\"$target\"})",
+              "legendFormat": "{{`{{job}}`}}"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "short"}}
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "Average generation throughput",
+          "description": "llama.cpp exposes this as a gauge averaged by the runtime.",
+          "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "avg by (job) (llamacpp:predicted_tokens_seconds{job=~\"$target\"})",
+              "legendFormat": "{{`{{job}}`}}"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "tok/s"}}
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "Average prompt throughput",
+          "description": "llama.cpp exposes this as a gauge averaged by the runtime.",
+          "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "avg by (job) (llamacpp:prompt_tokens_seconds{job=~\"$target\"})",
+              "legendFormat": "{{`{{job}}`}}"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "tok/s"}}
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "Total generated tokens",
+          "gridPos": {"h": 8, "w": 8, "x": 0, "y": 16},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (job) (llamacpp:tokens_predicted_total{job=~\"$target\"})",
+              "legendFormat": "{{`{{job}}`}}"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "tokens"}}
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "Total prompt tokens",
+          "gridPos": {"h": 8, "w": 8, "x": 8, "y": 16},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (job) (llamacpp:prompt_tokens_total{job=~\"$target\"})",
+              "legendFormat": "{{`{{job}}`}}"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "tokens"}}
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "Largest observed prompt",
+          "gridPos": {"h": 8, "w": 8, "x": 16, "y": 16},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "max by (job) (llamacpp:n_tokens_max{job=~\"$target\"})",
+              "legendFormat": "{{`{{job}}`}}"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "tokens"}}
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "Model load time p95",
+          "description": "InferOps activation duration from runtime Deployment creation until readiness.",
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 24},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(inferops_model_activation_duration_seconds_bucket[$__rate_interval])))",
+              "legendFormat": "p95"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "s"}}
+        }
+      ]
+    }
+{{- end }}

@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Iterator
+from http.server import ThreadingHTTPServer
 import json
+import threading
 import unittest
+import urllib.error
+import urllib.request
 
 from inferops import App, Client, invoke_web_endpoint, web_endpoint
 from inferops.client import APIResponse
+from inferops.server import EndpointApplication, make_handler
 
 
 class SDKClientTest(unittest.TestCase):
@@ -208,6 +213,73 @@ class SDKCustomEndpointTest(unittest.TestCase):
                     return request
 
 
+class SDKEndpointServerTest(unittest.TestCase):
+    def test_endpoint_server_serves_json_and_streaming_routes(self) -> None:
+        app = App("support")
+
+        @app.model(name="qwen-chat", model="repo/chat")
+        class QwenChat:
+            @web_endpoint(method="POST", path="/chat")
+            async def chat(self, request):
+                return await self.generate(request["prompt"], temperature=0.2)
+
+            @web_endpoint(method="POST", path="/chat/stream")
+            async def stream_chat(self, request):
+                async for chunk in self.generate_stream(request["prompt"], temperature=0.2):
+                    yield chunk
+
+        endpoint_app = EndpointApplication(app, runtime_factory=lambda _model: _FakeRuntime())
+        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(endpoint_app))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base_url = f"http://127.0.0.1:{server.server_port}"
+            chat = _post_json(f"{base_url}/chat", {"prompt": "hello"})
+            chat_with_query = _post_json(f"{base_url}/chat?trace=1", {"prompt": "hello"})
+            stream_body = _post_raw(f"{base_url}/chat/stream", {"prompt": "hello"})
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertEqual(chat, {"text": "reply:hello", "temperature": 0.2})
+        self.assertEqual(chat_with_query, {"text": "reply:hello", "temperature": 0.2})
+        self.assertIn(b'data: {"delta": "hello", "temperature": 0.2}', stream_body)
+        self.assertIn(b'data: {"done": true}', stream_body)
+        self.assertIn(b"data: [DONE]", stream_body)
+
+    def test_endpoint_server_returns_bad_request_for_invalid_json(self) -> None:
+        app = App("support")
+
+        @app.model(name="qwen-chat", model="repo/chat")
+        class QwenChat:
+            @web_endpoint(method="POST", path="/chat")
+            async def chat(self, request):
+                return await self.generate(request["prompt"], temperature=0.2)
+
+        endpoint_app = EndpointApplication(app, runtime_factory=lambda _model: _FakeRuntime())
+        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(endpoint_app))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{server.server_port}/chat",
+                data=b"{",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(request, timeout=5)
+            body = json.loads(ctx.exception.read().decode("utf-8"))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertEqual(ctx.exception.code, 400)
+        self.assertEqual(body["error"]["code"], "invalid_json")
+
+
 class _FakeTransport:
     def __init__(self, *, responses: list[APIResponse | _FakeStreamingResponse]) -> None:
         self.requests = []
@@ -255,6 +327,22 @@ async def _collect_async(stream: AsyncIterator[object] | None) -> list[object]:
     if stream is None:
         return []
     return [item async for item in stream]
+
+
+def _post_json(url: str, payload: dict[str, object]) -> object:
+    body = _post_raw(url, payload)
+    return json.loads(body.decode("utf-8"))
+
+
+def _post_raw(url: str, payload: dict[str, object]) -> bytes:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return response.read()
 
 
 if __name__ == "__main__":

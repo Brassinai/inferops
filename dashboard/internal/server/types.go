@@ -172,8 +172,10 @@ type MetricsLinks struct {
 
 // MetricQuery names one dashboard Prometheus query.
 type MetricQuery struct {
-	Name  string `json:"name"`
-	Query string `json:"query"`
+	Name        string `json:"name"`
+	Category    string `json:"category,omitempty"`
+	Description string `json:"description,omitempty"`
+	Query       string `json:"query"`
 }
 
 // GeneratedYAMLResponse contains sanitized manifests for current deployments.
