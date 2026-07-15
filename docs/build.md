@@ -7,12 +7,12 @@ Registry (GHCR) under the `ghcr.io/brassinai` namespace.
 This guide covers the core images needed before a cluster can run a packaged
 InferOps install:
 
-| Component | Default image | Dockerfile or build target |
+| Component | Default image | Local build or publish target |
 | --- | --- | --- |
-| Operator | `ghcr.io/brassinai/inferops-operator:<tag>` | `make operator-image` |
-| Gateway | `ghcr.io/brassinai/inferops-gateway:<tag>` | `make gateway-image` |
-| Model downloader | `ghcr.io/brassinai/model-downloader:<tag>` | `make model-downloader-build` |
-| Dashboard | `ghcr.io/brassinai/inferops-dashboard:<tag>` | `dashboard/Dockerfile` |
+| Operator | `ghcr.io/brassinai/inferops-operator:<tag>` | `make operator-image` / `make operator-image-push` |
+| Gateway | `ghcr.io/brassinai/inferops-gateway:<tag>` | `make gateway-image` / `make gateway-image-push` |
+| Model downloader | `ghcr.io/brassinai/model-downloader:<tag>` | `make model-downloader-build` / `make model-downloader-push` |
+| Dashboard | `ghcr.io/brassinai/inferops-dashboard:<tag>` | `make dashboard-image` / `make dashboard-image-push` |
 | llama.cpp runtime | `ghcr.io/brassinai/llama-cpp:<tag>` | `runtimes/llama_cpp/Dockerfile` |
 | vLLM runtime | `ghcr.io/brassinai/vllm:<tag>` | `runtimes/vllm/Dockerfile` |
 | SGLang runtime | `ghcr.io/brassinai/sglang:<tag>` | `runtimes/sglang/Dockerfile` |
@@ -28,6 +28,7 @@ Set the registry namespace and image tag once:
 ```bash
 export IMAGE_NAMESPACE=ghcr.io/brassinai
 export IMAGE_TAG=v0.1.0
+export IMAGE_PLATFORMS=linux/amd64,linux/arm64
 ```
 
 Use `ghcr.io/brassinai` for Brassin AI releases if your GitHub user can
@@ -37,6 +38,7 @@ you control, such as:
 ```bash
 export IMAGE_NAMESPACE=ghcr.io/<github-user-or-org>
 export IMAGE_TAG=v0.1.0
+export IMAGE_PLATFORMS=linux/amd64,linux/arm64
 ```
 
 If you publish under a different namespace, install InferOps with Helm image
@@ -81,6 +83,11 @@ echo "$GHCR_TOKEN" | docker login ghcr.io \
 
 ## Build Local Images
 
+Use local builds for development, smoke tests, or kind/OrbStack clusters that
+run the same architecture as your Docker host. These commands produce
+single-platform images. On Apple Silicon, that usually means Linux `arm64`;
+on a typical Linux CI runner, that usually means Linux `amd64`.
+
 Build the control-plane images and model downloader:
 
 ```bash
@@ -91,10 +98,7 @@ make model-downloader-build IMAGE_TAG="$IMAGE_TAG"
 Build the dashboard image:
 
 ```bash
-docker build \
-  --file dashboard/Dockerfile \
-  --tag inferops-dashboard:"$IMAGE_TAG" \
-  .
+make dashboard-image IMAGE_TAG="$IMAGE_TAG"
 ```
 
 Build the llama.cpp runtime image:
@@ -124,44 +128,79 @@ docker build \
   .
 ```
 
-The Makefile builds the operator, gateway, and downloader with local names.
-Retag them with the registry namespace before pushing.
+Do not use these local images as the default release path unless you
+intentionally want to publish only your Docker host architecture. For portable
+GHCR releases, use the multi-platform publish targets below.
 
-## Tag Images for GHCR
+## Publish Multi-Platform Core Images
+
+Use the publish targets for GHCR release images. They build and push a Docker
+manifest list for `IMAGE_PLATFORMS`, so Linux `amd64` and Linux `arm64` users
+can pull the same tag and receive the matching image for their node.
 
 ```bash
-docker tag inferops-operator:"$IMAGE_TAG" \
-  "$IMAGE_NAMESPACE/inferops-operator:$IMAGE_TAG"
-
-docker tag inferops-gateway:"$IMAGE_TAG" \
-  "$IMAGE_NAMESPACE/inferops-gateway:$IMAGE_TAG"
-
-docker tag inferops/model-downloader:"$IMAGE_TAG" \
-  "$IMAGE_NAMESPACE/model-downloader:$IMAGE_TAG"
-
-docker tag inferops-dashboard:"$IMAGE_TAG" \
-  "$IMAGE_NAMESPACE/inferops-dashboard:$IMAGE_TAG"
-
-docker tag inferops/llama-cpp:"$IMAGE_TAG" \
-  "$IMAGE_NAMESPACE/llama-cpp:$IMAGE_TAG"
-
-docker tag inferops/vllm:"$IMAGE_TAG" \
-  "$IMAGE_NAMESPACE/vllm:$IMAGE_TAG"
-
-docker tag inferops/sglang:"$IMAGE_TAG" \
-  "$IMAGE_NAMESPACE/sglang:$IMAGE_TAG"
+make control-plane-images-push
+make model-downloader-push
+make dashboard-image-push
 ```
 
-## Push Images
+If you did not export the variables above, pass literal values instead of
+empty shell references:
 
 ```bash
-docker push "$IMAGE_NAMESPACE/inferops-operator:$IMAGE_TAG"
-docker push "$IMAGE_NAMESPACE/inferops-gateway:$IMAGE_TAG"
-docker push "$IMAGE_NAMESPACE/model-downloader:$IMAGE_TAG"
-docker push "$IMAGE_NAMESPACE/inferops-dashboard:$IMAGE_TAG"
-docker push "$IMAGE_NAMESPACE/llama-cpp:$IMAGE_TAG"
-docker push "$IMAGE_NAMESPACE/vllm:$IMAGE_TAG"
-docker push "$IMAGE_NAMESPACE/sglang:$IMAGE_TAG"
+make control-plane-images-push \
+  IMAGE_NAMESPACE=ghcr.io/brassinai \
+  IMAGE_TAG=v0.1.0 \
+  IMAGE_PLATFORMS=linux/amd64,linux/arm64
+```
+
+Check the pushed manifests before installing:
+
+```bash
+docker buildx imagetools inspect "$IMAGE_NAMESPACE/inferops-operator:$IMAGE_TAG"
+docker buildx imagetools inspect "$IMAGE_NAMESPACE/inferops-gateway:$IMAGE_TAG"
+docker buildx imagetools inspect "$IMAGE_NAMESPACE/model-downloader:$IMAGE_TAG"
+docker buildx imagetools inspect "$IMAGE_NAMESPACE/inferops-dashboard:$IMAGE_TAG"
+```
+
+Each manifest should include the platforms you published, for example
+`linux/amd64` and `linux/arm64`.
+
+## Publish Runtime Images
+
+Runtime images inherit stronger architecture constraints from their upstream
+engine images. Build and push only the platform variants that the upstream base
+image supports and that your deployment needs.
+
+For portable runtimes whose base image supports both platforms, publish with
+`buildx`:
+
+```bash
+docker buildx build \
+  --platform "$IMAGE_PLATFORMS" \
+  --file runtimes/llama_cpp/Dockerfile \
+  --tag "$IMAGE_NAMESPACE/llama-cpp:$IMAGE_TAG" \
+  --push \
+  .
+```
+
+For GPU runtimes, most clusters are Linux `amd64`; publish that platform unless
+you have tested an ARM GPU base image:
+
+```bash
+docker buildx build \
+  --platform linux/amd64 \
+  --file runtimes/vllm/Dockerfile \
+  --tag "$IMAGE_NAMESPACE/vllm:$IMAGE_TAG" \
+  --push \
+  .
+
+docker buildx build \
+  --platform linux/amd64 \
+  --file runtimes/sglang/Dockerfile \
+  --tag "$IMAGE_NAMESPACE/sglang:$IMAGE_TAG" \
+  --push \
+  .
 ```
 
 After the first push, set the GHCR package visibility and access policy in

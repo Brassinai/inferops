@@ -2,7 +2,16 @@ GO ?= go
 GOFMT ?= gofmt
 HELM ?= helm
 DOCKER ?= docker
-IMAGE_TAG ?= dev
+DOCKER_BUILDX ?= $(DOCKER) buildx
+DEFAULT_IMAGE_NAMESPACE := ghcr.io/brassinai
+DEFAULT_IMAGE_TAG := dev
+DEFAULT_IMAGE_PLATFORMS := linux/amd64,linux/arm64
+IMAGE_NAMESPACE ?= $(DEFAULT_IMAGE_NAMESPACE)
+IMAGE_TAG ?= $(DEFAULT_IMAGE_TAG)
+IMAGE_PLATFORMS ?= $(DEFAULT_IMAGE_PLATFORMS)
+PUBLISH_IMAGE_NAMESPACE := $(or $(strip $(IMAGE_NAMESPACE)),$(DEFAULT_IMAGE_NAMESPACE))
+PUBLISH_IMAGE_TAG := $(or $(strip $(IMAGE_TAG)),$(DEFAULT_IMAGE_TAG))
+PUBLISH_IMAGE_PLATFORMS := $(or $(strip $(IMAGE_PLATFORMS)),$(DEFAULT_IMAGE_PLATFORMS))
 
 GO_VERSION ?= 1.22
 PYTHON_VERSION ?= 3.10
@@ -21,7 +30,9 @@ GO_FILES := $(shell find . -type f -name '*.go' -not -path './vendor/*' -not -pa
 CHARTS := $(sort $(dir $(wildcard deploy/helm/*/Chart.yaml)))
 
 .PHONY: help setup tools-check fmt fmt-check test vet python-check python-test python-package runtime-conformance runtime-conformance-matrix \
-	operator-image gateway-image control-plane-images model-downloader-build model-downloader-test helm-lint helm-template yaml-check schema-check verify
+	operator-image gateway-image dashboard-image control-plane-images model-downloader-build model-downloader-test \
+	operator-image-push gateway-image-push dashboard-image-push control-plane-images-push model-downloader-push \
+	helm-lint helm-template yaml-check schema-check verify
 
 help:
 	@printf '%s\n' \
@@ -39,8 +50,12 @@ help:
 		'  runtime-conformance-matrix Validate live vLLM and SGLang release candidates' \
 		'  operator-image Build the operator container image' \
 		'  gateway-image  Build the gateway container image' \
+		'  dashboard-image Build the dashboard container image' \
 		'  control-plane-images Build operator and gateway container images' \
 		'  model-downloader-build Build the cache downloader container image' \
+		'  control-plane-images-push Build and push multi-platform operator and gateway images' \
+		'  dashboard-image-push Build and push the multi-platform dashboard image' \
+		'  model-downloader-push Build and push the multi-platform cache downloader image' \
 		'  model-downloader-test  Run cache downloader unit tests' \
 		'  helm-lint      Lint all Helm charts' \
 		'  helm-template  Render all Helm charts' \
@@ -126,13 +141,19 @@ runtime-conformance-matrix:
 operator-image:
 	$(DOCKER) build \
 		--file operator/Dockerfile \
-		--tag inferops-operator:$(IMAGE_TAG) \
+		--tag inferops-operator:$(PUBLISH_IMAGE_TAG) \
 		.
 
 gateway-image:
 	$(DOCKER) build \
 		--file gateway/Dockerfile \
-		--tag inferops-gateway:$(IMAGE_TAG) \
+		--tag inferops-gateway:$(PUBLISH_IMAGE_TAG) \
+		.
+
+dashboard-image:
+	$(DOCKER) build \
+		--file dashboard/Dockerfile \
+		--tag inferops-dashboard:$(PUBLISH_IMAGE_TAG) \
 		.
 
 control-plane-images: operator-image gateway-image
@@ -140,7 +161,41 @@ control-plane-images: operator-image gateway-image
 model-downloader-build:
 	$(DOCKER) build \
 		--file runtimes/model-downloader/Dockerfile \
-		--tag inferops/model-downloader:$(IMAGE_TAG) \
+		--tag inferops/model-downloader:$(PUBLISH_IMAGE_TAG) \
+		.
+
+operator-image-push:
+	$(DOCKER_BUILDX) build \
+		--platform $(PUBLISH_IMAGE_PLATFORMS) \
+		--file operator/Dockerfile \
+		--tag $(PUBLISH_IMAGE_NAMESPACE)/inferops-operator:$(PUBLISH_IMAGE_TAG) \
+		--push \
+		.
+
+gateway-image-push:
+	$(DOCKER_BUILDX) build \
+		--platform $(PUBLISH_IMAGE_PLATFORMS) \
+		--file gateway/Dockerfile \
+		--tag $(PUBLISH_IMAGE_NAMESPACE)/inferops-gateway:$(PUBLISH_IMAGE_TAG) \
+		--push \
+		.
+
+dashboard-image-push:
+	$(DOCKER_BUILDX) build \
+		--platform $(PUBLISH_IMAGE_PLATFORMS) \
+		--file dashboard/Dockerfile \
+		--tag $(PUBLISH_IMAGE_NAMESPACE)/inferops-dashboard:$(PUBLISH_IMAGE_TAG) \
+		--push \
+		.
+
+control-plane-images-push: operator-image-push gateway-image-push
+
+model-downloader-push:
+	$(DOCKER_BUILDX) build \
+		--platform $(PUBLISH_IMAGE_PLATFORMS) \
+		--file runtimes/model-downloader/Dockerfile \
+		--tag $(PUBLISH_IMAGE_NAMESPACE)/model-downloader:$(PUBLISH_IMAGE_TAG) \
+		--push \
 		.
 
 model-downloader-test:
