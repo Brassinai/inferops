@@ -160,6 +160,48 @@ class LiveClientSafetyTest(unittest.TestCase):
                 )
             )
 
+    def test_deploy_replace_includes_existing_resource_version(self) -> None:
+        client = live_client()
+        client._cluster = ClusterTarget(namespace="default", context="default")
+
+        class CustomObjects:
+            def __init__(self):
+                self.replaced_body = None
+
+            def get_namespaced_custom_object(self, **_kwargs):
+                return {
+                    "metadata": {
+                        "name": "gpu-vllm-qwen",
+                        "resourceVersion": "12345",
+                    }
+                }
+
+            def replace_namespaced_custom_object(self, **kwargs):
+                self.replaced_body = kwargs["body"]
+
+        custom_api = CustomObjects()
+        client._custom_api = custom_api
+        manifest = {
+            "apiVersion": "inference.inferops.dev/v1alpha1",
+            "kind": "ModelDeployment",
+            "metadata": {"name": "gpu-vllm-qwen"},
+            "spec": {"activation": {"desiredState": "Inactive"}},
+        }
+
+        result = client.deploy(
+            DeployRequest(
+                cluster=client._cluster,
+                app_path="app.py",
+                manifests=[manifest],
+            )
+        )
+
+        self.assertEqual(result["deployments"][0]["action"], "replaced")
+        self.assertEqual(
+            custom_api.replaced_body["metadata"]["resourceVersion"],
+            "12345",
+        )
+
     def test_gpu_list_reports_unknown_when_cluster_pod_list_is_forbidden(self) -> None:
         client = live_client()
 

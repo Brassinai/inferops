@@ -173,6 +173,16 @@ class LiveKubernetesClient(KubernetesClient):
             try:
                 exists = self._modeldeployment_exists(name, namespace)
                 if exists:
+                    live = api.get_namespaced_custom_object(
+                        group="inference.inferops.dev",
+                        version="v1alpha1",
+                        namespace=namespace,
+                        plural="modeldeployments",
+                        name=name,
+                    )
+                    resource_version = live.get("metadata", {}).get("resourceVersion")
+                    if resource_version:
+                        body.setdefault("metadata", {})["resourceVersion"] = resource_version
                     api.replace_namespaced_custom_object(
                         group="inference.inferops.dev",
                         version="v1alpha1",

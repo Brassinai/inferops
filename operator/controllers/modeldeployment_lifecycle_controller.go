@@ -933,7 +933,9 @@ func (r *ModelDeploymentController) ensureRuntimeDeployment(
 	if err := r.client.Get(ctx, key, &refreshed); err != nil {
 		return nil, false, fmt.Errorf("get patched runtime Deployment: %w", err)
 	}
-	if specChanged && refreshed.Generation <= before.Generation {
+	if specChanged &&
+		refreshed.Generation <= before.Generation &&
+		!apiequality.Semantic.DeepEqual(before.Spec, refreshed.Spec) {
 		refreshed.Generation = before.Generation + 1
 	}
 	return &refreshed, false, nil
