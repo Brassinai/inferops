@@ -335,6 +335,37 @@ class CLICommandHandlerTest(unittest.TestCase):
                     ),
                     stderr="",
                 )
+            if "get" in command and "pods" in command:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps(
+                        {
+                            "items": [
+                                {
+                                    "metadata": {"name": "grafana-old"},
+                                    "status": {
+                                        "phase": "Failed",
+                                        "reason": "Evicted",
+                                        "conditions": [
+                                            {"type": "Ready", "status": "False"}
+                                        ],
+                                    },
+                                },
+                                {
+                                    "metadata": {"name": "grafana-current"},
+                                    "status": {
+                                        "phase": "Running",
+                                        "conditions": [
+                                            {"type": "Ready", "status": "True"}
+                                        ],
+                                    },
+                                },
+                            ]
+                        }
+                    ),
+                    stderr="",
+                )
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
         stdout = io.StringIO()

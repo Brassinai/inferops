@@ -406,29 +406,47 @@ def wait_for_grafana_pod(
             "Grafana Service name or check customized chart settings."
         )
     selector_text = ",".join(f"{key}={value}" for key, value in sorted(selector.items()))
-    command = _kubectl_base(cluster)
-    command.extend(
-        (
-            "--namespace",
-            cluster.namespace,
-            "wait",
-            "pod",
-            "--selector",
-            selector_text,
-            "--for=condition=Ready",
-            f"--timeout={timeout}",
+    deadline = time.monotonic() + _timeout_seconds(timeout)
+    last_detail = "no Grafana Pods matched the Service selector"
+    while True:
+        command = _kubectl_base(cluster)
+        command.extend(
+            (
+                "--namespace",
+                cluster.namespace,
+                "get",
+                "pods",
+                "--selector",
+                selector_text,
+                "--output",
+                "json",
+            )
         )
-    )
-    try:
-        (runner or _run_command)(command)
-    except FileNotFoundError as exc:
-        raise CLIError("kubectl executable not found; install kubectl") from exc
-    except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or exc.stdout or "Grafana Pod not Ready").strip()
-        raise CLIError(
-            "Grafana Pod is not Ready. Check the monitoring namespace, Helm "
-            "release status, Pod events, and RBAC for pods. Details: " + detail
-        ) from exc
+        try:
+            completed = (runner or _run_command)(command)
+        except FileNotFoundError as exc:
+            raise CLIError("kubectl executable not found; install kubectl") from exc
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or "kubectl get pods failed").strip()
+            raise CLIError(
+                "could not inspect Grafana Pods. Check the monitoring namespace, "
+                "Helm release status, Pod events, and RBAC for pods. Details: "
+                + detail
+            ) from exc
+
+        payload = _load_json_output(completed.stdout, "Grafana Pod readiness")
+        items = payload.get("items", [])
+        if any(_pod_is_ready(item) for item in items):
+            return
+        last_detail = _summarize_pod_readiness(items)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CLIError(
+                "Grafana Pod is not Ready. Check the monitoring namespace, Helm "
+                "release status, Pod events, and RBAC for pods. Details: "
+                + last_detail
+            )
+        time.sleep(min(2, remaining))
 
 
 def build_grafana_forward_command(
@@ -466,6 +484,49 @@ def find_available_port(address: str, preferred_port: int) -> int:
                 continue
             return port
     raise CLIError(f"no free local port found at or above {preferred_port}")
+
+
+def _timeout_seconds(timeout: str) -> int:
+    unit = timeout[-1]
+    value = int(timeout[:-1])
+    if unit == "s":
+        return value
+    if unit == "m":
+        return value * 60
+    return value * 60 * 60
+
+
+def _pod_is_ready(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    metadata = item.get("metadata", {})
+    status = item.get("status", {})
+    if metadata.get("deletionTimestamp") or status.get("phase") != "Running":
+        return False
+    for condition in status.get("conditions", []):
+        if condition.get("type") == "Ready" and condition.get("status") == "True":
+            return True
+    return False
+
+
+def _summarize_pod_readiness(items: Any) -> str:
+    if not isinstance(items, list) or not items:
+        return "no Grafana Pods matched the Service selector"
+    summaries = []
+    for item in items[:5]:
+        metadata = item.get("metadata", {}) if isinstance(item, dict) else {}
+        status = item.get("status", {}) if isinstance(item, dict) else {}
+        name = metadata.get("name", "unknown")
+        phase = status.get("phase", "Unknown")
+        reason = status.get("reason", "")
+        ready = "Ready" if _pod_is_ready(item) else "NotReady"
+        bits = [str(name), str(phase), ready]
+        if reason:
+            bits.append(str(reason))
+        summaries.append("/".join(bits))
+    if len(items) > 5:
+        summaries.append(f"... {len(items) - 5} more")
+    return "; ".join(summaries)
 
 
 def _read_service(*, cluster: ClusterTarget, service: str, runner=None) -> dict[str, Any]:

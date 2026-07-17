@@ -12,6 +12,7 @@ import textwrap
 import unittest
 
 from inferops_cli import deploy
+from inferops_cli.kube import ClusterTarget
 from inferops_cli.state import load_state, state_path
 from tests.python.fake_kube_client import FakeKubernetesClient
 
@@ -68,6 +69,45 @@ class DeployIdempotencyTest(unittest.TestCase):
 
         self.assertEqual(first["deployments"][0]["action"], "created")
         self.assertEqual(second["deployments"][0]["action"], "unchanged")
+
+    def test_deploy_reapplies_when_local_state_is_stale(self) -> None:
+        source = textwrap.dedent(
+            """
+            import inferops
+
+            app = inferops.App("support")
+
+            @app.model(name="qwen-chat", model="Qwen/Qwen2.5-7B-Instruct")
+            class QwenChat:
+                pass
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            app_path = Path(directory) / "app.py"
+            app_path.write_text(source, encoding="utf-8")
+            fake_client = FakeKubernetesClient()
+
+            first_stdout, _, first_code = self._run(
+                deploy.run,
+                make_args(app=str(app_path)),
+                fake_client,
+            )
+            key = fake_client._resource_key(
+                ClusterTarget(namespace="default"),
+                "qwen-chat",
+            )
+            fake_client._deployments.pop(key)
+            second_stdout, _, second_code = self._run(
+                deploy.run,
+                make_args(app=str(app_path)),
+                fake_client,
+            )
+
+        self.assertEqual(first_code, 0)
+        self.assertEqual(second_code, 0)
+        self.assertEqual(json.loads(first_stdout)["deployments"][0]["action"], "created")
+        self.assertEqual(json.loads(second_stdout)["deployments"][0]["action"], "created")
 
     def test_deploy_stores_spec_hash_not_secrets(self) -> None:
         source = textwrap.dedent(

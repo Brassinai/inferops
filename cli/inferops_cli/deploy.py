@@ -10,8 +10,8 @@ from pathlib import Path
 from inferops import build_manifests
 
 from .app_loader import load_app
-from .errors import ExitCode, run_with_cli_errors
-from .kube import DeployRequest, build_cluster_target, resolve_client
+from .errors import ExitCode, NotFoundError, run_with_cli_errors
+from .kube import DeployRequest, StatusRequest, build_cluster_target, resolve_client
 from .lifecycle import ACTIVATION_POLICIES
 from .options import add_cluster_options
 from .output import CommandResult, emit_result
@@ -73,7 +73,11 @@ def run(args, client=None) -> int:
             spec_hash = _hash_manifest(applied_manifest)
             state_key = f"{cluster.namespace}/{name}"
             stored = deployments_state.get(state_key)
-            if stored and stored.get("last_applied_hash") == spec_hash:
+            if (
+                stored
+                and stored.get("last_applied_hash") == spec_hash
+                and _deployment_exists(k8s_client, cluster, name)
+            ):
                 results.append(
                     {
                         "name": name,
@@ -130,3 +134,11 @@ def _hash_manifest(manifest: dict) -> str:
     spec = manifest.get("spec", {})
     canonical = json.dumps(spec, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _deployment_exists(k8s_client, cluster, name: str) -> bool:
+    try:
+        k8s_client.status(StatusRequest(cluster=cluster, name=name))
+    except NotFoundError:
+        return False
+    return True

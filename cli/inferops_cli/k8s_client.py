@@ -1875,7 +1875,7 @@ class LiveKubernetesClient(KubernetesClient):
             checked,
             "runtime Pod",
         )
-        cache_name = _deployment_cache_name(deployment) or name
+        cache_name = self._resolve_deployment_cache_name(namespace, name, deployment)
         cache_pods = self._list_labeled_pods(
             namespace,
             f"inferops.dev/modelcache={cache_name}",
@@ -1911,7 +1911,7 @@ class LiveKubernetesClient(KubernetesClient):
         """Collect read-only evidence across a deployment's dependent resources."""
         evidence = self._collect_activation_evidence(namespace, name, deployment)
         checked = list(evidence.get("checkedResources", []))
-        cache_name = _deployment_cache_name(deployment) or name
+        cache_name = self._resolve_deployment_cache_name(namespace, name, deployment)
         service_name = str(deployment.get("serviceName") or f"{name}-runtime")
         self._check_custom_resource(
             namespace,
@@ -1926,6 +1926,52 @@ class LiveKubernetesClient(KubernetesClient):
         self._check_nodes(checked)
         evidence["checkedResources"] = checked
         return evidence
+
+    def _resolve_deployment_cache_name(
+        self,
+        namespace: str,
+        name: str,
+        deployment: dict[str, Any],
+    ) -> str:
+        """Resolve the generated ModelCache name for a deployment."""
+        from kubernetes.client.rest import ApiException
+
+        explicit_name = _deployment_cache_name(deployment)
+        if explicit_name:
+            return explicit_name
+
+        try:
+            response = self._custom_objects_api.list_namespaced_custom_object(
+                group="inference.inferops.dev",
+                version="v1alpha1",
+                namespace=namespace,
+                plural="modelcaches",
+                label_selector=f"inferops.dev/modeldeployment={name}",
+            )
+        except ApiException:
+            return name
+
+        items = response.get("items", []) if isinstance(response, dict) else []
+        if not items:
+            return name
+
+        cache_path = ""
+        cache = deployment.get("cache")
+        if isinstance(cache, dict):
+            cache_path = str(cache.get("path") or "")
+        for item in items:
+            item_path = str(
+                item.get("status", {}).get(
+                    "path",
+                    item.get("spec", {}).get("storage", {}).get("path", ""),
+                )
+            )
+            item_name = str(item.get("metadata", {}).get("name", ""))
+            if cache_path and item_path == cache_path and item_name:
+                return item_name
+
+        first_name = str(items[0].get("metadata", {}).get("name", ""))
+        return first_name or name
 
     def _check_custom_resource(
         self,
@@ -2369,7 +2415,7 @@ def _deployment_cache_name(deployment: dict[str, Any]) -> str:
         name = cache.get("name")
         if name:
             return str(name)
-    return str(deployment.get("name", ""))
+    return ""
 
 
 def _event_sort_key(event: Any) -> tuple[str, int]:

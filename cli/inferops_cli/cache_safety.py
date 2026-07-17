@@ -47,6 +47,9 @@ def deployment_cache_relationship(
     if not cache_enabled and not deployment_status.get("state"):
         return "none"
 
+    if owner_name or deployment_path:
+        return "none"
+
     cache_repo = cache.get("spec", {}).get("modelRepo", "")
     cache_revision = cache.get("spec", {}).get("revision") or "main"
     model_spec = deployment_spec.get("model", {})

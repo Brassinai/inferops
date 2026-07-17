@@ -253,6 +253,114 @@ class LiveClientSafetyTest(unittest.TestCase):
         self.assertFalse(result["referencesKnown"])
         self.assertFalse(result["caches"][0]["referencesKnown"])
 
+    def test_diagnose_uses_generated_modelcache_name(self) -> None:
+        client = live_client()
+
+        class Custom:
+            def __init__(self):
+                self.list_plural = ""
+                self.list_selector = ""
+                self.get_plural = ""
+                self.modelcache_get_name = ""
+
+            def list_namespaced_custom_object(self, *, plural, label_selector, **_):
+                self.list_plural = plural
+                self.list_selector = label_selector
+                return {
+                    "items": [
+                        {
+                            "metadata": {"name": "qwen-chat-abc123-cache"},
+                            "spec": {
+                                "storage": {
+                                    "path": "/var/lib/inferops/models/team-a/qwen-chat-abc123-cache"
+                                }
+                            },
+                            "status": {
+                                "phase": "Ready",
+                                "path": "/var/lib/inferops/models/team-a/qwen-chat-abc123-cache",
+                            },
+                        }
+                    ]
+                }
+
+            def get_namespaced_custom_object(self, *, plural, name, **_):
+                self.get_plural = plural
+                self.modelcache_get_name = name
+                return {"status": {"phase": "Ready"}}
+
+        class Core:
+            def __init__(self):
+                self.pod_selectors = []
+
+            def list_namespaced_pod(self, *, label_selector, **_):
+                self.pod_selectors.append(label_selector)
+                return obj(items=[])
+
+            def list_namespaced_event(self, **_):
+                return obj(items=[])
+
+            def read_namespaced_service(self, **_):
+                return obj(spec=obj(type="ClusterIP", ports=[obj(port=8000)]))
+
+            def list_node(self):
+                return obj(items=[])
+
+        class Batch:
+            def __init__(self):
+                self.job_name = ""
+
+            def read_namespaced_job(self, *, name, **_):
+                self.job_name = name
+                raise ApiException(status=404, reason="Not Found")
+
+        class Apps:
+            def read_namespaced_deployment(self, **_):
+                return obj(
+                    status=obj(ready_replicas=1, available_replicas=1, replicas=1)
+                )
+
+        custom = Custom()
+        core = Core()
+        batch = Batch()
+        client._custom_api = custom
+        client._core_api = core
+        client._batch_api = batch
+        client._apps_api = Apps()
+
+        deployment = {
+            "name": "qwen-chat",
+            "namespace": "team-a",
+            "cache": {
+                "state": "Ready",
+                "path": "/var/lib/inferops/models/team-a/qwen-chat-abc123-cache",
+            },
+            "serviceName": "qwen-chat-runtime",
+        }
+
+        evidence = client._collect_diagnose_evidence("team-a", "qwen-chat", deployment)
+
+        self.assertEqual(custom.list_plural, "modelcaches")
+        self.assertEqual(
+            custom.list_selector,
+            "inferops.dev/modeldeployment=qwen-chat",
+        )
+        self.assertEqual(custom.get_plural, "modelcaches")
+        self.assertEqual(custom.modelcache_get_name, "qwen-chat-abc123-cache")
+        self.assertEqual(batch.job_name, "qwen-chat-abc123-cache-download")
+        self.assertIn(
+            "inferops.dev/modelcache=qwen-chat-abc123-cache",
+            core.pod_selectors,
+        )
+        self.assertIn(
+            {
+                "kind": "ModelCache",
+                "namespace": "team-a",
+                "name": "qwen-chat-abc123-cache",
+                "status": "Ready",
+            },
+            evidence["checkedResources"],
+        )
+
     def test_forced_cache_delete_annotates_and_deletes_resource(self) -> None:
         client = live_client()
 
