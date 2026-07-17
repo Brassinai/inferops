@@ -26,6 +26,34 @@ def register(subcommands) -> None:
         help="Optional cache root path for profile-specific configuration.",
     )
     parser.add_argument(
+        "--cache-capacity",
+        help=(
+            "Declared node-local cache capacity such as 100Gi. Without a cache "
+            "node selector, exactly one Ready schedulable cache node must be eligible."
+        ),
+    )
+    parser.add_argument(
+        "--cache-node",
+        help="Annotate one explicit Ready schedulable node with --cache-capacity.",
+    )
+    parser.add_argument(
+        "--cache-node-selector",
+        help=(
+            "Kubernetes node label selector for annotating all matching Ready "
+            "schedulable nodes with --cache-capacity."
+        ),
+    )
+    parser.add_argument(
+        "--cache-node-capacity",
+        action="append",
+        default=[],
+        metavar="NODE=CAPACITY",
+        help=(
+            "Annotate one node with a declared cache capacity. Repeat for "
+            "different capacities, for example node-a=100Gi."
+        ),
+    )
+    parser.add_argument(
         "--compute-profile",
         choices=("cpu", "nvidia-gpu"),
         default="cpu",
@@ -108,6 +136,12 @@ def run(args, client=None) -> int:
                 profile=getattr(args, "profile", "default"),
                 compute_profile=getattr(args, "compute_profile", "cpu"),
                 cache_path=getattr(args, "cache_path", None),
+                cache_capacity=getattr(args, "cache_capacity", None),
+                cache_node=getattr(args, "cache_node", None),
+                cache_node_selector=getattr(args, "cache_node_selector", None),
+                cache_node_capacities=tuple(
+                    getattr(args, "cache_node_capacity", ()) or ()
+                ),
                 tailscale_hostname=getattr(args, "tailscale_hostname", None),
                 exposure=getattr(args, "exposure", None),
                 ingress_class=getattr(args, "ingress_class", None),

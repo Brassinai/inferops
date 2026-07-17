@@ -34,7 +34,8 @@ only pass `--context orbstack`:
 inferops install \
   --context orbstack \
   --profile homelab \
-  --cache-path /var/lib/inferops/models
+  --cache-path /var/lib/inferops/models \
+  --cache-capacity 2Gi
 ```
 
 Generate the `ModelDeployment` manifest:

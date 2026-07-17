@@ -217,7 +217,8 @@ llama.cpp path:
 inferops install \
   --context <cluster-context> \
   --profile homelab \
-  --cache-path /var/lib/inferops/models
+  --cache-path /var/lib/inferops/models \
+  --cache-capacity 500Gi
 ```
 
 For an NVIDIA GPU cluster, make the GPU assumption explicit:
@@ -227,7 +228,8 @@ inferops install \
   --context <cluster-context> \
   --profile homelab \
   --compute-profile nvidia-gpu \
-  --cache-path /var/lib/inferops/models
+  --cache-path /var/lib/inferops/models \
+  --cache-capacity 500Gi
 ```
 
 The compute profile controls install-time operator assumptions. It does not
@@ -284,10 +286,6 @@ OrbStack cluster with the CPU llama.cpp example:
 ```bash
 orb start k8s
 kubectl config use-context orbstack
-
-kubectl --context orbstack annotate node orbstack \
-  inferops.dev/cache-capacity=2Gi \
-  --overwrite
 ```
 
 Create `/var/lib/inferops/models` on the OrbStack node. The helper Pod in
@@ -300,7 +298,8 @@ Install InferOps:
 inferops install \
   --context orbstack \
   --profile homelab \
-  --cache-path /var/lib/inferops/models
+  --cache-path /var/lib/inferops/models \
+  --cache-capacity 2Gi
 ```
 
 Apply and activate the CPU example:

@@ -19,7 +19,8 @@ packaged `nano-vllm`, `vllm`, `sglang`, and `llama-cpp` runtime definitions:
 
 ```bash
 inferops install --profile homelab \
-  --cache-path /var/lib/inferops/models
+  --cache-path /var/lib/inferops/models \
+  --cache-capacity 500Gi
 ```
 
 The default compute profile is CPU-safe for the llama.cpp path. For NVIDIA GPU
@@ -28,7 +29,8 @@ runtime deployments, install with:
 ```bash
 inferops install --profile homelab \
   --compute-profile nvidia-gpu \
-  --cache-path /var/lib/inferops/models
+  --cache-path /var/lib/inferops/models \
+  --cache-capacity 500Gi
 ```
 
 The equivalent lower-level commands are:

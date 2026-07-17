@@ -23,7 +23,8 @@ Install or upgrade the CRDs, operator, gateway, and packaged `nano-vllm`,
 
 ```bash
 inferops install --profile homelab \
-  --cache-path /var/lib/inferops/models
+  --cache-path /var/lib/inferops/models \
+  --cache-capacity 500Gi
 ```
 
 Profiles:
@@ -40,11 +41,23 @@ Compute profiles:
 | `cpu` | Default. Allows cache placement on any Ready cache-capable node. |
 | `nvidia-gpu` | Requires cache nodes to advertise `nvidia.com/gpu` and makes missing GPU capacity a doctor failure. |
 
+Cache capacity options:
+
+| Option | Use case |
+| --- | --- |
+| `--cache-capacity 100Gi` | Annotate the only eligible Ready schedulable cache node. |
+| `--cache-capacity 100Gi --cache-node node-a` | Annotate one explicit node. |
+| `--cache-capacity 100Gi --cache-node-selector inferops.dev/cache=true` | Annotate all matching eligible nodes with the same capacity. |
+| `--cache-node-capacity node-a=100Gi --cache-node-capacity node-b=500Gi` | Annotate multiple nodes with different capacities. |
+
 The command first applies the packaged CRDs with server-side apply, then uses
 repeatable `helm upgrade --install` operations with atomic waits. This explicit
 CRD step is required because Helm does not upgrade files from a chart's
 `crds/` directory. It forwards `--context` and `--kubeconfig` to both
-`kubectl` and Helm. Use
+`kubectl` and Helm. When cache capacity flags are provided, it first validates
+the selected nodes are Ready and schedulable, verifies `--cache-path` is an
+existing reachable host directory on those nodes, and annotates them with
+`inferops.dev/cache-capacity`. Use
 `--tailscale-hostname` only after installing and configuring the Tailscale
 Kubernetes Operator:
 
@@ -71,7 +84,8 @@ For NVIDIA GPU homelabs, make GPU placement explicit:
 ```bash
 inferops install --profile homelab \
   --compute-profile nvidia-gpu \
-  --cache-path /var/lib/inferops/models
+  --cache-path /var/lib/inferops/models \
+  --cache-capacity 500Gi
 ```
 
 When running a CLI development build outside this repository, use
@@ -101,7 +115,7 @@ boundary and authentication layer. See [Self-hosted dashboard](dashboard.md).
 
 ### upgrade
 
-Upgrade installed control-plane images after publishing a new operator or
+Upgrade installed platform images after publishing a new operator, gateway, or
 dashboard tag:
 
 ```bash
@@ -116,9 +130,11 @@ The command applies packaged CRDs, then runs Helm upgrades with
 `--reuse-values` for:
 
 - `inferops-operator`
+- `inferops-gateway`
 - `inferops-dashboard`
 
-It defaults to `ghcr.io/brassinai/inferops-operator:<tag>` and
+It defaults to `ghcr.io/brassinai/inferops-operator:<tag>`,
+`ghcr.io/brassinai/inferops-gateway:<tag>`, and
 `ghcr.io/brassinai/inferops-dashboard:<tag>`. Override repositories only when
 using a mirror or private registry:
 
@@ -126,10 +142,125 @@ using a mirror or private registry:
 inferops upgrade \
   --tag v0.2.0 \
   --operator-image registry.example.com/inferops-operator \
+  --gateway-image registry.example.com/inferops-gateway \
   --dashboard-image registry.example.com/inferops-dashboard
 ```
 
-Use `--skip-dashboard` when the dashboard chart is not installed.
+Upgrade one component without changing the others:
+
+```bash
+inferops upgrade --component operator --tag v0.2.0
+inferops upgrade --component gateway --tag v0.2.0
+inferops upgrade --component dashboard --tag v0.2.0
+```
+
+Use `--skip-dashboard` when the dashboard chart is not installed and you are
+upgrading all components with `--tag`.
+
+### uninstall
+
+Remove the InferOps platform Helm releases without deleting model records or
+node-local model files:
+
+```bash
+inferops uninstall --namespace inferops-system
+```
+
+By default, uninstall removes the operator, gateway, and dashboard Helm
+releases with `helm uninstall --ignore-not-found`. It preserves InferOps CRDs,
+`ModelDeployment`/`ModelCache` records, and the files stored under the
+node-local cache path.
+
+Use `--skip-dashboard` when the dashboard release is not installed. Use
+`--crds` only when you intentionally want to remove InferOps CRDs and all
+InferOps custom resources from the cluster:
+
+```bash
+inferops uninstall --namespace inferops-system --skip-dashboard --crds
+```
+
+Deleting actual model files is a separate high-friction path. It requires the
+host cache path, a simple cache-node label selector, and an exact confirmation
+token:
+
+```bash
+inferops uninstall \
+  --namespace inferops-system \
+  --purge-cache-files \
+  --cache-path /var/lib/inferops/models \
+  --cache-node-selector inferops.dev/cache=true \
+  --confirm-cache-purge DELETE-CACHE-FILES
+```
+
+### observability
+
+Install Prometheus/Grafana separately from the default InferOps install path:
+
+```bash
+inferops observability setup --context orbstack \
+  --namespace inferops-system \
+  --monitoring-namespace monitoring \
+  --grafana-admin-password admin
+```
+
+Subcommands:
+
+| Command | Use case |
+| --- | --- |
+| `observability setup` | Install or upgrade `kube-prometheus-stack`, then enable InferOps `ServiceMonitor` and Grafana dashboard resources. |
+| `observability install --namespace monitoring` | Install or upgrade only Prometheus and Grafana. |
+| `observability enable --namespace inferops-system` | Enable only InferOps `ServiceMonitor` and dashboard ConfigMaps against an existing monitoring stack. |
+| `observability open --namespace monitoring` | Discover Grafana, wait for a Ready Pod, choose a free local port, and keep a `kubectl port-forward` running. |
+
+The stack install uses the `prometheus-community/kube-prometheus-stack` chart,
+enables Grafana dashboard sidecar discovery for ConfigMaps labeled
+`grafana_dashboard=1`, and configures Prometheus to discover ServiceMonitors
+outside the Helm release labels. The InferOps enable step upgrades
+`inferops-operator` and `inferops-gateway` with `--reuse-values`, turning on
+operator/gateway/runtimes `ServiceMonitor` resources and packaged Grafana
+dashboard ConfigMaps.
+
+For homelab/dev, pass an explicit easy password such as
+`--grafana-admin-password admin`. Without that flag, the CLI does not silently
+assume `admin/admin`; use the Secret created by the Grafana chart. Open Grafana
+locally with:
+
+```bash
+inferops observability open --namespace monitoring
+```
+
+If port `3000` is busy, the command picks the next available local port and
+prints the URL. For customized Helm release names or Service labels, pass
+`--service` or `--selector`.
+
+Equivalent Helm commands for operators who already manage monitoring:
+
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts \
+  --force-update
+helm repo update prometheus-community
+helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+  --namespace monitoring \
+  --create-namespace \
+  --atomic \
+  --set grafana.sidecar.dashboards.enabled=true \
+  --set-string grafana.sidecar.dashboards.label=grafana_dashboard \
+  --set-string grafana.sidecar.dashboards.searchNamespace=ALL \
+  --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
+  --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
+  --set-json 'prometheus.prometheusSpec.serviceMonitorNamespaceSelector={}'
+
+helm upgrade inferops-operator deploy/helm/inferops-operator \
+  --namespace inferops-system \
+  --reuse-values \
+  --set serviceMonitor.enabled=true \
+  --set dashboards.enabled=true
+
+helm upgrade inferops-gateway deploy/helm/inferops-gateway \
+  --namespace inferops-system \
+  --reuse-values \
+  --set serviceMonitor.enabled=true
+```
 
 The install profile does not choose the engine for every model. Each
 deployment selects a registered runtime and independently declares whether it
@@ -273,6 +404,7 @@ Start runtime and route traffic.
 inferops activate qwen-chat
 inferops activate qwen-chat --when-full Reject
 inferops activate qwen-chat --when-full ReplaceOldest
+inferops activate qwen-chat --timeout 10m --verbose
 ```
 
 Activation waits up to five minutes for the operator to observe the new
@@ -282,6 +414,51 @@ after the Kubernetes patch is accepted. The command reports `active`,
 while rejection and failure exit nonzero. It reports `superseded` if another
 writer changes the desired state during the wait and `timeout` if no stable
 outcome is observed before the deadline; both exit nonzero.
+
+Text output renders activation as a step checklist:
+
+```text
+[x] spec validated
+[x] runtime resolved
+[x] cache placed/downloaded
+[>] GPU assigned
+[ ] runtime Pod ready
+[ ] model loaded
+[ ] gateway route ready
+```
+
+When activation fails, times out, or remains blocked, the CLI prints an
+InferOps-first diagnosis with the blocking step, blocking resource, reason,
+current conditions, last useful Kubernetes Event, a short cache downloader or
+runtime Pod log tail when available, and suggested fixes. Use `--verbose` or
+`--debug` to include deeper checked-resource evidence in text output. JSON and
+YAML output include the same structured `diagnosis` object for automation.
+
+Activation failure exit codes are stable: `10` for rejected requests, `11` for
+failed activations, `12` for timeouts, and `13` for superseded requests.
+
+### diagnose
+
+Explain why one deployment is not ready, stuck, failed, or surprising.
+
+```bash
+inferops diagnose qwen-chat
+inferops diagnose qwen-chat --verbose
+inferops diagnose qwen-chat -o json
+```
+
+`diagnose` is read-only and deployment-specific. It inspects the
+`ModelDeployment`, related `ModelCache`, cache download Job/Pods, runtime
+Deployment/Pods/logs/events, Service routing, and node GPU/cache-capacity
+signals when RBAC allows. It is safe to run before activation, while
+activation is still reconciling, after a timeout or failure, or after a
+redeploy/status mismatch.
+
+Text output reads like a focused incident report: status, blocking step,
+blocking resource, evidence, problem, and InferOps-first suggested fixes.
+JSON/YAML output expose the same automation fields: `deployment`, `phase`,
+`blockingStep`, `evidence`, `problem`, `suggestedFixes`, and
+`checkedResources`.
 
 The existing `whenFull` policy is preserved unless `--when-full` is supplied.
 Replacement is never inferred: select `ReplaceOldest` or

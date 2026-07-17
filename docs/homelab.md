@@ -71,10 +71,12 @@ The downloader runs as UID/GID `65532` and deliberately uses a
 directory that its non-root downloader cannot write.
 
 Advertise the portion of that filesystem InferOps may reserve on each cache
-node:
+node during install:
 
 ```bash
-kubectl annotate node <node-name> inferops.dev/cache-capacity=500Gi
+inferops install --profile homelab \
+  --cache-path /var/lib/inferops/models \
+  --cache-capacity 500Gi
 ```
 
 This is declared capacity, not a live free-space reading. Set it below the
@@ -100,7 +102,8 @@ then passes it to the operator chart:
 
 ```bash
 inferops install --profile homelab \
-  --cache-path /var/lib/inferops/models
+  --cache-path /var/lib/inferops/models \
+  --cache-capacity 500Gi
 ```
 
 This default install is CPU-safe and works for the portable llama.cpp path. For
@@ -109,7 +112,8 @@ an NVIDIA GPU homelab, require cache placement on GPU-capable nodes:
 ```bash
 inferops install --profile homelab \
   --compute-profile nvidia-gpu \
-  --cache-path /var/lib/inferops/models
+  --cache-path /var/lib/inferops/models \
+  --cache-capacity 500Gi
 ```
 
 To create a private Tailscale ingress for the gateway after the Tailscale
@@ -118,6 +122,7 @@ operator is ready:
 ```bash
 inferops install --profile homelab \
   --cache-path /var/lib/inferops/models \
+  --cache-capacity 500Gi \
   --tailscale-hostname inferops
 ```
 

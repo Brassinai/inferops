@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -10,7 +11,15 @@ import unittest
 
 from inferops_cli.errors import CLIError
 from inferops_cli.helm import HelmInstaller
-from inferops_cli.kube import ClusterTarget, InstallRequest, UpgradeRequest
+from inferops_cli.kube import (
+    ClusterTarget,
+    InstallRequest,
+    ObservabilityEnableRequest,
+    ObservabilityInstallRequest,
+    ObservabilitySetupRequest,
+    UninstallRequest,
+    UpgradeRequest,
+)
 
 
 class HelmInstallerTest(unittest.TestCase):
@@ -68,6 +77,277 @@ class HelmInstallerTest(unittest.TestCase):
         self.assertEqual(response["install"]["computeProfile"], "cpu")
         self.assertEqual(response["install"]["tailscaleHostname"], "inferops")
         self.assertIn("modelruntime/llama-cpp", response["install"]["resources"])
+
+    def test_cache_capacity_annotates_single_eligible_node_after_path_probe(self) -> None:
+        commands: list[list[str]] = []
+        created_manifests: list[dict[str, object]] = []
+
+        def run(command):
+            commands.append(list(command))
+            if command[:3] == ["kubectl", "get", "nodes"]:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps({"items": [self._node("node-a")]}),
+                    stderr="",
+                )
+            if command[:2] == ["kubectl", "create"] and "--filename" in command:
+                manifest_path = Path(command[command.index("--filename") + 1])
+                created_manifests.append(json.loads(manifest_path.read_text()))
+            return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            charts_dir = self._make_charts(Path(directory))
+            response = HelmInstaller(runner=run).install(
+                InstallRequest(
+                    cluster=ClusterTarget(namespace="inferops-system"),
+                    profile="homelab",
+                    cache_path="/mnt/nvme/models",
+                    cache_capacity="100Gi",
+                    charts_dir=str(charts_dir),
+                )
+            )
+
+        annotate_command = next(
+            command for command in commands if "annotate" in command
+        )
+        crd_command = next(command for command in commands if "apply" in command)
+        self.assertLess(commands.index(annotate_command), commands.index(crd_command))
+        self.assertIn("node-a", annotate_command)
+        self.assertIn("inferops.dev/cache-capacity=100Gi", annotate_command)
+        self.assertIn("--overwrite", annotate_command)
+        self.assertEqual(created_manifests[0]["kind"], "Pod")
+        self.assertEqual(created_manifests[0]["metadata"]["namespace"], "inferops-system")
+        self.assertEqual(created_manifests[0]["spec"]["nodeName"], "node-a")
+        self.assertEqual(
+            created_manifests[0]["spec"]["containers"][0]["securityContext"],
+            {
+                "runAsNonRoot": True,
+                "runAsUser": 65534,
+                "allowPrivilegeEscalation": False,
+                "readOnlyRootFilesystem": True,
+                "capabilities": {"drop": ["ALL"]},
+            },
+        )
+        self.assertEqual(
+            created_manifests[0]["spec"]["volumes"][0]["hostPath"],
+            {"path": "/mnt/nvme/models", "type": "Directory"},
+        )
+        self.assertEqual(
+            response["install"]["cacheAnnotations"],
+            [
+                {
+                    "node": "node-a",
+                    "annotation": "inferops.dev/cache-capacity",
+                    "capacity": "100Gi",
+                    "output": "ok",
+                }
+            ],
+        )
+
+    def test_cache_capacity_requires_explicit_target_when_multiple_nodes_match(self) -> None:
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            if command[:3] == ["kubectl", "get", "nodes"]:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps(
+                        {"items": [self._node("node-a"), self._node("node-b")]}
+                    ),
+                    stderr="",
+                )
+            self.fail(f"unexpected command after ambiguous node selection: {command}")
+
+        with tempfile.TemporaryDirectory() as directory:
+            charts_dir = self._make_charts(Path(directory))
+            with self.assertRaisesRegex(CLIError, "multiple Ready schedulable"):
+                HelmInstaller(runner=run).install(
+                    InstallRequest(
+                        cluster=ClusterTarget(namespace="inferops-system"),
+                        profile="homelab",
+                        cache_capacity="100Gi",
+                        charts_dir=str(charts_dir),
+                    )
+                )
+
+        self.assertEqual(len(commands), 1)
+
+    def test_cache_node_selector_and_per_node_capacity_annotate_selected_nodes(self) -> None:
+        selector_commands: list[list[str]] = []
+
+        def run_selector(command):
+            selector_commands.append(list(command))
+            if command[:3] == ["kubectl", "get", "nodes"]:
+                self.assertIn("--selector", command)
+                self.assertIn("inferops.dev/cache=true", command)
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps(
+                        {"items": [self._node("node-a"), self._node("node-b")]}
+                    ),
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            charts_dir = self._make_charts(Path(directory))
+            response = HelmInstaller(runner=run_selector).install(
+                InstallRequest(
+                    cluster=ClusterTarget(namespace="inferops-system"),
+                    profile="homelab",
+                    cache_capacity="100Gi",
+                    cache_node_selector="inferops.dev/cache=true",
+                    charts_dir=str(charts_dir),
+                )
+            )
+
+        self.assertEqual(
+            {
+                annotation["node"]: annotation["capacity"]
+                for annotation in response["install"]["cacheAnnotations"]
+            },
+            {"node-a": "100Gi", "node-b": "100Gi"},
+        )
+
+        explicit_commands: list[list[str]] = []
+
+        def run_explicit(command):
+            explicit_commands.append(list(command))
+            if command[:3] == ["kubectl", "get", "nodes"]:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps(
+                        {"items": [self._node("node-a"), self._node("node-b")]}
+                    ),
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            charts_dir = self._make_charts(Path(directory))
+            response = HelmInstaller(runner=run_explicit).install(
+                InstallRequest(
+                    cluster=ClusterTarget(namespace="inferops-system"),
+                    profile="homelab",
+                    cache_node_capacities=("node-a=100Gi", "node-b=500Gi"),
+                    charts_dir=str(charts_dir),
+                )
+            )
+
+        self.assertEqual(
+            {
+                annotation["node"]: annotation["capacity"]
+                for annotation in response["install"]["cacheAnnotations"]
+            },
+            {"node-a": "100Gi", "node-b": "500Gi"},
+        )
+
+    def test_cache_path_probe_failure_stops_before_annotation(self) -> None:
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            if command[:3] == ["kubectl", "get", "nodes"]:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps({"items": [self._node("node-a")]}),
+                    stderr="",
+                )
+            if command[:2] == ["kubectl", "wait"]:
+                raise subprocess.CalledProcessError(
+                    1,
+                    command,
+                    stderr="pod failed to mount hostPath",
+                )
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            charts_dir = self._make_charts(Path(directory))
+            with self.assertRaisesRegex(CLIError, "not reachable on node 'node-a'"):
+                HelmInstaller(runner=run).install(
+                    InstallRequest(
+                        cluster=ClusterTarget(namespace="inferops-system"),
+                        profile="homelab",
+                        cache_path="/mnt/nvme/models",
+                        cache_capacity="100Gi",
+                        charts_dir=str(charts_dir),
+                    )
+                )
+
+        self.assertFalse(any("annotate" in command for command in commands))
+        self.assertFalse(
+            any(command[:3] == ["helm", "upgrade", "--install"] for command in commands)
+        )
+
+    def test_rejects_invalid_cache_annotation_options_before_running_kubectl(self) -> None:
+        requests = (
+            InstallRequest(
+                cluster=ClusterTarget(namespace="inferops-system"),
+                profile="homelab",
+                cache_capacity="auto",
+            ),
+            InstallRequest(
+                cluster=ClusterTarget(namespace="inferops-system"),
+                profile="homelab",
+                cache_node="node-a",
+            ),
+            InstallRequest(
+                cluster=ClusterTarget(namespace="inferops-system"),
+                profile="homelab",
+                cache_node_selector="inferops.dev/cache=true",
+            ),
+            InstallRequest(
+                cluster=ClusterTarget(namespace="inferops-system"),
+                profile="homelab",
+                cache_capacity="100Gi",
+                cache_node_capacities=("node-a=100Gi",),
+            ),
+            InstallRequest(
+                cluster=ClusterTarget(namespace="inferops-system"),
+                profile="homelab",
+                cache_node_capacities=("node-a",),
+            ),
+            InstallRequest(
+                cluster=ClusterTarget(namespace="inferops-system"),
+                profile="homelab",
+                cache_node_capacities=("node-a=100Gi", "node-a=500Gi"),
+            ),
+        )
+        for request in requests:
+            with self.subTest(request=request), self.assertRaises(CLIError):
+                HelmInstaller(
+                    runner=lambda command: self.fail("kubectl should not run")
+                ).install(replace(request, charts_dir="/not-used"))
+
+    def test_nvidia_cache_capacity_requires_gpu_eligible_node(self) -> None:
+        def run(command):
+            if command[:3] == ["kubectl", "get", "nodes"]:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps({"items": [self._node("node-a")]}),
+                    stderr="",
+                )
+            self.fail(f"unexpected command after ineligible node selection: {command}")
+
+        with tempfile.TemporaryDirectory() as directory:
+            charts_dir = self._make_charts(Path(directory))
+            with self.assertRaisesRegex(CLIError, "nvidia.com/gpu"):
+                HelmInstaller(runner=run).install(
+                    InstallRequest(
+                        cluster=ClusterTarget(namespace="inferops-system"),
+                        profile="homelab",
+                        compute_profile="nvidia-gpu",
+                        cache_capacity="100Gi",
+                        charts_dir=str(charts_dir),
+                    )
+                )
 
     def test_nvidia_gpu_compute_profile_requires_gpu_cache_nodes(self) -> None:
         commands: list[list[str]] = []
@@ -405,7 +685,7 @@ class HelmInstallerTest(unittest.TestCase):
                     )
                 )
 
-    def test_upgrade_builds_operator_and_dashboard_commands(self) -> None:
+    def test_upgrade_builds_platform_component_commands(self) -> None:
         commands: list[list[str]] = []
 
         def run(command):
@@ -427,8 +707,8 @@ class HelmInstallerTest(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(len(commands), 3)
-        crd_command, operator_command, dashboard_command = commands
+        self.assertEqual(len(commands), 4)
+        crd_command, operator_command, gateway_command, dashboard_command = commands
         self.assertEqual(crd_command[0], "kubectl")
         self.assertIn("--server-side", crd_command)
         self.assertIn("--context", crd_command)
@@ -438,11 +718,19 @@ class HelmInstallerTest(unittest.TestCase):
         self.assertIn("image.tag=v0.2.0", operator_command)
         self.assertIn("serviceMonitor.enabled=true", operator_command)
         self.assertIn("dashboards.enabled=true", operator_command)
+        self.assertEqual(gateway_command[:3], ["helm", "upgrade", "inferops-gateway"])
+        self.assertIn("--reuse-values", gateway_command)
+        self.assertIn("image.repository=ghcr.io/brassinai/inferops-gateway", gateway_command)
+        self.assertIn("image.tag=v0.2.0", gateway_command)
+        self.assertIn("serviceMonitor.enabled=true", gateway_command)
         self.assertEqual(dashboard_command[:3], ["helm", "upgrade", "inferops-dashboard"])
         self.assertIn("--reuse-values", dashboard_command)
         self.assertIn("image.repository=ghcr.io/brassinai/inferops-dashboard", dashboard_command)
         self.assertIn("image.tag=v0.2.0", dashboard_command)
         self.assertEqual(response["upgrade"]["tag"], "v0.2.0")
+        self.assertEqual(response["upgrade"]["operatorTag"], "v0.2.0")
+        self.assertEqual(response["upgrade"]["gatewayTag"], "v0.2.0")
+        self.assertEqual(response["upgrade"]["dashboardTag"], "v0.2.0")
         self.assertTrue(response["upgrade"]["dashboardIncluded"])
         self.assertTrue(response["upgrade"]["observabilityEnabled"])
 
@@ -464,9 +752,301 @@ class HelmInstallerTest(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(len(commands), 2)
+        self.assertEqual(len(commands), 3)
         self.assertEqual(commands[1][:3], ["helm", "upgrade", "inferops-operator"])
+        self.assertEqual(commands[2][:3], ["helm", "upgrade", "inferops-gateway"])
         self.assertFalse(response["upgrade"]["dashboardIncluded"])
+
+    def test_upgrade_can_target_gateway_without_crd_apply(self) -> None:
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            charts_dir = self._make_charts(Path(directory))
+            response = HelmInstaller(runner=run).upgrade(
+                UpgradeRequest(
+                    cluster=ClusterTarget(namespace="inferops-system"),
+                    component="gateway",
+                    tag="v0.2.1",
+                    charts_dir=str(charts_dir),
+                )
+            )
+
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0][:3], ["helm", "upgrade", "inferops-gateway"])
+        self.assertIn("image.tag=v0.2.1", commands[0])
+        self.assertEqual(response["upgrade"]["crds"]["status"], "skipped")
+        self.assertEqual(response["upgrade"]["component"], "gateway")
+        self.assertIsNone(response["upgrade"]["operatorTag"])
+        self.assertEqual(response["upgrade"]["gatewayTag"], "v0.2.1")
+
+    def test_uninstall_preserves_crds_and_cache_files_by_default(self) -> None:
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout="removed\n", stderr="")
+
+        response = HelmInstaller(runner=run).uninstall(
+            UninstallRequest(
+                cluster=ClusterTarget(
+                    namespace="inferops-system",
+                    context="prod",
+                    kubeconfig="/tmp/kubeconfig",
+                )
+            )
+        )
+
+        self.assertEqual(len(commands), 3)
+        self.assertEqual(commands[0][:3], ["helm", "uninstall", "inferops-operator"])
+        self.assertEqual(commands[1][:3], ["helm", "uninstall", "inferops-gateway"])
+        self.assertEqual(commands[2][:3], ["helm", "uninstall", "inferops-dashboard"])
+        for command in commands:
+            self.assertIn("--ignore-not-found", command)
+            self.assertIn("--wait", command)
+            self.assertIn("--kube-context", command)
+            self.assertIn("--kubeconfig", command)
+        self.assertFalse(response["uninstall"]["crdsDeleted"])
+        self.assertTrue(response["uninstall"]["customResourcesPreserved"])
+        self.assertFalse(response["uninstall"]["cacheFilesDeleted"])
+        self.assertEqual(response["uninstall"]["crds"]["status"], "preserved")
+
+    def test_uninstall_can_delete_crds_and_skip_dashboard(self) -> None:
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+        response = HelmInstaller(runner=run).uninstall(
+            UninstallRequest(
+                cluster=ClusterTarget(namespace="inferops-system"),
+                include_dashboard=False,
+                delete_crds=True,
+            )
+        )
+
+        self.assertEqual(len(commands), 3)
+        self.assertEqual(commands[0][:3], ["helm", "uninstall", "inferops-operator"])
+        self.assertEqual(commands[1][:3], ["helm", "uninstall", "inferops-gateway"])
+        self.assertEqual(commands[2][:3], ["kubectl", "delete", "crd"])
+        self.assertNotIn("inferops-dashboard", commands[0] + commands[1])
+        self.assertIn("modeldeployments.inference.inferops.dev", commands[2])
+        self.assertIn("--ignore-not-found", commands[2])
+        self.assertTrue(response["uninstall"]["crdsDeleted"])
+        self.assertFalse(response["uninstall"]["customResourcesPreserved"])
+        self.assertFalse(response["uninstall"]["dashboardIncluded"])
+
+    def test_uninstall_purge_cache_files_requires_confirmation(self) -> None:
+        with self.assertRaisesRegex(CLIError, "--confirm-cache-purge"):
+            HelmInstaller(runner=lambda command: self.fail("kubectl should not run")).uninstall(
+                UninstallRequest(
+                    cluster=ClusterTarget(namespace="inferops-system"),
+                    purge_cache_files=True,
+                    cache_path="/var/lib/inferops/models",
+                    cache_node_selector="inferops.dev/cache=true",
+                )
+            )
+
+    def test_uninstall_purge_cache_files_requires_matching_nodes(self) -> None:
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps({"items": []}),
+                stderr="",
+            )
+
+        with self.assertRaisesRegex(CLIError, "no nodes matched"):
+            HelmInstaller(runner=run).uninstall(
+                UninstallRequest(
+                    cluster=ClusterTarget(namespace="inferops-system"),
+                    purge_cache_files=True,
+                    cache_path="/var/lib/inferops/models",
+                    cache_node_selector="inferops.dev/cache=true",
+                    confirm_cache_purge="DELETE-CACHE-FILES",
+                )
+            )
+
+        self.assertEqual(len(commands), 1)
+        self.assertEqual(commands[0][:3], ["kubectl", "get", "nodes"])
+
+    def test_uninstall_purge_cache_files_builds_scoped_daemonset(self) -> None:
+        commands: list[list[str]] = []
+        manifests: list[dict[str, object]] = []
+
+        def run(command):
+            commands.append(list(command))
+            if command[:3] == ["kubectl", "get", "nodes"]:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps({"items": [self._node("node-a")]}),
+                    stderr="",
+                )
+            if command[:2] == ["kubectl", "apply"]:
+                manifest_path = Path(command[command.index("--filename") + 1])
+                manifests.append(json.loads(manifest_path.read_text()))
+            return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+        response = HelmInstaller(runner=run).uninstall(
+            UninstallRequest(
+                cluster=ClusterTarget(namespace="inferops-system"),
+                include_dashboard=False,
+                purge_cache_files=True,
+                cache_path="/var/lib/inferops/models",
+                cache_node_selector="inferops.dev/cache=true",
+                confirm_cache_purge="DELETE-CACHE-FILES",
+            )
+        )
+
+        self.assertEqual(commands[0][:3], ["kubectl", "get", "nodes"])
+        self.assertEqual(commands[1][:2], ["kubectl", "apply"])
+        self.assertEqual(
+            commands[2][:5],
+            ["kubectl", "--namespace", "inferops-system", "rollout", "status"],
+        )
+        self.assertEqual(commands[3][:2], ["kubectl", "delete"])
+        self.assertEqual(commands[4][:3], ["helm", "uninstall", "inferops-operator"])
+        self.assertEqual(commands[5][:3], ["helm", "uninstall", "inferops-gateway"])
+        daemonset = manifests[0]
+        self.assertEqual(daemonset["kind"], "DaemonSet")
+        template = daemonset["spec"]["template"]["spec"]
+        self.assertEqual(template["nodeSelector"], {"inferops.dev/cache": "true"})
+        self.assertEqual(
+            template["volumes"][0]["hostPath"],
+            {"path": "/var/lib/inferops/models", "type": "Directory"},
+        )
+        self.assertTrue(response["uninstall"]["cacheFilesDeleted"])
+        self.assertEqual(response["uninstall"]["cachePurge"]["status"], "purged")
+
+    def test_observability_install_builds_kube_prometheus_stack_commands(self) -> None:
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+        response = HelmInstaller(runner=run).observability_install(
+            ObservabilityInstallRequest(
+                cluster=ClusterTarget(
+                    namespace="monitoring",
+                    context="orbstack",
+                    kubeconfig="/tmp/kubeconfig",
+                ),
+                grafana_admin_password="admin",
+            )
+        )
+
+        self.assertEqual(len(commands), 3)
+        self.assertEqual(commands[0][:4], ["helm", "repo", "add", "prometheus-community"])
+        self.assertEqual(commands[1][:4], ["helm", "repo", "update", "prometheus-community"])
+        self.assertIn("--force-update", commands[0])
+        self.assertNotIn("--kube-context", commands[0])
+        self.assertNotIn("--kubeconfig", commands[0])
+        self.assertNotIn("--kube-context", commands[1])
+        self.assertNotIn("--kubeconfig", commands[1])
+        stack_command = commands[2]
+        self.assertEqual(stack_command[:3], ["helm", "upgrade", "--install"])
+        self.assertIn("kube-prometheus-stack", stack_command)
+        self.assertIn("--atomic", stack_command)
+        self.assertIn("--create-namespace", stack_command)
+        self.assertIn("grafana.sidecar.dashboards.enabled=true", stack_command)
+        self.assertIn("grafana.sidecar.dashboards.label=grafana_dashboard", stack_command)
+        self.assertIn("grafana.sidecar.dashboards.searchNamespace=ALL", stack_command)
+        self.assertIn(
+            "prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false",
+            stack_command,
+        )
+        self.assertIn(
+            "prometheus.prometheusSpec.serviceMonitorNamespaceSelector={}",
+            stack_command,
+        )
+        self.assertIn("grafana.adminPassword=admin", stack_command)
+        self.assertEqual(
+            response["observability"]["monitoringNamespace"],
+            "monitoring",
+        )
+        self.assertTrue(
+            response["observability"]["grafanaAdminPasswordConfigured"]
+        )
+
+    def test_observability_enable_upgrades_inferops_charts(self) -> None:
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            charts_dir = self._make_charts(Path(directory))
+            response = HelmInstaller(runner=run).observability_enable(
+                ObservabilityEnableRequest(
+                    cluster=ClusterTarget(namespace="inferops-system", context="orbstack"),
+                    charts_dir=str(charts_dir),
+                )
+            )
+
+        self.assertEqual(len(commands), 2)
+        operator_command, gateway_command = commands
+        self.assertEqual(operator_command[:3], ["helm", "upgrade", "inferops-operator"])
+        self.assertIn("--reuse-values", operator_command)
+        self.assertIn("serviceMonitor.enabled=true", operator_command)
+        self.assertIn("dashboards.enabled=true", operator_command)
+        self.assertEqual(gateway_command[:3], ["helm", "upgrade", "inferops-gateway"])
+        self.assertIn("serviceMonitor.enabled=true", gateway_command)
+        self.assertNotIn("dashboards.enabled=true", gateway_command)
+        self.assertIn("servicemonitor/inferops-gateway", response["observability"]["resources"])
+
+    def test_observability_setup_installs_stack_then_enables_inferops(self) -> None:
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            charts_dir = self._make_charts(Path(directory))
+            response = HelmInstaller(runner=run).observability_setup(
+                ObservabilitySetupRequest(
+                    cluster=ClusterTarget(namespace="inferops-system", context="orbstack"),
+                    monitoring_namespace="monitoring",
+                    skip_repo_update=True,
+                    charts_dir=str(charts_dir),
+                )
+            )
+
+        self.assertEqual(len(commands), 4)
+        self.assertEqual(commands[0][:4], ["helm", "repo", "add", "prometheus-community"])
+        self.assertEqual(commands[1][:3], ["helm", "upgrade", "--install"])
+        self.assertEqual(commands[2][:3], ["helm", "upgrade", "inferops-operator"])
+        self.assertEqual(commands[3][:3], ["helm", "upgrade", "inferops-gateway"])
+        self.assertEqual(response["observability"]["operation"], "setup")
+        self.assertEqual(response["observability"]["monitoringNamespace"], "monitoring")
+
+    def test_observability_install_accepts_semver_build_metadata(self) -> None:
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+        HelmInstaller(runner=run).observability_install(
+            ObservabilityInstallRequest(
+                cluster=ClusterTarget(namespace="monitoring"),
+                chart_version="65.1.0+build.1",
+                skip_repo_update=True,
+            )
+        )
+
+        self.assertIn("--version", commands[-1])
+        self.assertIn("65.1.0+build.1", commands[-1])
 
     def test_upgrade_rejects_tagged_repository(self) -> None:
         with self.assertRaisesRegex(CLIError, "without a tag"):
@@ -478,6 +1058,26 @@ class HelmInstallerTest(unittest.TestCase):
                     charts_dir="/not-used",
                 )
             )
+
+    @staticmethod
+    def _node(
+        name: str,
+        *,
+        ready: bool = True,
+        unschedulable: bool = False,
+        allocatable: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        return {
+            "metadata": {"name": name},
+            "spec": {"unschedulable": unschedulable},
+            "status": {
+                "conditions": [
+                    {"type": "Ready", "status": "True" if ready else "False"}
+                ],
+                "allocatable": allocatable or {},
+                "capacity": allocatable or {},
+            },
+        }
 
     @staticmethod
     def _make_charts(

@@ -9,7 +9,7 @@ import json
 from types import SimpleNamespace
 import unittest
 
-from inferops_cli import activate, delete, endpoints, models
+from inferops_cli import activate, delete, diagnose, endpoints, models
 from inferops_cli.k8s_client import LiveKubernetesClient, _summarize_deployment
 from inferops_cli.kube import (
     ActivationRequest,
@@ -30,6 +30,7 @@ def args(**overrides) -> argparse.Namespace:
         "when_full": None,
         "timeout": 30,
         "no_wait": False,
+        "verbose": False,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -184,7 +185,7 @@ class FakeOperationalCommandsTest(unittest.TestCase):
             args(when_full="ReplaceOldest"),
         )
 
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 12)
         self.assertEqual(json.loads(stdout)["outcome"], "timeout")
 
     def test_activate_reports_rejection_and_failure(self) -> None:
@@ -193,9 +194,55 @@ class FakeOperationalCommandsTest(unittest.TestCase):
                 self.client._activation_outcomes[self.key] = outcome
                 stdout, _, code = self._run(activate.run, args())
                 payload = json.loads(stdout)
-                self.assertEqual(code, 1)
+                self.assertEqual(code, 10 if outcome == "rejected" else 11)
                 self.assertEqual(payload["outcome"], outcome)
                 self.assertEqual(payload["deployment"]["phase"], "Failed")
+
+    def test_diagnose_returns_automation_friendly_report(self) -> None:
+        self.client._deployments[self.key]["phase"] = "WaitingForGPU"
+        self.client._deployments[self.key]["desiredState"] = "Active"
+
+        stdout, _, code = self._run(
+            diagnose.run,
+            args(output="json", verbose=True),
+        )
+
+        payload = json.loads(stdout)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["operation"], "diagnose")
+        self.assertEqual(payload["phase"], "WaitingForGPU")
+        self.assertEqual(payload["blockingStep"], "GPU assigned")
+        self.assertEqual(payload["problem"]["reason"], "InsufficientGPU")
+        self.assertIn("evidence", payload)
+        self.assertIn("suggestedFixes", payload)
+        self.assertIn("checkedResources", payload)
+        self.assertNotIn("diagnosis", payload)
+        self.assertEqual(payload["deployment"]["name"], "qwen-chat")
+
+    def test_diagnose_is_safe_before_activation(self) -> None:
+        stdout, _, code = self._run(diagnose.run, args(output="json"))
+
+        payload = json.loads(stdout)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["phase"], "Cached")
+        self.assertEqual(payload["problem"]["reason"], "Inactive")
+        self.assertIn("inferops activate qwen-chat", payload["suggestedFixes"][0])
+
+    def test_diagnose_active_deployment_has_no_fix_or_log_noise(self) -> None:
+        self.client._deployments[self.key]["phase"] = "Active"
+        self.client._deployments[self.key]["desiredState"] = "Active"
+        self.client._deployments[self.key]["modelLoaded"] = True
+        self.client._deployments[self.key]["replicas"] = {"desired": 1, "ready": 1}
+
+        stdout, _, code = self._run(diagnose.run, args(output="json", verbose=True))
+
+        payload = json.loads(stdout)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["blockingStep"], "none")
+        self.assertEqual(payload["problem"]["reason"], "Ready")
+        self.assertEqual(payload["problem"]["resource"], {})
+        self.assertEqual(payload["suggestedFixes"], [])
+        self.assertNotIn("logTail", payload["evidence"])
 
     def test_activate_without_policy_does_not_enable_replacement(self) -> None:
         stdout, _, code = self._run(activate.run, args())
@@ -208,7 +255,7 @@ class FakeOperationalCommandsTest(unittest.TestCase):
 
         lines = stdout.splitlines()
         self.assertEqual(code, 0)
-        self.assertEqual(lines[0], "Active: runtime is ready")
+        self.assertEqual(lines[0], "[>] runtime Pod ready: runtime is ready")
         self.assertIn("Activation for qwen-chat is active", lines[1])
 
     def test_models_endpoints_and_delete_are_cache_explicit(self) -> None:

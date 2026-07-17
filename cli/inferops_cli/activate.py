@@ -6,10 +6,10 @@ from .errors import run_with_cli_errors
 from .kube import ActivationRequest, build_cluster_target, resolve_client
 from .lifecycle import (
     ACTIVATION_POLICIES,
+    activation_details,
+    activation_transition_line,
     lifecycle_exit_code,
     parse_timeout,
-    progress_guidance,
-    progress_line,
 )
 from .options import add_cluster_options
 from .output import CommandResult, emit_result
@@ -43,6 +43,13 @@ def register(subcommands) -> None:
         action="store_true",
         help="Submit the activation request without waiting for observed status.",
     )
+    parser.add_argument(
+        "--verbose",
+        "--debug",
+        dest="verbose",
+        action="store_true",
+        help="Include deeper activation evidence such as conditions, events, and log tails.",
+    )
     add_cluster_options(parser)
     parser.set_defaults(handler=run)
 
@@ -52,6 +59,7 @@ def run(args, client=None) -> int:
 
     def action() -> int:
         cluster = build_cluster_target(args)
+        verbose = getattr(args, "verbose", False)
         response = resolve_client(args, client).activate(
             ActivationRequest(
                 cluster=cluster,
@@ -59,8 +67,9 @@ def run(args, client=None) -> int:
                 when_full=args.when_full,
                 wait=not args.no_wait,
                 timeout_seconds=args.timeout,
+                verbose=verbose,
                 on_transition=(
-                    lambda transition: print(progress_line(transition))
+                    lambda transition: print(activation_transition_line(transition))
                     if args.output == "text"
                     else None
                 ),
@@ -76,7 +85,7 @@ def run(args, client=None) -> int:
                     f"(phase: {deployment['phase']})."
                 ),
                 payload=response,
-                details=progress_guidance(response),
+                details=activation_details(response, verbose=verbose),
             ),
         )
         return lifecycle_exit_code(response)

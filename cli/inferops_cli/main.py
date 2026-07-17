@@ -7,6 +7,7 @@ from . import (
     cache,
     deactivate,
     delete,
+    diagnose,
     deploy,
     deploy_endpoints,
     doctor,
@@ -18,8 +19,10 @@ from . import (
     install,
     logs,
     models,
+    observability,
     serve,
     status,
+    uninstall,
     upgrade,
 )
 from .errors import run_with_cli_errors
@@ -38,6 +41,7 @@ def build_parser() -> CLIArgumentParser:
     cache.register(subcommands)
     deactivate.register(subcommands)
     delete.register(subcommands)
+    diagnose.register(subcommands)
     deploy.register(subcommands)
     deploy_endpoints.register(subcommands)
     doctor.register(subcommands)
@@ -49,8 +53,10 @@ def build_parser() -> CLIArgumentParser:
     install.register(subcommands)
     logs.register(subcommands)
     models.register(subcommands)
+    observability.register(subcommands)
     serve.register(subcommands)
     status.register(subcommands)
+    uninstall.register(subcommands)
     upgrade.register(subcommands)
     return parser
 

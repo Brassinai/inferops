@@ -72,6 +72,7 @@ class ActivationRequest:
     wait: bool = True
     timeout_seconds: float = 300
     poll_interval_seconds: float = 1
+    verbose: bool = False
     on_transition: Callable[[dict[str, Any]], None] | None = field(
         default=None, compare=False, repr=False
     )
@@ -115,6 +116,15 @@ class LogsRequest:
 
 
 @dataclass(frozen=True)
+class DiagnoseRequest:
+    """Inputs for diagnosing one deployment."""
+
+    cluster: ClusterTarget
+    name: str
+    verbose: bool = False
+
+
+@dataclass(frozen=True)
 class InstallRequest:
     """Inputs for an installation request."""
 
@@ -122,6 +132,10 @@ class InstallRequest:
     profile: str
     compute_profile: str = "cpu"
     cache_path: str | None = None
+    cache_capacity: str | None = None
+    cache_node: str | None = None
+    cache_node_selector: str | None = None
+    cache_node_capacities: tuple[str, ...] = ()
     tailscale_hostname: str | None = None
     exposure: str | None = None
     ingress_class: str | None = None
@@ -142,10 +156,59 @@ class UpgradeRequest:
 
     cluster: ClusterTarget
     tag: str
+    component: str | None = None
     operator_image_repository: str = "ghcr.io/brassinai/inferops-operator"
+    gateway_image_repository: str = "ghcr.io/brassinai/inferops-gateway"
     dashboard_image_repository: str = "ghcr.io/brassinai/inferops-dashboard"
     include_dashboard: bool = True
     enable_observability: bool = False
+    charts_dir: str | None = None
+
+
+@dataclass(frozen=True)
+class UninstallRequest:
+    """Inputs for removing the installed InferOps platform."""
+
+    cluster: ClusterTarget
+    include_dashboard: bool = True
+    delete_crds: bool = False
+    purge_cache_files: bool = False
+    cache_path: str | None = None
+    cache_node_selector: str | None = None
+    confirm_cache_purge: str | None = None
+
+
+@dataclass(frozen=True)
+class ObservabilityInstallRequest:
+    """Inputs for installing Prometheus and Grafana."""
+
+    cluster: ClusterTarget
+    release: str = "kube-prometheus-stack"
+    chart: str = "prometheus-community/kube-prometheus-stack"
+    chart_version: str | None = None
+    grafana_admin_password: str | None = None
+    skip_repo_update: bool = False
+
+
+@dataclass(frozen=True)
+class ObservabilityEnableRequest:
+    """Inputs for enabling InferOps observability resources."""
+
+    cluster: ClusterTarget
+    charts_dir: str | None = None
+
+
+@dataclass(frozen=True)
+class ObservabilitySetupRequest:
+    """Inputs for the full observability setup workflow."""
+
+    cluster: ClusterTarget
+    monitoring_namespace: str = "monitoring"
+    release: str = "kube-prometheus-stack"
+    chart: str = "prometheus-community/kube-prometheus-stack"
+    chart_version: str | None = None
+    grafana_admin_password: str | None = None
+    skip_repo_update: bool = False
     charts_dir: str | None = None
 
 
@@ -193,6 +256,9 @@ class KubernetesClient(Protocol):
     def logs(self, request: LogsRequest) -> dict[str, Any]:
         """Fetch deployment logs."""
 
+    def diagnose(self, request: DiagnoseRequest) -> dict[str, Any]:
+        """Diagnose one deployment and its dependent resources."""
+
     def gpu_list(self, cluster: ClusterTarget) -> dict[str, Any]:
         """List GPU inventory."""
 
@@ -207,6 +273,24 @@ class KubernetesClient(Protocol):
 
     def upgrade(self, request: UpgradeRequest) -> dict[str, Any]:
         """Upgrade installed control-plane images."""
+
+    def uninstall(self, request: UninstallRequest) -> dict[str, Any]:
+        """Uninstall the platform Helm releases."""
+
+    def observability_install(
+        self, request: ObservabilityInstallRequest
+    ) -> dict[str, Any]:
+        """Install the Prometheus/Grafana observability stack."""
+
+    def observability_enable(
+        self, request: ObservabilityEnableRequest
+    ) -> dict[str, Any]:
+        """Enable InferOps ServiceMonitors and Grafana dashboards."""
+
+    def observability_setup(
+        self, request: ObservabilitySetupRequest
+    ) -> dict[str, Any]:
+        """Install the stack and enable InferOps observability resources."""
 
     def delete(self, request: NamedRequest) -> dict[str, Any]:
         """Delete one deployment."""

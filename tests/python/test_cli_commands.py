@@ -17,6 +17,7 @@ from inferops_cli import (
     cache,
     deactivate,
     delete,
+    diagnose,
     deploy,
     deploy_endpoints,
     doctor,
@@ -28,8 +29,10 @@ from inferops_cli import (
     logs,
     main,
     models,
+    observability,
     serve,
     status,
+    uninstall,
     upgrade,
 )
 from inferops_cli.errors import CLIError
@@ -58,6 +61,10 @@ def make_args(**overrides) -> argparse.Namespace:
         "profile": "default",
         "compute_profile": "cpu",
         "cache_path": None,
+        "cache_capacity": None,
+        "cache_node": None,
+        "cache_node_selector": None,
+        "cache_node_capacity": [],
         "tailscale_hostname": None,
         "exposure": None,
         "ingress_class": None,
@@ -71,13 +78,31 @@ def make_args(**overrides) -> argparse.Namespace:
         "allow_unauthenticated_exposure": False,
         "charts_dir": None,
         "tag": "dev",
+        "component": None,
         "operator_image": "ghcr.io/brassinai/inferops-operator",
+        "gateway_image": "ghcr.io/brassinai/inferops-gateway",
         "dashboard_image": "ghcr.io/brassinai/inferops-dashboard",
         "skip_dashboard": False,
+        "crds": False,
         "enable_observability": False,
+        "release": "kube-prometheus-stack",
+        "chart": "prometheus-community/kube-prometheus-stack",
+        "chart_version": None,
+        "grafana_admin_password": None,
+        "skip_repo_update": False,
+        "monitoring_namespace": "monitoring",
+        "service": None,
+        "selector": "app.kubernetes.io/name=grafana",
+        "address": "127.0.0.1",
+        "local_port": 3000,
+        "remote_port": 80,
+        "no_reconnect": True,
+        "purge_cache_files": False,
+        "confirm_cache_purge": None,
         "checks": None,
         "no_wait": False,
         "timeout": 300,
+        "verbose": False,
         "watch": False,
         "build": False,
         "no_push": False,
@@ -101,6 +126,7 @@ class CLICommandParserTest(unittest.TestCase):
             "deactivate",
             "deploy",
             "deploy-endpoints",
+            "diagnose",
             "doctor",
             "endpoints",
             "gateway",
@@ -108,8 +134,10 @@ class CLICommandParserTest(unittest.TestCase):
             "install",
             "logs",
             "models",
+            "observability",
             "serve",
             "status",
+            "uninstall",
             "upgrade",
         ):
             self.assertIn(command, help_text)
@@ -125,15 +153,21 @@ class CLICommandParserTest(unittest.TestCase):
         gateway_help = self._parse_help(["gateway", "forward", "--help"])
         cache_help = self._parse_help(["cache", "delete", "--help"])
         doctor_help = self._parse_help(["doctor", "--help"])
+        diagnose_help = self._parse_help(["diagnose", "--help"])
         serve_help = self._parse_help(["serve", "--help"])
         deploy_endpoints_help = self._parse_help(["deploy-endpoints", "--help"])
+        observability_help = self._parse_help(["observability", "setup", "--help"])
+        uninstall_help = self._parse_help(["uninstall", "--help"])
 
         self.assertIn("List GPU capacity, occupancy, and availability", gpu_help)
         self.assertIn("Forward the InferOps gateway Service", gateway_help)
         self.assertIn("Delete one ModelCache", cache_help)
         self.assertIn("Check Kubernetes API, GPUs, cache, gateway", doctor_help)
+        self.assertIn("Explain why one deployment is not ready", diagnose_help)
         self.assertIn("@inferops.web_endpoint", serve_help)
         self.assertIn("@inferops.web_endpoint", deploy_endpoints_help)
+        self.assertIn("kube-prometheus-stack", observability_help)
+        self.assertIn("Uninstall InferOps Helm releases", uninstall_help)
 
     def test_install_help_documents_profile_configuration(self) -> None:
         install_help = self._parse_help(["install", "--help"])
@@ -141,6 +175,10 @@ class CLICommandParserTest(unittest.TestCase):
         for option in (
             "--profile",
             "--cache-path",
+            "--cache-capacity",
+            "--cache-node",
+            "--cache-node-selector",
+            "--cache-node-capacity",
             "--tailscale-hostname",
             "--exposure",
             "--ingress-class",
@@ -157,7 +195,9 @@ class CLICommandParserTest(unittest.TestCase):
 
         for option in (
             "--tag",
+            "--component",
             "--operator-image",
+            "--gateway-image",
             "--dashboard-image",
             "--skip-dashboard",
             "--enable-observability",
@@ -264,6 +304,98 @@ class CLICommandHandlerTest(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertEqual(stdout.getvalue(), "")
         self.assertIn("gateway service name is invalid", stderr.getvalue())
+
+    def test_observability_open_discovers_grafana_and_builds_port_forward(self) -> None:
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            if "get" in command and "services" in command:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps(
+                        {"items": [{"metadata": {"name": "grafana"}}]}
+                    ),
+                    stderr="",
+                )
+            if "get" in command and "service" in command and "grafana" in command:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps(
+                        {
+                            "spec": {
+                                "selector": {
+                                    "app.kubernetes.io/name": "grafana",
+                                    "app.kubernetes.io/instance": "kube-prometheus-stack",
+                                }
+                            }
+                        }
+                    ),
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            exit_code = observability.run_open(
+                make_args(namespace="monitoring", timeout="5s"),
+                runner=run,
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("http://127.0.0.1:", stdout.getvalue())
+        self.assertEqual(commands[-1][0:3], ["kubectl", "--kubeconfig", "/tmp/kubeconfig"])
+        self.assertIn("port-forward", commands[-1])
+        self.assertIn("svc/grafana", commands[-1])
+
+    def test_observability_open_rejects_ambiguous_grafana_services(self) -> None:
+        def run(command):
+            if "get" in command and "services" in command:
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps(
+                        {
+                            "items": [
+                                {"metadata": {"name": "grafana-a"}},
+                                {"metadata": {"name": "grafana-b"}},
+                            ]
+                        }
+                    ),
+                    stderr="",
+                )
+            self.fail(f"unexpected command after ambiguous discovery: {command}")
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            exit_code = observability.run_open(
+                make_args(namespace="monitoring", timeout="5s"),
+                runner=run,
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("multiple Grafana Services", stderr.getvalue())
+
+    def test_observability_open_validates_local_inputs(self) -> None:
+        for overrides, expected in (
+            ({"address": "127.0.0.1 0"}, "local bind address"),
+            ({"timeout": "soon"}, "Grafana readiness timeout"),
+        ):
+            with self.subTest(overrides=overrides):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    exit_code = observability.run_open(
+                        make_args(namespace="monitoring", **overrides),
+                        runner=lambda command: self.fail("kubectl should not run"),
+                    )
+                self.assertEqual(exit_code, 1)
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertIn(expected, stderr.getvalue())
 
     def test_deploy_endpoints_applies_endpoint_app(self) -> None:
         source = textwrap.dedent(
@@ -725,9 +857,90 @@ class CLICommandHandlerTest(unittest.TestCase):
             status_deployment["replacement"]["target"]["name"], "previous-model"
         )
         self.assertEqual(json.loads(deactivated)["outcome"], "inactive")
-        self.assertEqual(rejected_code, 1)
+        self.assertEqual(rejected_code, 10)
         self.assertEqual(json.loads(rejected)["outcome"], "rejected")
         self.assertEqual(rejected_error, "")
+
+    def test_activate_text_renders_checklist_and_diagnosis(self) -> None:
+        fake_client = FakeKubernetesClient()
+        key = fake_client._resource_key(
+            ClusterTarget(namespace="team-a", context="kind-dev"),
+            "qwen-chat",
+        )
+        fake_client._deployments[key] = {
+            "name": "qwen-chat",
+            "namespace": "team-a",
+            "phase": "Cached",
+            "desiredState": "Inactive",
+            "whenFull": "Queue",
+            "runtime": "llama-cpp",
+            "model": "Qwen/Qwen2.5-7B-Instruct",
+            "endpoint": "",
+            "serviceName": "",
+            "assignedNode": "",
+            "assignedGPUs": [],
+            "cache": {"state": "Ready", "nodeName": "node-a", "path": "/cache/qwen"},
+            "replicas": {"desired": 0, "ready": 0},
+            "scaling": {},
+            "modelLoaded": False,
+            "observedGeneration": 1,
+            "generation": 1,
+            "conditions": [],
+        }
+        fake_client._activation_outcomes[key] = "failed"
+
+        stdout, _, exit_code = self._run(
+            activate.run,
+            make_args(name="qwen-chat", output="text", verbose=True),
+            fake_client,
+        )
+
+        self.assertEqual(exit_code, 11)
+        self.assertIn("[>] runtime Pod ready", stdout)
+        self.assertIn("Activation diagnosis:", stdout)
+        self.assertIn("Blocking step: runtime Pod ready", stdout)
+        self.assertIn("Reason: RuntimeFailed", stdout)
+        self.assertIn("Suggested fixes:", stdout)
+
+    def test_diagnose_text_renders_incident_report(self) -> None:
+        fake_client = FakeKubernetesClient()
+        key = fake_client._resource_key(
+            ClusterTarget(namespace="team-a", context="kind-dev"),
+            "qwen-chat",
+        )
+        fake_client._deployments[key] = {
+            "name": "qwen-chat",
+            "namespace": "team-a",
+            "phase": "WaitingForGPU",
+            "desiredState": "Active",
+            "whenFull": "Queue",
+            "runtime": "llama-cpp",
+            "model": "Qwen/Qwen2.5-7B-Instruct",
+            "endpoint": "",
+            "serviceName": "qwen-chat-runtime",
+            "assignedNode": "",
+            "assignedGPUs": [],
+            "cache": {"state": "Ready", "nodeName": "node-a", "path": "/cache/qwen"},
+            "replicas": {"desired": 0, "ready": 0},
+            "scaling": {},
+            "modelLoaded": False,
+            "observedGeneration": 1,
+            "generation": 1,
+            "conditions": [],
+        }
+
+        stdout, _, exit_code = self._run(
+            diagnose.run,
+            make_args(name="qwen-chat", output="text", verbose=True),
+            fake_client,
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Diagnosis for qwen-chat: WaitingForGPU", stdout)
+        self.assertIn("Incident report:", stdout)
+        self.assertIn("Blocking step: GPU assigned", stdout)
+        self.assertIn("Problem: InsufficientGPU", stdout)
+        self.assertIn("Checked resources:", stdout)
 
     def test_command_lifecycle_uses_fake_client(self) -> None:
         source = textwrap.dedent(
@@ -812,6 +1025,19 @@ class CLICommandHandlerTest(unittest.TestCase):
                 make_args(tag="v0.2.0", enable_observability=True),
                 fake_client,
             )
+            observability_stdout, _, _ = self._run(
+                observability.run_setup,
+                make_args(
+                    monitoring_namespace="monitoring",
+                    grafana_admin_password="admin",
+                ),
+                fake_client,
+            )
+            uninstall_stdout, _, _ = self._run(
+                uninstall.run,
+                make_args(skip_dashboard=True, crds=True),
+                fake_client,
+            )
             delete_stdout, _, _ = self._run(
                 delete.run,
                 make_args(name="qwen-chat"),
@@ -849,9 +1075,52 @@ class CLICommandHandlerTest(unittest.TestCase):
         self.assertTrue(
             json.loads(upgrade_stdout)["upgrade"]["observabilityEnabled"]
         )
+        self.assertEqual(
+            json.loads(upgrade_stdout)["upgrade"]["gatewayTag"], "v0.2.0"
+        )
+        self.assertEqual(
+            json.loads(observability_stdout)["observability"]["operation"],
+            "setup",
+        )
+        self.assertTrue(json.loads(uninstall_stdout)["uninstall"]["crdsDeleted"])
+        self.assertFalse(
+            json.loads(uninstall_stdout)["uninstall"]["dashboardIncluded"]
+        )
         self.assertTrue(json.loads(delete_stdout)["deleted"])
         self.assertTrue(json.loads(delete_stdout)["cachePreserved"])
         self.assertEqual(json.loads(init_stdout)["mode"], "placeholder")
+
+    def test_uninstall_fake_client_enforces_cache_purge_confirmation(self) -> None:
+        stdout, stderr, exit_code = self._run(
+            uninstall.run,
+            make_args(
+                purge_cache_files=True,
+                cache_path="/var/lib/inferops/models",
+                cache_node_selector="inferops.dev/cache=true",
+            ),
+            FakeKubernetesClient(),
+        )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("--confirm-cache-purge DELETE-CACHE-FILES", stderr)
+
+    def test_upgrade_can_target_one_component_tag(self) -> None:
+        stdout, _, exit_code = self._run(
+            upgrade.run,
+            make_args(component="gateway", tag="v0.2.1"),
+            FakeKubernetesClient(),
+        )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout)
+        self.assertEqual(payload["upgrade"]["tag"], "v0.2.1")
+        self.assertEqual(payload["upgrade"]["component"], "gateway")
+        self.assertEqual(payload["upgrade"]["gatewayTag"], "v0.2.1")
+        self.assertIsNone(payload["upgrade"]["operatorTag"])
+        self.assertEqual(
+            payload["upgrade"]["resources"], ["deployment/inferops-gateway"]
+        )
 
     def test_runtime_command_reports_invalid_kubeconfig(self) -> None:
         source = textwrap.dedent(

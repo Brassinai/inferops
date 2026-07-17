@@ -39,16 +39,9 @@ kubectl get nodes
 
 InferOps only places node-local model caches on nodes that advertise cache
 capacity. For the CPU example, reserve a small amount of the OrbStack node
-filesystem for InferOps:
-
-```bash
-kubectl --context orbstack annotate node orbstack \
-  inferops.dev/cache-capacity=2Gi \
-  --overwrite
-```
-
-This is declared capacity for InferOps scheduling, not a live disk-space
-measurement.
+filesystem for InferOps by passing `--cache-capacity 2Gi` during install. This
+is declared capacity for InferOps scheduling, not a live disk-space
+measurement, and install will annotate the eligible node for you.
 
 The cache path must also exist on the Kubernetes node because InferOps uses a
 `hostPath` volume with an explicit directory check. Provision
@@ -65,7 +58,8 @@ the chart default images:
 inferops install \
   --context orbstack \
   --profile homelab \
-  --cache-path /var/lib/inferops/models
+  --cache-path /var/lib/inferops/models \
+  --cache-capacity 2Gi
 ```
 
 If you already switched your global kube context, `--context orbstack` is
@@ -73,7 +67,8 @@ optional:
 
 ```bash
 inferops install --profile homelab \
-  --cache-path /var/lib/inferops/models
+  --cache-path /var/lib/inferops/models \
+  --cache-capacity 2Gi
 ```
 
 The default compute profile is CPU-safe for the llama.cpp example. On an
@@ -127,7 +122,8 @@ plugin and one free whole GPU:
 
 ```bash
 inferops install --profile homelab --compute-profile nvidia-gpu \
-  --cache-path /var/lib/inferops/models
+  --cache-path /var/lib/inferops/models \
+  --cache-capacity 80Gi
 inferops doctor --context orbstack --check kubernetes-api --check device-plugin --check gpu-capacity
 inferops gpu list --context orbstack
 kubectl --context orbstack apply -f examples/yaml-deploy/modeldeployment-vllm-gpu.yaml

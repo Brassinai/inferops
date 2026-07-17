@@ -31,6 +31,7 @@ from .kube import (
     CacheDeleteRequest,
     ClusterTarget,
     DeactivationRequest,
+    DiagnoseRequest,
     DeployRequest,
     DoctorRequest,
     EndpointAppDeployRequest,
@@ -38,9 +39,14 @@ from .kube import (
     KubernetesClient,
     LogsRequest,
     NamedRequest,
+    ObservabilityEnableRequest,
+    ObservabilityInstallRequest,
+    ObservabilitySetupRequest,
     StatusRequest,
+    UninstallRequest,
     UpgradeRequest,
 )
+from .lifecycle import activation_diagnosis, deployment_diagnosis_report
 
 CLI_FIELD_MANAGER = "inferops-cli"
 
@@ -317,6 +323,7 @@ class LiveKubernetesClient(KubernetesClient):
             wait=request.wait,
             timeout_seconds=request.timeout_seconds,
             poll_interval_seconds=request.poll_interval_seconds,
+            verbose=request.verbose,
             on_transition=request.on_transition,
         )
 
@@ -434,6 +441,27 @@ class LiveKubernetesClient(KubernetesClient):
             "pod": pod_name,
             "tail": request.tail,
             "lines": lines,
+        }
+
+    def diagnose(self, request: DiagnoseRequest) -> dict[str, Any]:
+        """Diagnose one ModelDeployment without mutating cluster state."""
+        deployment = self._get_modeldeployment(request.name, request.cluster.namespace)
+        summary = _summarize_deployment(deployment)
+        namespace = summary["namespace"]
+        name = summary["name"]
+        evidence = self._collect_diagnose_evidence(namespace, name, summary)
+        report = deployment_diagnosis_report(
+            summary,
+            event=evidence.get("lastEvent"),
+            log_tail=evidence.get("logTail"),
+            checked_resources=evidence.get("checkedResources"),
+            verbose=request.verbose,
+        )
+        return {
+            "operation": "diagnose",
+            "cluster": request.cluster.to_safe_dict(),
+            "deployment": summary,
+            **report,
         }
 
     def gpu_list(self, cluster: ClusterTarget) -> dict[str, Any]:
@@ -607,7 +635,8 @@ class LiveKubernetesClient(KubernetesClient):
                 detail.append(f"mounted by live Pods: {', '.join(pod_refs)}")
             raise CLIError(
                 f"cannot safely delete cache '{request.name}': {'; '.join(detail)}. "
-                "Use --force only after confirming those deployments can lose the cache registration."
+                "Use --force only after confirming those deployments can lose the "
+                "cache registration."
             )
 
         if request.force and (refs or ambiguous_refs or pod_refs):
@@ -714,6 +743,36 @@ class LiveKubernetesClient(KubernetesClient):
         from .helm import HelmInstaller
 
         return HelmInstaller().upgrade(request)
+
+    def uninstall(self, request: UninstallRequest) -> dict[str, Any]:
+        """Uninstall InferOps platform Helm releases."""
+        from .helm import HelmInstaller
+
+        return HelmInstaller().uninstall(request)
+
+    def observability_install(
+        self, request: ObservabilityInstallRequest
+    ) -> dict[str, Any]:
+        """Install or upgrade Prometheus and Grafana."""
+        from .helm import HelmInstaller
+
+        return HelmInstaller().observability_install(request)
+
+    def observability_enable(
+        self, request: ObservabilityEnableRequest
+    ) -> dict[str, Any]:
+        """Enable InferOps observability resources."""
+        from .helm import HelmInstaller
+
+        return HelmInstaller().observability_enable(request)
+
+    def observability_setup(
+        self, request: ObservabilitySetupRequest
+    ) -> dict[str, Any]:
+        """Install the stack and enable InferOps observability."""
+        from .helm import HelmInstaller
+
+        return HelmInstaller().observability_setup(request)
 
     def delete(self, request: NamedRequest) -> dict[str, Any]:
         """Delete one ModelDeployment."""
@@ -829,7 +888,10 @@ class LiveKubernetesClient(KubernetesClient):
                 id="device-plugin",
                 status=CheckStatus.FAIL if gpu_required else CheckStatus.WARN,
                 message="no nodes advertise GPU extended resources",
-                remediation="install the NVIDIA k8s-device-plugin or your GPU vendor's device plugin",
+                remediation=(
+                    "install the NVIDIA k8s-device-plugin or your GPU vendor's "
+                    "device plugin"
+                ),
             )
 
         not_ready_nodes = [
@@ -954,7 +1016,10 @@ class LiveKubernetesClient(KubernetesClient):
         return DoctorCheck(
             id="gpu-capacity",
             status=CheckStatus.PASS,
-            message=f"GPU capacity: {total_cap} total, {total_alloc} allocatable, {occupied} occupied, {available} available",
+            message=(
+                f"GPU capacity: {total_cap} total, {total_alloc} allocatable, "
+                f"{occupied} occupied, {available} available"
+            ),
             details={
                 "totalCapacity": total_cap,
                 "totalAllocatable": total_alloc,
@@ -1090,9 +1155,15 @@ class LiveKubernetesClient(KubernetesClient):
             return DoctorCheck(
                 id="cache",
                 status=CheckStatus.FAIL,
-                message=f"cache root '{cache_root}' probe issues on {len(probe_failures)} node(s)",
+                message=(
+                    f"cache root '{cache_root}' probe issues on "
+                    f"{len(probe_failures)} node(s)"
+                ),
                 details={"failures": probe_failures, "probes": probe_results},
-                remediation="verify the path exists, permissions, and disk space on the reported nodes",
+                remediation=(
+                    "verify the path exists, permissions, and disk space on the "
+                    "reported nodes"
+                ),
             )
 
         return DoctorCheck(
@@ -1347,7 +1418,10 @@ class LiveKubernetesClient(KubernetesClient):
                 id="runtime-class",
                 status=CheckStatus.FAIL,
                 message="referenced RuntimeClasses are missing: " + ", ".join(missing),
-                remediation="create the referenced RuntimeClass or remove runtimeClassName from the workload",
+                remediation=(
+                    "create the referenced RuntimeClass or remove "
+                    "runtimeClassName from the workload"
+                ),
             )
 
         if partial_inspection:
@@ -1409,8 +1483,14 @@ class LiveKubernetesClient(KubernetesClient):
             return DoctorCheck(
                 id="gateway",
                 status=CheckStatus.FAIL,
-                message=f"gateway Deployment has {ready_replicas}/{desired_replicas} ready replicas",
-                remediation="check gateway pod logs and events for crash loops or image pull failures",
+                message=(
+                    f"gateway Deployment has {ready_replicas}/{desired_replicas} "
+                    "ready replicas"
+                ),
+                remediation=(
+                    "check gateway pod logs and events for crash loops or image "
+                    "pull failures"
+                ),
             )
 
         try:
@@ -1680,6 +1760,7 @@ class LiveKubernetesClient(KubernetesClient):
         wait: bool,
         timeout_seconds: float,
         poll_interval_seconds: float,
+        verbose: bool = False,
         on_transition: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         summary = _summarize_deployment(deployment)
@@ -1718,23 +1799,462 @@ class LiveKubernetesClient(KubernetesClient):
 
                 outcome = _lifecycle_outcome(operation, summary)
                 if outcome is not None:
-                    return {
-                        "deployment": summary,
-                        "operation": operation,
-                        "outcome": outcome,
-                        "transitions": transitions,
-                    }
+                    return self._enrich_lifecycle_response(
+                        {
+                            "deployment": summary,
+                            "operation": operation,
+                            "outcome": outcome,
+                            "transitions": transitions,
+                        },
+                        verbose=verbose,
+                    )
 
             if time.monotonic() >= deadline:
-                return {
-                    "deployment": summary,
-                    "operation": operation,
-                    "outcome": "timeout",
-                    "transitions": transitions,
-                }
+                return self._enrich_lifecycle_response(
+                    {
+                        "deployment": summary,
+                        "operation": operation,
+                        "outcome": "timeout",
+                        "transitions": transitions,
+                    },
+                    verbose=verbose,
+                )
 
             time.sleep(poll_interval_seconds)
             current = self._get_modeldeployment(name, namespace)
+
+    def _enrich_lifecycle_response(
+        self,
+        response: dict[str, Any],
+        *,
+        verbose: bool,
+    ) -> dict[str, Any]:
+        """Attach activation diagnosis when the deployment is not ready."""
+        if response.get("operation") != "activate":
+            return response
+        if response.get("outcome") in {"active", "requested"}:
+            return response
+
+        deployment = response.get("deployment", {})
+        namespace = deployment.get("namespace", self._cluster.namespace)
+        name = deployment.get("name", "")
+        try:
+            evidence = self._collect_activation_evidence(namespace, name, deployment)
+        except Exception as exc:
+            evidence = {
+                "checkedResources": [
+                    {
+                        "kind": "ActivationEvidence",
+                        "namespace": namespace,
+                        "name": name,
+                        "status": f"unavailable: {exc}",
+                    }
+                ]
+            }
+        response["diagnosis"] = activation_diagnosis(
+            deployment,
+            outcome=str(response.get("outcome", "")),
+            event=evidence.get("lastEvent"),
+            log_tail=evidence.get("logTail"),
+            checked_resources=evidence.get("checkedResources"),
+            verbose=verbose,
+        )
+        return response
+
+    def _collect_activation_evidence(
+        self,
+        namespace: str,
+        name: str,
+        deployment: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Collect best-effort Kubernetes evidence for a stalled activation."""
+        checked: list[dict[str, Any]] = []
+        runtime_pods = self._list_labeled_pods(
+            namespace,
+            f"inferops.dev/modeldeployment={name}",
+            checked,
+            "runtime Pod",
+        )
+        cache_name = _deployment_cache_name(deployment) or name
+        cache_pods = self._list_labeled_pods(
+            namespace,
+            f"inferops.dev/modelcache={cache_name}",
+            checked,
+            "cache download Pod",
+        )
+
+        log_tail = self._activation_log_tail(
+            namespace,
+            runtime_pods,
+            cache_pods,
+            checked,
+        )
+        event = self._last_activation_event(
+            namespace,
+            name,
+            cache_name,
+            runtime_pods + cache_pods,
+            checked,
+        )
+        return {
+            "lastEvent": event,
+            "logTail": log_tail,
+            "checkedResources": checked,
+        }
+
+    def _collect_diagnose_evidence(
+        self,
+        namespace: str,
+        name: str,
+        deployment: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Collect read-only evidence across a deployment's dependent resources."""
+        evidence = self._collect_activation_evidence(namespace, name, deployment)
+        checked = list(evidence.get("checkedResources", []))
+        cache_name = _deployment_cache_name(deployment) or name
+        service_name = str(deployment.get("serviceName") or f"{name}-runtime")
+        self._check_custom_resource(
+            namespace,
+            "modelcaches",
+            cache_name,
+            "ModelCache",
+            checked,
+        )
+        self._check_job(namespace, f"{cache_name}-download", checked)
+        self._check_runtime_deployment(namespace, service_name, checked)
+        self._check_service(namespace, service_name, checked)
+        self._check_nodes(checked)
+        evidence["checkedResources"] = checked
+        return evidence
+
+    def _check_custom_resource(
+        self,
+        namespace: str,
+        plural: str,
+        name: str,
+        kind: str,
+        checked: list[dict[str, Any]],
+    ) -> None:
+        from kubernetes.client.rest import ApiException
+
+        try:
+            resource = self._custom_objects_api.get_namespaced_custom_object(
+                group="inference.inferops.dev",
+                version="v1alpha1",
+                namespace=namespace,
+                plural=plural,
+                name=name,
+            )
+        except ApiException as exc:
+            checked.append(
+                {
+                    "kind": kind,
+                    "namespace": namespace,
+                    "name": name,
+                    "status": "missing" if _is_not_found(exc) else exc.reason,
+                }
+            )
+            return
+        status = resource.get("status", {})
+        phase = status.get("phase") or status.get("state") or "found"
+        checked.append(
+            {
+                "kind": kind,
+                "namespace": namespace,
+                "name": name,
+                "status": str(phase),
+            }
+        )
+
+    def _check_job(
+        self,
+        namespace: str,
+        name: str,
+        checked: list[dict[str, Any]],
+    ) -> None:
+        from kubernetes.client.rest import ApiException
+
+        try:
+            job = self._batch_v1_api.read_namespaced_job(
+                name=name,
+                namespace=namespace,
+            )
+        except ApiException as exc:
+            checked.append(
+                {
+                    "kind": "Job",
+                    "namespace": namespace,
+                    "name": name,
+                    "status": "missing" if _is_not_found(exc) else exc.reason,
+                }
+            )
+            return
+        status = getattr(job, "status", None)
+        succeeded = getattr(status, "succeeded", None) or 0
+        failed = getattr(status, "failed", None) or 0
+        active = getattr(status, "active", None) or 0
+        checked.append(
+            {
+                "kind": "Job",
+                "namespace": namespace,
+                "name": name,
+                "status": f"active={active} succeeded={succeeded} failed={failed}",
+            }
+        )
+
+    def _check_runtime_deployment(
+        self,
+        namespace: str,
+        name: str,
+        checked: list[dict[str, Any]],
+    ) -> None:
+        from kubernetes.client.rest import ApiException
+
+        try:
+            deployment = self._apps_v1_api.read_namespaced_deployment(
+                name=name,
+                namespace=namespace,
+            )
+        except ApiException as exc:
+            checked.append(
+                {
+                    "kind": "Deployment",
+                    "namespace": namespace,
+                    "name": name,
+                    "status": "missing" if _is_not_found(exc) else exc.reason,
+                }
+            )
+            return
+        status = getattr(deployment, "status", None)
+        ready = getattr(status, "ready_replicas", None) or 0
+        desired = getattr(status, "replicas", None) or 0
+        available = getattr(status, "available_replicas", None) or 0
+        checked.append(
+            {
+                "kind": "Deployment",
+                "namespace": namespace,
+                "name": name,
+                "status": f"ready={ready}/{desired} available={available}",
+            }
+        )
+
+    def _check_service(
+        self,
+        namespace: str,
+        name: str,
+        checked: list[dict[str, Any]],
+    ) -> None:
+        from kubernetes.client.rest import ApiException
+
+        try:
+            service = self._core_v1_api.read_namespaced_service(
+                name=name,
+                namespace=namespace,
+            )
+        except ApiException as exc:
+            checked.append(
+                {
+                    "kind": "Service",
+                    "namespace": namespace,
+                    "name": name,
+                    "status": "missing" if _is_not_found(exc) else exc.reason,
+                }
+            )
+            return
+        spec = getattr(service, "spec", None)
+        service_type = getattr(spec, "type", "") or "ClusterIP"
+        ports = getattr(spec, "ports", None) or []
+        checked.append(
+            {
+                "kind": "Service",
+                "namespace": namespace,
+                "name": name,
+                "status": f"{service_type} ports={len(ports)}",
+            }
+        )
+
+    def _check_nodes(self, checked: list[dict[str, Any]]) -> None:
+        from kubernetes.client.rest import ApiException
+
+        try:
+            nodes = list(self._core_v1_api.list_node().items)
+        except ApiException as exc:
+            checked.append(
+                {
+                    "kind": "NodeList",
+                    "namespace": "",
+                    "name": "cluster",
+                    "status": f"unavailable: {exc.reason}",
+                }
+            )
+            return
+        gpu_nodes = 0
+        cache_nodes = 0
+        for node in nodes:
+            capacity = getattr(getattr(node, "status", None), "capacity", {}) or {}
+            annotations = getattr(getattr(node, "metadata", None), "annotations", {})
+            if any(is_gpu_resource_name(str(key)) for key in capacity):
+                gpu_nodes += 1
+            if annotations and annotations.get("inferops.dev/cache-capacity"):
+                cache_nodes += 1
+        checked.append(
+            {
+                "kind": "NodeList",
+                "namespace": "",
+                "name": "cluster",
+                "status": (
+                    f"{len(nodes)} nodes, {gpu_nodes} GPU nodes, "
+                    f"{cache_nodes} cache-capacity nodes"
+                ),
+            }
+        )
+
+    def _list_labeled_pods(
+        self,
+        namespace: str,
+        selector: str,
+        checked: list[dict[str, Any]],
+        label: str,
+    ) -> list[Any]:
+        from kubernetes.client.rest import ApiException
+
+        try:
+            pods = self._core_v1_api.list_namespaced_pod(
+                namespace=namespace,
+                label_selector=selector,
+            )
+        except ApiException as exc:
+            checked.append(
+                {
+                    "kind": "PodList",
+                    "namespace": namespace,
+                    "name": label,
+                    "status": f"unavailable: {exc.reason}",
+                }
+            )
+            return []
+        checked.append(
+            {
+                "kind": "PodList",
+                "namespace": namespace,
+                "name": label,
+                "status": f"{len(pods.items)} found",
+            }
+        )
+        return list(pods.items)
+
+    def _activation_log_tail(
+        self,
+        namespace: str,
+        runtime_pods: list[Any],
+        cache_pods: list[Any],
+        checked: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        from kubernetes.client.rest import ApiException
+
+        candidates: list[tuple[Any, str]] = []
+        if cache_pods:
+            candidates.extend((pod, "downloader") for pod in cache_pods)
+        if runtime_pods:
+            candidates.extend((pod, "runtime") for pod in runtime_pods)
+        for pod, container in candidates:
+            pod_name = pod.metadata.name
+            try:
+                logs = self._core_v1_api.read_namespaced_pod_log(
+                    name=pod_name,
+                    namespace=namespace,
+                    container=container,
+                    tail_lines=20,
+                )
+            except ApiException as exc:
+                checked.append(
+                    {
+                        "kind": "PodLog",
+                        "namespace": namespace,
+                        "name": pod_name,
+                        "status": f"unavailable: {exc.reason}",
+                    }
+                )
+                continue
+            lines = logs.splitlines() if logs else []
+            checked.append(
+                {
+                    "kind": "PodLog",
+                    "namespace": namespace,
+                    "name": pod_name,
+                    "status": f"{len(lines)} lines",
+                }
+            )
+            if lines:
+                return {
+                    "pod": pod_name,
+                    "namespace": namespace,
+                    "container": container,
+                    "tail": 20,
+                    "lines": lines[-20:],
+                }
+        return None
+
+    def _last_activation_event(
+        self,
+        namespace: str,
+        deployment_name: str,
+        cache_name: str,
+        pods: list[Any],
+        checked: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        from kubernetes.client.rest import ApiException
+
+        field_selectors = [
+            f"involvedObject.name={deployment_name}",
+            f"involvedObject.name={cache_name}",
+            f"involvedObject.name={cache_name}-download",
+        ]
+        field_selectors.extend(
+            f"involvedObject.name={pod.metadata.name}" for pod in pods
+        )
+        events: list[Any] = []
+        for selector in dict.fromkeys(field_selectors):
+            try:
+                response = self._core_v1_api.list_namespaced_event(
+                    namespace=namespace,
+                    field_selector=selector,
+                )
+            except ApiException as exc:
+                checked.append(
+                    {
+                        "kind": "EventList",
+                        "namespace": namespace,
+                        "name": selector,
+                        "status": f"unavailable: {exc.reason}",
+                    }
+                )
+                continue
+            events.extend(response.items)
+        if not events:
+            return None
+        event = max(events, key=_event_sort_key)
+        involved = getattr(event, "involved_object", None)
+        checked.append(
+            {
+                "kind": "Event",
+                "namespace": namespace,
+                "name": getattr(involved, "name", ""),
+                "status": getattr(event, "reason", "") or "observed",
+            }
+        )
+        return {
+            "type": getattr(event, "type", ""),
+            "reason": getattr(event, "reason", ""),
+            "message": getattr(event, "message", ""),
+            "count": getattr(event, "count", None),
+            "lastTimestamp": _event_timestamp(event),
+            "involvedObject": {
+                "kind": getattr(involved, "kind", ""),
+                "namespace": getattr(involved, "namespace", namespace),
+                "name": getattr(involved, "name", ""),
+            },
+        }
 
 
 def _clean_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -1796,7 +2316,7 @@ def _summarize_deployment(deployment: dict[str, Any]) -> dict[str, Any]:
         "cache": {
             key: value
             for key, value in status.get("cache", {}).items()
-            if key in {"state", "nodeName", "path"}
+            if key in {"name", "state", "nodeName", "path"}
         },
         "replicas": {
             key: value
@@ -1841,6 +2361,31 @@ def _summarize_deployment(deployment: dict[str, Any]) -> dict[str, Any]:
                 }
         summary["replacement"] = replacement_summary
     return summary
+
+
+def _deployment_cache_name(deployment: dict[str, Any]) -> str:
+    cache = deployment.get("cache")
+    if isinstance(cache, dict):
+        name = cache.get("name")
+        if name:
+            return str(name)
+    return str(deployment.get("name", ""))
+
+
+def _event_sort_key(event: Any) -> tuple[str, int]:
+    timestamp = _event_timestamp(event)
+    count = getattr(event, "count", 0) or 0
+    return (timestamp, int(count))
+
+
+def _event_timestamp(event: Any) -> str:
+    for attr in ("event_time", "last_timestamp", "first_timestamp"):
+        value = getattr(event, attr, None)
+        if value:
+            return str(value)
+    metadata = getattr(event, "metadata", None)
+    creation = getattr(metadata, "creation_timestamp", None)
+    return str(creation or "")
 
 
 def _status_is_fresh(

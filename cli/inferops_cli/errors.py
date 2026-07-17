@@ -14,6 +14,10 @@ class ExitCode(IntEnum):
     ERROR = 1
     USAGE = 2
     NOT_FOUND = 3
+    LIFECYCLE_REJECTED = 10
+    LIFECYCLE_FAILED = 11
+    LIFECYCLE_TIMEOUT = 12
+    LIFECYCLE_SUPERSEDED = 13
 
 
 class CLIError(Exception):

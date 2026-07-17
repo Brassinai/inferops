@@ -44,7 +44,8 @@ kubectl config use-context orbstack
 kubectl --context orbstack get nodes
 ```
 
-Advertise cache capacity on the OrbStack node:
+This local build path uses raw Helm commands instead of `inferops install`, so
+advertise cache capacity on the OrbStack node manually before installing:
 
 ```bash
 kubectl --context orbstack annotate node orbstack \

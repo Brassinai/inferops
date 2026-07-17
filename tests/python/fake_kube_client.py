@@ -11,15 +11,21 @@ from inferops_cli.kube import (
     CacheDeleteRequest,
     ClusterTarget,
     DeactivationRequest,
+    DiagnoseRequest,
     DeployRequest,
     DoctorRequest,
     EndpointAppDeployRequest,
     InstallRequest,
     LogsRequest,
     NamedRequest,
+    ObservabilityEnableRequest,
+    ObservabilityInstallRequest,
+    ObservabilitySetupRequest,
     StatusRequest,
+    UninstallRequest,
     UpgradeRequest,
 )
+from inferops_cli.lifecycle import activation_diagnosis, deployment_diagnosis_report
 
 
 @dataclass(frozen=True)
@@ -236,7 +242,7 @@ class FakeKubernetesClient:
         if request.on_transition is not None:
             for observed in transitions:
                 request.on_transition(observed)
-        return {
+        response = {
             "mode": "fake",
             "cluster": request.cluster.to_safe_dict(),
             "deployment": deployment.copy(),
@@ -244,6 +250,40 @@ class FakeKubernetesClient:
             "outcome": outcome,
             "transitions": transitions,
         }
+        if outcome in {"failed", "rejected", "timeout", "waiting"}:
+            response["diagnosis"] = activation_diagnosis(
+                deployment.copy(),
+                outcome=outcome,
+                event={
+                    "reason": conditions[0]["reason"],
+                    "message": conditions[0]["message"],
+                    "involvedObject": {
+                        "kind": "ModelDeployment",
+                        "namespace": deployment["namespace"],
+                        "name": deployment["name"],
+                    },
+                },
+                log_tail={
+                    "pod": f"{deployment['name']}-runtime-0",
+                    "namespace": deployment["namespace"],
+                    "container": "runtime",
+                    "tail": 20,
+                    "lines": [
+                        "runtime starting",
+                        conditions[0]["message"],
+                    ],
+                },
+                checked_resources=[
+                    {
+                        "kind": "PodList",
+                        "namespace": deployment["namespace"],
+                        "name": "runtime Pod",
+                        "status": "1 found",
+                    }
+                ],
+                verbose=request.verbose,
+            )
+        return response
 
     def deactivate(self, request: DeactivationRequest) -> dict[str, Any]:
         deployment = self._require_deployment(request)
@@ -362,7 +402,10 @@ class FakeKubernetesClient:
         )
         lines = [
             f"{deployment['name']}: runtime log stream from fake Kubernetes client",
-            f"{deployment['name']}: phase={deployment['phase']} namespace={deployment['namespace']}",
+            (
+                f"{deployment['name']}: phase={deployment['phase']} "
+                f"namespace={deployment['namespace']}"
+            ),
         ]
         return {
             "mode": "fake",
@@ -371,6 +414,72 @@ class FakeKubernetesClient:
             "tail": request.tail,
             "lines": lines[: request.tail],
             "message": "Runtime logs fetched from the fake Kubernetes client.",
+        }
+
+    def diagnose(self, request: DiagnoseRequest) -> dict[str, Any]:
+        deployment = self._require_deployment(request).copy()
+        reason = "RuntimeReady" if deployment["phase"] == "Active" else "RuntimePending"
+        message = "runtime is ready"
+        if deployment["desiredState"] == "Inactive" and deployment["phase"] != "Active":
+            reason = "Inactive"
+            message = "deployment is inactive; no runtime should be running yet"
+        elif deployment["phase"] == "Failed":
+            reason = "RuntimeFailed"
+            message = "runtime failed to become ready"
+        elif deployment["phase"] in {"WaitingForCapacity", "WaitingForGPU"}:
+            reason = "InsufficientGPU"
+            message = "waiting for a compatible GPU"
+        event = {
+            "reason": reason,
+            "message": message,
+            "involvedObject": {
+                "kind": "ModelDeployment",
+                "namespace": deployment["namespace"],
+                "name": deployment["name"],
+            },
+        }
+        checked_resources = [
+            {
+                "kind": "ModelDeployment",
+                "namespace": deployment["namespace"],
+                "name": deployment["name"],
+                "status": deployment["phase"],
+            },
+            {
+                "kind": "ModelCache",
+                "namespace": deployment["namespace"],
+                "name": deployment.get("cache", {}).get("name", deployment["name"]),
+                "status": deployment.get("cache", {}).get("state", "missing"),
+            },
+            {
+                "kind": "PodList",
+                "namespace": deployment["namespace"],
+                "name": "runtime Pod",
+                "status": "1 found" if deployment["phase"] == "Active" else "0 found",
+            },
+        ]
+        report = deployment_diagnosis_report(
+            deployment,
+            event=event,
+            log_tail={
+                "pod": f"{deployment['name']}-runtime-0",
+                "namespace": deployment["namespace"],
+                "container": "runtime",
+                "tail": 20,
+                "lines": [
+                    "runtime probe from fake Kubernetes client",
+                    message,
+                ],
+            },
+            checked_resources=checked_resources,
+            verbose=request.verbose,
+        )
+        return {
+            "mode": "fake",
+            "operation": "diagnose",
+            "cluster": request.cluster.to_safe_dict(),
+            "deployment": deployment,
+            **report,
         }
 
     def gpu_list(self, cluster: ClusterTarget) -> dict[str, Any]:
@@ -440,6 +549,25 @@ class FakeKubernetesClient:
             "computeProfile": request.compute_profile,
             "namespace": request.cluster.namespace,
             "cachePath": request.cache_path,
+            "cacheAnnotations": (
+                [
+                    {
+                        "node": request.cache_node,
+                        "annotation": "inferops.dev/cache-capacity",
+                        "capacity": request.cache_capacity,
+                    }
+                ]
+                if request.cache_node and request.cache_capacity
+                else [
+                    {
+                        "node": item.split("=", 1)[0],
+                        "annotation": "inferops.dev/cache-capacity",
+                        "capacity": item.split("=", 1)[1],
+                    }
+                    for item in request.cache_node_capacities
+                    if "=" in item
+                ]
+            ),
             "tailscaleHostname": request.tailscale_hostname,
             "exposure": exposure,
             "authEnabled": bool(request.gateway_auth_secret),
@@ -454,30 +582,227 @@ class FakeKubernetesClient:
         }
 
     def upgrade(self, request: UpgradeRequest) -> dict[str, Any]:
+        if request.component == "operator":
+            release_tags = {"inferops-operator": request.tag}
+        elif request.component == "gateway":
+            release_tags = {"inferops-gateway": request.tag}
+        elif request.component == "dashboard":
+            if not request.include_dashboard:
+                raise CLIError(
+                    "--component dashboard cannot be used with --skip-dashboard"
+                )
+            release_tags = {"inferops-dashboard": request.tag}
+        elif request.component is None:
+            release_tags = {
+                "inferops-operator": request.tag,
+                "inferops-gateway": request.tag,
+            }
+            if request.include_dashboard:
+                release_tags["inferops-dashboard"] = request.tag
+        else:
+            raise CLIError(f"unsupported upgrade component: {request.component}")
         resources = [
-            "crd/modeldeployments.inference.inferops.dev",
-            "deployment/inferops-operator",
+            f"deployment/{release_name}" for release_name in release_tags
         ]
-        if request.include_dashboard:
-            resources.append("deployment/inferops-dashboard")
+        if "inferops-operator" in release_tags:
+            resources.insert(0, "crd/modeldeployments.inference.inferops.dev")
         upgrade = {
             "namespace": request.cluster.namespace,
             "tag": request.tag,
+            "component": request.component,
             "operatorImage": request.operator_image_repository,
+            "gatewayImage": request.gateway_image_repository,
             "dashboardImage": (
                 request.dashboard_image_repository
-                if request.include_dashboard
+                if "inferops-dashboard" in release_tags
                 else None
             ),
+            "operatorTag": release_tags.get("inferops-operator"),
+            "gatewayTag": release_tags.get("inferops-gateway"),
+            "dashboardTag": release_tags.get("inferops-dashboard"),
             "dashboardIncluded": request.include_dashboard,
             "observabilityEnabled": request.enable_observability,
             "resources": resources,
+            "crds": {
+                "status": (
+                    "applied" if "inferops-operator" in release_tags else "skipped"
+                ),
+                "output": "",
+            },
+            "releases": [
+                {
+                    "name": release_name,
+                    "chart": release_name,
+                    "status": "upgraded",
+                    "imageTag": tag,
+                }
+                for release_name, tag in release_tags.items()
+            ],
         }
         return {
             "mode": "fake",
             "cluster": request.cluster.to_safe_dict(),
             "upgrade": upgrade,
             "message": "Placeholder upgrade executed against the fake Kubernetes client.",
+        }
+
+    def uninstall(self, request: UninstallRequest) -> dict[str, Any]:
+        if request.purge_cache_files:
+            if not request.cache_path:
+                raise CLIError("--purge-cache-files requires --cache-path")
+            if not request.cache_node_selector:
+                raise CLIError("--purge-cache-files requires --cache-node-selector")
+            if request.confirm_cache_purge != "DELETE-CACHE-FILES":
+                raise CLIError(
+                    "--purge-cache-files requires "
+                    "--confirm-cache-purge DELETE-CACHE-FILES"
+                )
+        elif request.cache_path or request.cache_node_selector or request.confirm_cache_purge:
+            raise CLIError(
+                "--cache-path, --cache-node-selector, and "
+                "--confirm-cache-purge require --purge-cache-files"
+            )
+        resources = [
+            "helmrelease/inferops-operator",
+            "helmrelease/inferops-gateway",
+        ]
+        if request.include_dashboard:
+            resources.append("helmrelease/inferops-dashboard")
+        if request.delete_crds:
+            resources.extend(
+                [
+                    "crd/modelcaches.inference.inferops.dev",
+                    "crd/modeldeployments.inference.inferops.dev",
+                    "crd/modelruntimes.inference.inferops.dev",
+                ]
+            )
+        if request.purge_cache_files:
+            resources.append("daemonset/inferops-cache-purge")
+        uninstall = {
+            "namespace": request.cluster.namespace,
+            "dashboardIncluded": request.include_dashboard,
+            "crdsDeleted": request.delete_crds,
+            "customResourcesPreserved": not request.delete_crds,
+            "cacheFilesDeleted": request.purge_cache_files,
+            "resources": resources,
+            "releases": [
+                {"name": resource.removeprefix("helmrelease/"), "status": "uninstalled"}
+                for resource in resources
+                if resource.startswith("helmrelease/")
+            ],
+            "crds": {
+                "status": "deleted" if request.delete_crds else "preserved",
+                "output": "",
+            },
+            "cachePurge": (
+                {
+                    "status": "purged",
+                    "cachePath": request.cache_path,
+                    "nodeSelector": request.cache_node_selector,
+                    "commands": [],
+                }
+                if request.purge_cache_files
+                else None
+            ),
+        }
+        return {
+            "mode": "fake",
+            "cluster": request.cluster.to_safe_dict(),
+            "uninstall": uninstall,
+            "message": "Placeholder uninstall executed against the fake Kubernetes client.",
+        }
+
+    def observability_install(
+        self, request: ObservabilityInstallRequest
+    ) -> dict[str, Any]:
+        observability = {
+            "operation": "install",
+            "monitoringNamespace": request.cluster.namespace,
+            "release": request.release,
+            "chart": request.chart,
+            "chartVersion": request.chart_version,
+            "grafanaAdminPasswordConfigured": bool(request.grafana_admin_password),
+            "resources": [
+                f"namespace/{request.cluster.namespace}",
+                f"helmrelease/{request.release}",
+                "deployment/grafana",
+                "statefulset/prometheus",
+            ],
+        }
+        return {
+            "mode": "fake",
+            "cluster": request.cluster.to_safe_dict(),
+            "observability": observability,
+            "message": (
+                "Placeholder observability install executed against the fake "
+                "Kubernetes client."
+            ),
+        }
+
+    def observability_enable(
+        self, request: ObservabilityEnableRequest
+    ) -> dict[str, Any]:
+        observability = {
+            "operation": "enable",
+            "namespace": request.cluster.namespace,
+            "resources": [
+                "servicemonitor/inferops-operator",
+                "servicemonitor/inferops-gateway",
+                "servicemonitor/inferops-runtimes",
+                "grafana-dashboard/inferops-platform",
+                "grafana-dashboard/inferops-vllm",
+                "grafana-dashboard/inferops-llama-cpp",
+            ],
+        }
+        return {
+            "mode": "fake",
+            "cluster": request.cluster.to_safe_dict(),
+            "observability": observability,
+            "message": (
+                "Placeholder observability enable executed against the fake "
+                "Kubernetes client."
+            ),
+        }
+
+    def observability_setup(
+        self, request: ObservabilitySetupRequest
+    ) -> dict[str, Any]:
+        stack = self.observability_install(
+            ObservabilityInstallRequest(
+                cluster=ClusterTarget(
+                    namespace=request.monitoring_namespace,
+                    context=request.cluster.context,
+                    kubeconfig=request.cluster.kubeconfig,
+                ),
+                release=request.release,
+                chart=request.chart,
+                chart_version=request.chart_version,
+                grafana_admin_password=request.grafana_admin_password,
+                skip_repo_update=request.skip_repo_update,
+            )
+        )["observability"]
+        inferops = self.observability_enable(
+            ObservabilityEnableRequest(
+                cluster=request.cluster,
+                charts_dir=request.charts_dir,
+            )
+        )["observability"]
+        observability = {
+            "operation": "setup",
+            "namespace": request.cluster.namespace,
+            "monitoringNamespace": request.monitoring_namespace,
+            "stack": stack,
+            "inferops": inferops,
+            "resources": stack["resources"] + inferops["resources"],
+        }
+        return {
+            "mode": "fake",
+            "cluster": request.cluster.to_safe_dict(),
+            "observability": observability,
+            "message": (
+                "Placeholder observability setup executed against the fake "
+                "Kubernetes client."
+            ),
         }
 
     def delete(self, request: NamedRequest) -> dict[str, Any]:

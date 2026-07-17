@@ -12,7 +12,8 @@ Use `app_llama.py` for local CPU testing on OrbStack:
 inferops install \
   --context orbstack \
   --profile homelab \
-  --cache-path /var/lib/inferops/models
+  --cache-path /var/lib/inferops/models \
+  --cache-capacity 2Gi
 inferops deploy examples/decorator-deploy/app_llama.py --context orbstack
 inferops activate cpu-smollm-decorator --context orbstack --timeout 10m
 inferops status cpu-smollm-decorator --context orbstack --watch --timeout 10m
@@ -37,7 +38,8 @@ Use `app.py` for GPU testing with vLLM:
 
 ```bash
 inferops install --profile homelab --compute-profile nvidia-gpu \
-  --cache-path /var/lib/inferops/models
+  --cache-path /var/lib/inferops/models \
+  --cache-capacity 80Gi
 inferops deploy examples/decorator-deploy/app.py --context <cluster-context>
 inferops activate gpu-vllm-qwen --context <cluster-context> --timeout 20m
 inferops status gpu-vllm-qwen --context <cluster-context> --watch --timeout 20m
