@@ -65,7 +65,7 @@ spec:
             httpGet:
               path: {{ .Values.runtime.readinessPath | quote }}
               port: http
-            failureThreshold: 60
+            failureThreshold: 90
             periodSeconds: 10
           resources:
             {{- toYaml .Values.resources | nindent 12 }}

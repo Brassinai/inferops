@@ -59,7 +59,8 @@ const (
 	// ProbeFailureThreshold is the default failure threshold for readiness/liveness.
 	ProbeFailureThreshold int32 = 3
 	// StartupProbeFailureThreshold is the startup probe failure threshold.
-	StartupProbeFailureThreshold int32 = 30
+	// Large model loads can take several minutes before the runtime begins serving.
+	StartupProbeFailureThreshold int32 = 90
 )
 
 // RuntimeServiceName returns the stable runtime Service name for a ModelDeployment.

@@ -618,6 +618,16 @@ func TestBuildRuntimeDeploymentVariants(t *testing.T) {
 			},
 		},
 		{
+			name: "startup probe allows slow model initialization",
+			mutate: func(_ *v1alpha1.ModelDeployment, _ *v1alpha1.ModelRuntime) {},
+			check: func(t *testing.T, deployment *appsv1.Deployment) {
+				container := deployment.Spec.Template.Spec.Containers[0]
+				if got := container.StartupProbe.FailureThreshold; got != 90 {
+					t.Fatalf("startup failure threshold = %d, want 90", got)
+				}
+			},
+		},
+		{
 			name: "scheduling constraints",
 			mutate: func(md *v1alpha1.ModelDeployment, _ *v1alpha1.ModelRuntime) {
 				seconds := int64(60)
