@@ -57,16 +57,23 @@ spec:
             httpGet:
               path: {{ .Values.runtime.readinessPath | quote }}
               port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: {{ .Values.runtime.healthPath | quote }}
               port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           startupProbe:
             httpGet:
               path: {{ .Values.runtime.readinessPath | quote }}
               port: http
             failureThreshold: 90
             periodSeconds: 10
+            timeoutSeconds: 5
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:

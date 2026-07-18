@@ -391,6 +391,14 @@ helm-template:
 	@! grep -q -- '- secrets$$' .verify/helm/inferops-dashboard.yaml
 	@$(PYTHON) scripts/check_operator_rbac.py .verify/helm/inferops-operator.yaml
 	@$(PYTHON) scripts/check_tenant_rbac.py .verify/helm/inferops-gateway-tenant.yaml
+	@$(PYTHON) scripts/check_runtime_probes.py .verify/helm/inferops-runtime.yaml \
+		--startup-failure-threshold 90 \
+		--probe-period-seconds 10 \
+		--probe-timeout-seconds 5
+	@$(PYTHON) scripts/check_runtime_probes.py .verify/helm/inferops-runtime-cpu.yaml \
+		--startup-failure-threshold 90 \
+		--probe-period-seconds 10 \
+		--probe-timeout-seconds 5
 	@grep -q 'pathType: Prefix' .verify/helm/inferops-gateway-homelab.yaml
 	@grep -q 'profile: "homelab"' .verify/helm/inferops-operator-homelab.yaml
 	@grep -q 'gpu.required: "false"' .verify/helm/inferops-operator-homelab.yaml
