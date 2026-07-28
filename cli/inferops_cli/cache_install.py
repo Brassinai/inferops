@@ -362,21 +362,60 @@ def _write_cache_probe_manifest(
             "nodeName": node_name,
             "restartPolicy": "Never",
             "automountServiceAccountToken": False,
-            "containers": [
+            "initContainers": [
                 {
-                    "name": "probe",
+                    "name": "prepare",
                     "image": CACHE_PROBE_IMAGE,
-                    "command": ["sh", "-c", "df -Pk /cache >/dev/null"],
+                    "command": [
+                        "sh",
+                        "-c",
+                        (
+                            "mkdir -p /cache/.inferops-staging && "
+                            "chown 65532:65532 /cache /cache/.inferops-staging && "
+                            "chmod u+rwx /cache /cache/.inferops-staging"
+                        ),
+                    ],
                     "volumeMounts": [
                         {
                             "name": "cache",
                             "mountPath": "/cache",
-                            "readOnly": True,
+                        }
+                    ],
+                    "securityContext": {
+                        "runAsUser": 0,
+                        "allowPrivilegeEscalation": False,
+                        "readOnlyRootFilesystem": True,
+                        "capabilities": {
+                            "drop": ["ALL"],
+                            "add": ["CHOWN", "FOWNER", "DAC_OVERRIDE"],
+                        },
+                    },
+                }
+            ],
+            "containers": [
+                {
+                    "name": "probe",
+                    "image": CACHE_PROBE_IMAGE,
+                    "command": [
+                        "sh",
+                        "-c",
+                        (
+                            "df -Pk /cache >/dev/null && "
+                            "test -w /cache && "
+                            "mkdir -p /cache/.inferops-staging/.probe && "
+                            "rmdir /cache/.inferops-staging/.probe"
+                        ),
+                    ],
+                    "volumeMounts": [
+                        {
+                            "name": "cache",
+                            "mountPath": "/cache",
                         }
                     ],
                     "securityContext": {
                         "runAsNonRoot": True,
-                        "runAsUser": 65534,
+                        "runAsUser": 65532,
+                        "runAsGroup": 65532,
                         "allowPrivilegeEscalation": False,
                         "readOnlyRootFilesystem": True,
                         "capabilities": {"drop": ["ALL"]},
@@ -393,7 +432,6 @@ def _write_cache_probe_manifest(
                 }
             ],
             "securityContext": {
-                "runAsNonRoot": True,
                 "seccompProfile": {"type": "RuntimeDefault"},
             },
         },

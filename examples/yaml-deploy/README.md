@@ -43,11 +43,14 @@ filesystem for InferOps by passing `--cache-capacity 2Gi` during install. This
 is declared capacity for InferOps scheduling, not a live disk-space
 measurement, and install will annotate the eligible node for you.
 
-The cache path must also exist on the Kubernetes node because InferOps uses a
-`hostPath` volume with an explicit directory check. Provision
-`/var/lib/inferops/models` on the node before installing; see
-[Homelab deployment](../../docs/homelab.md) for a Linux node command and
-[Build and run locally](LOCAL_BUILD.md) for an OrbStack helper Pod.
+The cache path is a node-local `hostPath`. During `inferops install`, the CLI
+probes the selected node, creates the directory when needed, and makes the
+staging area writable by the non-root downloader. The example manifests omit
+`spec.cache.path`, so each deployment follows the cache root chosen at install
+time. If you install the Helm chart directly instead of using the CLI, prepare
+that cache root yourself; see [Homelab deployment](../../docs/homelab.md) for a
+Linux node command and [Build and run locally](LOCAL_BUILD.md) for an OrbStack
+helper Pod.
 
 ## Install InferOps
 

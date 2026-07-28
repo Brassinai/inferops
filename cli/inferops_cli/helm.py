@@ -26,6 +26,29 @@ from .kube import (
 )
 
 DEFAULT_CACHE_ROOT = "/var/lib/inferops/models"
+RESERVED_CACHE_ROOTS = {
+    "/bin",
+    "/boot",
+    "/dev",
+    "/etc",
+    "/home",
+    "/lib",
+    "/lib64",
+    "/media",
+    "/mnt",
+    "/opt",
+    "/proc",
+    "/root",
+    "/run",
+    "/sbin",
+    "/srv",
+    "/sys",
+    "/tmp",
+    "/usr",
+    "/var",
+    "/var/lib",
+    "/var/run",
+}
 DEFAULT_RELEASES = ("inferops-operator", "inferops-gateway")
 CONTROL_PLANE_RELEASES = (
     "inferops-operator",
@@ -1317,6 +1340,10 @@ def _validate_cache_root(cache_root: str) -> None:
         raise CLIError("cache path must not be the filesystem root")
     if posixpath.normpath(cache_root) != cache_root:
         raise CLIError(f"cache path must be clean: {cache_root}")
+    if cache_root in RESERVED_CACHE_ROOTS:
+        raise CLIError(
+            f"cache path must be a dedicated directory, not system directory: {cache_root}"
+        )
 
 
 def _validate_tailscale_hostname(hostname: str) -> None:

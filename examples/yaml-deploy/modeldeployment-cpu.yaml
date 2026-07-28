@@ -30,4 +30,3 @@ spec:
     enabled: true
     type: nodeLocal
     size: 1Gi
-    path: /var/lib/inferops/models

@@ -120,14 +120,35 @@ class HelmInstallerTest(unittest.TestCase):
         self.assertEqual(created_manifests[0]["metadata"]["namespace"], "inferops-system")
         self.assertEqual(created_manifests[0]["spec"]["nodeName"], "node-a")
         self.assertEqual(
+            created_manifests[0]["spec"]["initContainers"][0]["securityContext"],
+            {
+                "runAsUser": 0,
+                "allowPrivilegeEscalation": False,
+                "readOnlyRootFilesystem": True,
+                "capabilities": {
+                    "drop": ["ALL"],
+                    "add": ["CHOWN", "FOWNER", "DAC_OVERRIDE"],
+                },
+            },
+        )
+        self.assertIn(
+            "chown 65532:65532 /cache /cache/.inferops-staging",
+            created_manifests[0]["spec"]["initContainers"][0]["command"][-1],
+        )
+        self.assertEqual(
             created_manifests[0]["spec"]["containers"][0]["securityContext"],
             {
                 "runAsNonRoot": True,
-                "runAsUser": 65534,
+                "runAsUser": 65532,
+                "runAsGroup": 65532,
                 "allowPrivilegeEscalation": False,
                 "readOnlyRootFilesystem": True,
                 "capabilities": {"drop": ["ALL"]},
             },
+        )
+        self.assertIn(
+            "test -w /cache",
+            created_manifests[0]["spec"]["containers"][0]["command"][-1],
         )
         self.assertEqual(
             created_manifests[0]["spec"]["volumes"][0]["hostPath"],
@@ -612,6 +633,9 @@ class HelmInstallerTest(unittest.TestCase):
             "/var/lib/../models",
             "/var/lib/models/",
             "/var/lib/models\ninjected",
+            "/var/lib",
+            "/mnt",
+            "/tmp",
         ):
             with self.subTest(path=path), self.assertRaises(CLIError):
                 HelmInstaller(
@@ -624,6 +648,32 @@ class HelmInstallerTest(unittest.TestCase):
                         charts_dir="/not-used",
                     )
                 )
+
+    def test_allows_dedicated_cache_roots_under_system_parents(self) -> None:
+        for path in ("/var/lib/inferops/models", "/mnt/nvme/inferops/models"):
+            with self.subTest(path=path), tempfile.TemporaryDirectory() as directory:
+                charts_dir = self._make_charts(Path(directory))
+                commands: list[list[str]] = []
+
+                def run(command):
+                    commands.append(list(command))
+                    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+                HelmInstaller(runner=run).install(
+                    InstallRequest(
+                        cluster=ClusterTarget(namespace="inferops-system"),
+                        profile="homelab",
+                        cache_path=path,
+                        charts_dir=str(charts_dir),
+                    )
+                )
+
+                operator_command = next(
+                    command
+                    for command in commands
+                    if command[:3] == ["helm", "upgrade", "--install"]
+                )
+                self.assertIn(f"cache.root={path}", operator_command)
 
     def test_explicit_charts_directory_is_authoritative(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
