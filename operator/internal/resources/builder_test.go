@@ -618,7 +618,7 @@ func TestBuildRuntimeDeploymentVariants(t *testing.T) {
 			},
 		},
 		{
-			name: "startup probe allows slow model initialization",
+			name:   "startup probe allows slow model initialization",
 			mutate: func(_ *v1alpha1.ModelDeployment, _ *v1alpha1.ModelRuntime) {},
 			check: func(t *testing.T, deployment *appsv1.Deployment) {
 				container := deployment.Spec.Template.Spec.Containers[0]
