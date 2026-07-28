@@ -131,7 +131,7 @@ class HelmInstallerTest(unittest.TestCase):
         )
         self.assertEqual(
             created_manifests[0]["spec"]["volumes"][0]["hostPath"],
-            {"path": "/mnt/nvme/models", "type": "Directory"},
+            {"path": "/mnt/nvme/models", "type": "DirectoryOrCreate"},
         )
         self.assertEqual(
             response["install"]["cacheAnnotations"],

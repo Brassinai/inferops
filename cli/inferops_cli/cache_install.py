@@ -325,10 +325,12 @@ def _validate_cache_path_on_node(
             "kubectl executable not found; install kubectl before probing cache nodes"
         ) from exc
     except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or exc.stdout or "unknown kubectl error").strip()
+        detail = _cache_probe_failure_detail(runner, request, pod_name, exc)
         raise CLIError(
             f"cache path '{cache_root}' is not reachable on node '{node_name}': "
-            f"{detail}. Create the directory on that node or choose a different "
+            f"{detail}. The installer requests hostPath DirectoryOrCreate for "
+            "this path; check the probe Pod events for image pull, scheduling, "
+            "hostPath, or node filesystem errors, or choose a different "
             "--cache-path."
         ) from exc
     finally:
@@ -386,7 +388,7 @@ def _write_cache_probe_manifest(
                     "name": "cache",
                     "hostPath": {
                         "path": cache_root,
-                        "type": "Directory",
+                        "type": "DirectoryOrCreate",
                     },
                 }
             ],
@@ -406,6 +408,36 @@ def _write_cache_probe_manifest(
         json.dump(manifest, handle, separators=(",", ":"))
         handle.write("\n")
         return Path(handle.name)
+
+
+def _cache_probe_failure_detail(
+    runner: CommandRunner,
+    request: InstallRequest,
+    pod_name: str,
+    wait_error: subprocess.CalledProcessError,
+) -> str:
+    wait_detail = (wait_error.stderr or wait_error.stdout or "").strip()
+    describe_command = _kubectl_command(request)
+    describe_command.extend(
+        (
+            "describe",
+            "pod",
+            pod_name,
+            "--namespace",
+            request.cluster.namespace,
+        )
+    )
+    try:
+        described = runner(describe_command)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return wait_detail or "unknown kubectl error"
+
+    describe_detail = (described.stdout or described.stderr or "").strip()
+    if not describe_detail:
+        return wait_detail or "unknown kubectl error"
+    if not wait_detail:
+        return describe_detail
+    return f"{wait_detail}\n\nProbe details:\n{describe_detail}"
 
 
 def _annotate_cache_node(
