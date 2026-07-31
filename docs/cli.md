@@ -590,7 +590,14 @@ availability.
 
 ### cache list
 
-Show prepared caches with observed status and referencing deployments.
+Show prepared caches with observed status, cache mode, path, reservation size,
+and referencing deployments. `mode=shared` means the cache is artifact-scoped
+and may be referenced by multiple deployments with the same namespace, model
+source, repository, revision, cache root, storage type, and Secret boundary.
+`mode=legacy` marks older deployment-scoped cache records. When multiple legacy
+caches appear to reserve the same artifact separately, `inferops cache list`
+adds an advisory issue so operators can redeploy to shared caches and remove
+unreferenced legacy records to recover capacity.
 
 ```bash
 inferops cache list
@@ -599,19 +606,52 @@ inferops cache list
 ### cache delete
 
 Delete a `ModelCache` Kubernetes object. The command refuses when the cache is
-referenced by a deployment, or when references cannot be determined safely,
-unless `--force` is used. Forced deletion records the intent before deleting
-the object.
+referenced by any live deployment, mounted by any live Pod, or when references
+cannot be determined safely, unless `--force` is used. Forced deletion records
+the intent before deleting the object and reports the affected deployments and
+Pods.
 
 ```bash
-inferops cache delete qwen-chat
-inferops cache delete qwen-chat --force
+inferops cache delete <cache-name>
+inferops cache delete <cache-name> --force
 ```
 
 This command does not delete node-local files. Host filesystem cleanup belongs
 to the cache controller and is not performed by the CLI. Forced deletion can
-leave a deployment without its registered cache, so it should be used only
-after deactivation or deletion of the referencing deployment.
+leave multiple deployments without their registered shared cache, so it should
+be used only after deactivation or deletion of every referencing deployment.
+
+### cloud
+
+Connect an installed InferOps cluster to an optional cloud mesh control plane.
+The first supported mesh mode uses the Tailscale Kubernetes Operator Ingress
+path and keeps gateway traffic authenticated.
+
+```bash
+inferops cloud connect --token <bootstrap-token> \
+  --namespace inferops-system \
+  --cluster-name homelab-a
+
+inferops cloud status --namespace inferops-system
+
+inferops cloud disconnect --namespace inferops-system
+```
+
+`cloud connect` redeems the short-lived bootstrap token, writes persistent
+connection state to Kubernetes Secrets and a ConfigMap, enables authenticated
+Tailscale gateway exposure, and installs the `inferops-cloud-agent` Helm
+release. Use `--token-stdin` to avoid placing the bootstrap token in shell
+history. Use `--cloud-api-url` when the token should be redeemed against a
+non-default cloud API. Remote cloud API URLs must use HTTPS; localhost HTTP
+URLs are accepted only for development and tests.
+
+`cloud status` reports cloud config, agent credential, gateway auth, gateway
+readiness, mesh exposure, provider agent readiness, cloud API credential
+status, and heartbeat freshness. `cloud disconnect` removes the cloud agent
+and cloud connection state without deleting local model deployments, caches,
+CRDs, operator, or gateway.
+Pass `--disable-mesh-exposure` only when the InferOps-managed Tailscale gateway
+exposure should also be disabled.
 
 ## Exit codes
 

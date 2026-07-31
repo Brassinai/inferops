@@ -150,8 +150,8 @@ func (r *ModelDeploymentReconciler) Reconcile(ctx context.Context, deployment *v
 	if setSecretsReady(observed) &&
 		deployment.Spec.Model.Source == "huggingface" &&
 		deployment.Spec.Secrets.HuggingFaceTokenSecretName != "" {
-		r.recorder.Eventf(deployment, "Normal", events.ReasonSecretsAvailable,
-			"HuggingFace token secret %q is referenced", deployment.Spec.Secrets.HuggingFaceTokenSecretName)
+		r.recorder.Event(deployment, "Normal", events.ReasonSecretsAvailable,
+			"HuggingFace token Secret reference is configured")
 	}
 
 	// Validation passed.  Leave the phase to downstream reconcilers unless it

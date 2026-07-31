@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from types import SimpleNamespace
 import unittest
 
@@ -59,6 +60,32 @@ def pod(
             runtime_class_name=runtime_class_name,
         ),
     )
+
+
+def shared_deployment(name: str, revision: str = "main") -> dict:
+    return {
+        "metadata": {"name": name, "namespace": "team-a"},
+        "spec": {
+            "cache": {"enabled": True},
+            "model": {"repo": "org/model", "revision": revision},
+            "secrets": {},
+        },
+        "status": {"cache": {"state": "Downloading"}},
+    }
+
+
+def legacy_cache(name: str, repo: str, revision: str = "main") -> dict:
+    return {
+        "metadata": {"name": name, "namespace": "team-a", "labels": {}},
+        "spec": {
+            "modelRepo": repo,
+            "revision": revision,
+            "storage": {
+                "type": "nodeLocal",
+                "path": f"/var/lib/inferops/models/team-a/{name}",
+            },
+        },
+    }
 
 
 def live_client() -> LiveKubernetesClient:
@@ -202,6 +229,108 @@ class LiveClientSafetyTest(unittest.TestCase):
             "12345",
         )
 
+    def test_upsert_secret_replaces_exact_data_keys(self) -> None:
+        client = live_client()
+
+        class Core:
+            def __init__(self):
+                self.replaced_body = None
+
+            def read_namespaced_secret(self, **_kwargs):
+                return obj(
+                    metadata=obj(
+                        resource_version="987",
+                        labels={"owner": "platform"},
+                        annotations={"rotation": "manual"},
+                    ),
+                    data={
+                        "agentCredential": base64.b64encode(b"old").decode(),
+                        "stale": base64.b64encode(b"remove-me").decode(),
+                    },
+                )
+
+            def replace_namespaced_secret(self, **kwargs):
+                self.replaced_body = kwargs["body"]
+
+        core = Core()
+        client._core_api = core
+
+        client._upsert_secret("inferops-cloud-connection", {"agentCredential": "new"})
+
+        self.assertEqual(
+            core.replaced_body["data"],
+            {"agentCredential": base64.b64encode(b"new").decode()},
+        )
+        self.assertEqual(core.replaced_body["metadata"]["resourceVersion"], "987")
+        self.assertEqual(
+            core.replaced_body["metadata"]["annotations"],
+            {"rotation": "manual"},
+        )
+        self.assertEqual(core.replaced_body["metadata"]["labels"]["owner"], "platform")
+        self.assertNotIn("stale", core.replaced_body["data"])
+
+    def test_upsert_config_map_replaces_exact_data_keys(self) -> None:
+        client = live_client()
+
+        class Core:
+            def __init__(self):
+                self.replaced_body = None
+
+            def read_namespaced_config_map(self, **_kwargs):
+                return obj(
+                    metadata=obj(
+                        resource_version="654",
+                        labels={"owner": "platform"},
+                        annotations={"reviewed": "true"},
+                    ),
+                    data={"cloudApiUrl": "https://old.example", "meshTags": "stale"},
+                )
+
+            def replace_namespaced_config_map(self, **kwargs):
+                self.replaced_body = kwargs["body"]
+
+        core = Core()
+        client._core_api = core
+
+        client._upsert_config_map(
+            "inferops-cloud-connection",
+            {"cloudApiUrl": "https://new.example"},
+        )
+
+        self.assertEqual(
+            core.replaced_body["data"],
+            {"cloudApiUrl": "https://new.example"},
+        )
+        self.assertEqual(core.replaced_body["metadata"]["resourceVersion"], "654")
+        self.assertEqual(
+            core.replaced_body["metadata"]["annotations"],
+            {"reviewed": "true"},
+        )
+        self.assertEqual(core.replaced_body["metadata"]["labels"]["owner"], "platform")
+        self.assertNotIn("meshTags", core.replaced_body["data"])
+
+    def test_redeem_cloud_token_does_not_send_kube_context(self) -> None:
+        captured = {}
+        original = k8s_client._cloud_json_request
+
+        def fake_cloud_json_request(*_args, **kwargs):
+            captured.update(kwargs["body"])
+            return {"ok": True}
+
+        k8s_client._cloud_json_request = fake_cloud_json_request
+        try:
+            response = k8s_client._redeem_cloud_token(
+                cloud_api_url="https://cloud.example.test",
+                token="bootstrap",
+                cluster=ClusterTarget(namespace="team-a", context="prod-admin"),
+                cluster_name="prod",
+            )
+        finally:
+            k8s_client._cloud_json_request = original
+
+        self.assertEqual(response, {"ok": True})
+        self.assertEqual(captured, {"clusterName": "prod", "namespace": "team-a"})
+
     def test_gpu_list_reports_unknown_when_cluster_pod_list_is_forbidden(self) -> None:
         client = live_client()
 
@@ -258,14 +387,14 @@ class LiveClientSafetyTest(unittest.TestCase):
 
         class Custom:
             def __init__(self):
-                self.list_plural = ""
-                self.list_selector = ""
+                self.list_plurals = []
                 self.get_plural = ""
                 self.modelcache_get_name = ""
 
-            def list_namespaced_custom_object(self, *, plural, label_selector, **_):
-                self.list_plural = plural
-                self.list_selector = label_selector
+            def list_namespaced_custom_object(self, *, plural, **_):
+                self.list_plurals.append(plural)
+                if plural == "modeldeployments":
+                    return {"items": []}
                 return {
                     "items": [
                         {
@@ -339,11 +468,7 @@ class LiveClientSafetyTest(unittest.TestCase):
 
         evidence = client._collect_diagnose_evidence("team-a", "qwen-chat", deployment)
 
-        self.assertEqual(custom.list_plural, "modelcaches")
-        self.assertEqual(
-            custom.list_selector,
-            "inferops.dev/modeldeployment=qwen-chat",
-        )
+        self.assertIn("modelcaches", custom.list_plurals)
         self.assertEqual(custom.get_plural, "modelcaches")
         self.assertEqual(custom.modelcache_get_name, "qwen-chat-abc123-cache")
         self.assertEqual(batch.job_name, "qwen-chat-abc123-cache-download")
@@ -357,9 +482,123 @@ class LiveClientSafetyTest(unittest.TestCase):
                 "namespace": "team-a",
                 "name": "qwen-chat-abc123-cache",
                 "status": "Ready",
+                "referencedBy": [],
             },
             evidence["checkedResources"],
         )
+
+    def test_diagnose_reports_shared_cache_references(self) -> None:
+        client = live_client()
+
+        class Custom:
+            def __init__(self):
+                self.modelcache_get_name = ""
+
+            def list_namespaced_custom_object(self, *, plural, **_):
+                if plural == "modelcaches":
+                    return {
+                        "items": [
+                            {
+                                "metadata": {
+                                    "name": "model-abc-cache",
+                                    "namespace": "team-a",
+                                    "labels": {
+                                        "inferops.dev/cache-mode": "shared",
+                                        "inferops.dev/cache-identity": "abc",
+                                    },
+                                    "annotations": {
+                                        "inferops.dev/cache-source": "huggingface",
+                                        "inferops.dev/cache-root": "/var/lib/inferops/models",
+                                    },
+                                },
+                                "spec": {
+                                    "modelRepo": "org/model",
+                                    "revision": "main",
+                                    "storage": {
+                                        "path": "/var/lib/inferops/models/team-a/artifacts/abc"
+                                    },
+                                },
+                                "status": {"phase": "Downloading"},
+                            }
+                        ]
+                    }
+                if plural == "modeldeployments":
+                    return {
+                        "items": [
+                            shared_deployment("qwen-a"),
+                            shared_deployment("qwen-b"),
+                            shared_deployment("qwen-v2", revision="v2"),
+                        ]
+                    }
+                return {"items": []}
+
+            def get_namespaced_custom_object(self, *, plural, name, **_):
+                self.modelcache_get_name = name
+                return {
+                    "metadata": {
+                        "name": "model-abc-cache",
+                        "namespace": "team-a",
+                        "labels": {
+                            "inferops.dev/cache-mode": "shared",
+                            "inferops.dev/cache-identity": "abc",
+                        },
+                        "annotations": {
+                            "inferops.dev/cache-source": "huggingface",
+                            "inferops.dev/cache-root": "/var/lib/inferops/models",
+                        },
+                    },
+                    "spec": {
+                        "modelRepo": "org/model",
+                        "revision": "main",
+                        "storage": {
+                            "path": "/var/lib/inferops/models/team-a/artifacts/abc"
+                        },
+                    },
+                    "status": {"phase": "Downloading"},
+                }
+
+        class Core:
+            def list_namespaced_pod(self, **_):
+                return obj(items=[])
+
+            def list_namespaced_event(self, **_):
+                return obj(items=[])
+
+            def read_namespaced_service(self, **_):
+                return obj(spec=obj(type="ClusterIP", ports=[obj(port=8000)]))
+
+            def list_node(self):
+                return obj(items=[])
+
+        class Batch:
+            def read_namespaced_job(self, **_):
+                raise ApiException(status=404, reason="Not Found")
+
+        class Apps:
+            def read_namespaced_deployment(self, **_):
+                return obj(status=obj(ready_replicas=0, replicas=1))
+
+        custom = Custom()
+        client._custom_api = custom
+        client._core_api = Core()
+        client._batch_api = Batch()
+        client._apps_api = Apps()
+
+        deployment = {
+            "name": "qwen-a",
+            "namespace": "team-a",
+            "model": "org/model",
+            "cache": {"state": "Downloading"},
+            "serviceName": "qwen-a-runtime",
+        }
+
+        evidence = client._collect_diagnose_evidence("team-a", "qwen-a", deployment)
+
+        self.assertEqual(custom.modelcache_get_name, "model-abc-cache")
+        modelcache = next(
+            item for item in evidence["checkedResources"] if item["kind"] == "ModelCache"
+        )
+        self.assertEqual(modelcache["referencedBy"], ["qwen-a", "qwen-b"])
 
     def test_forced_cache_delete_annotates_and_deletes_resource(self) -> None:
         client = live_client()
@@ -368,9 +607,13 @@ class LiveClientSafetyTest(unittest.TestCase):
             def __init__(self):
                 self.patched = False
                 self.deleted = False
+                self.delete_body = None
 
             def get_namespaced_custom_object(self, **_):
-                return {"spec": {"storage": {"path": "/cache/a"}}}
+                return {
+                    "metadata": {"resourceVersion": "1"},
+                    "spec": {"storage": {"path": "/cache/a"}},
+                }
 
             def list_namespaced_custom_object(self, **_):
                 return {
@@ -384,9 +627,14 @@ class LiveClientSafetyTest(unittest.TestCase):
 
             def patch_namespaced_custom_object(self, **_):
                 self.patched = True
+                return {
+                    "metadata": {"resourceVersion": "2"},
+                    "spec": {"storage": {"path": "/cache/a"}},
+                }
 
-            def delete_namespaced_custom_object(self, **_):
+            def delete_namespaced_custom_object(self, **kwargs):
                 self.deleted = True
+                self.delete_body = kwargs.get("body")
 
         custom = Custom()
         client._custom_api = custom
@@ -398,6 +646,10 @@ class LiveClientSafetyTest(unittest.TestCase):
 
         self.assertTrue(custom.patched)
         self.assertTrue(custom.deleted)
+        self.assertEqual(
+            custom.delete_body,
+            {"preconditions": {"resourceVersion": "2"}},
+        )
         self.assertTrue(result["deleted"])
         self.assertFalse(result["nodeFilesModified"])
 
@@ -462,6 +714,49 @@ class LiveClientSafetyTest(unittest.TestCase):
                 CacheDeleteRequest(cluster=client._cluster, name="shared-cache")
             )
 
+    def test_cache_delete_refuses_shared_cache_with_multiple_references(self) -> None:
+        client = live_client()
+
+        class Custom:
+            def get_namespaced_custom_object(self, **_):
+                return {
+                    "metadata": {
+                        "name": "model-abc-cache",
+                        "namespace": "team-a",
+                        "labels": {
+                            "inferops.dev/cache-mode": "shared",
+                            "inferops.dev/cache-identity": "abc",
+                        },
+                        "annotations": {
+                            "inferops.dev/cache-source": "huggingface",
+                            "inferops.dev/cache-root": "/var/lib/inferops/models",
+                        },
+                    },
+                    "spec": {
+                        "modelRepo": "org/model",
+                        "revision": "main",
+                        "storage": {
+                            "path": "/var/lib/inferops/models/team-a/artifacts/abc"
+                        },
+                    },
+                }
+
+            def list_namespaced_custom_object(self, **_):
+                return {
+                    "items": [
+                        shared_deployment("qwen-a"),
+                        shared_deployment("qwen-b"),
+                    ]
+                }
+
+        client._custom_api = Custom()
+        client._core_api = obj(list_namespaced_pod=lambda **_: obj(items=[]))
+
+        with self.assertRaisesRegex(CLIError, "qwen-a, qwen-b"):
+            client.cache_delete(
+                CacheDeleteRequest(cluster=client._cluster, name="model-abc-cache")
+            )
+
     def test_cache_delete_refuses_live_pod_mount(self) -> None:
         client = live_client()
 
@@ -487,6 +782,24 @@ class LiveClientSafetyTest(unittest.TestCase):
             client.cache_delete(
                 CacheDeleteRequest(cluster=client._cluster, name="cache-a")
             )
+
+    def test_legacy_duplicate_cache_groups_flag_same_artifact(self) -> None:
+        shared = legacy_cache("model-shared-cache", "org/model")
+        shared["metadata"]["labels"] = {"inferops.dev/cache-mode": "shared"}
+
+        groups = k8s_client._legacy_duplicate_cache_groups(
+            [
+                legacy_cache("model-a-cache", "org/model"),
+                legacy_cache("model-b-cache", "org/model"),
+                legacy_cache("model-c-cache", "org/model", revision="v2"),
+                shared,
+            ]
+        )
+
+        self.assertEqual(groups["model-a-cache"], ["model-a-cache", "model-b-cache"])
+        self.assertEqual(groups["model-b-cache"], ["model-a-cache", "model-b-cache"])
+        self.assertNotIn("model-c-cache", groups)
+        self.assertNotIn("model-shared-cache", groups)
 
     def test_doctor_contains_unexpected_check_failures(self) -> None:
         client = live_client()

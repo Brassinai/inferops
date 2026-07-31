@@ -1,0 +1,82 @@
+image:
+  repository: ghcr.io/brassinai/inferops-cloud-agent
+  tag: "v0.1.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  create: true
+
+cloud:
+  apiUrl: ""
+  providerAccountId: ""
+  providerClusterId: ""
+  meshProvider: tailscale
+  meshHostname: ""
+  meshIp: ""
+  meshEndpointUrl: ""
+  heartbeatIntervalSeconds: 30
+  discoveryRequired: true
+  credentialSecretName: inferops-cloud-connection
+  gatewayAuthSecretName: inferops-gateway-auth
+
+networkPolicy:
+  enabled: true
+  egress:
+    # Allow DNS and HTTPS by default because cloud API endpoints are external.
+    allowDNS: true
+    allowHTTPS: true
+  dns:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    podSelector:
+      matchLabels:
+        k8s-app: kube-dns
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  annotations: {}
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+probes:
+  livenessPath: /healthz
+  readinessPath: /readyz
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

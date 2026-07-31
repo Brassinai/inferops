@@ -11,7 +11,7 @@ import (
 type Recorder interface {
 	SetGPUSlots(resource string, total, occupied, available float64)
 	SetActivationQueueDepth(depth float64)
-	SetModelCacheInventory(phaseCounts, reservedBytes map[string]float64)
+	SetModelCacheInventory(phaseCounts, reservedBytes, referenceCounts map[string]float64)
 	ObserveActivationDuration(duration time.Duration)
 	ObserveCacheDownloadDuration(duration time.Duration)
 	IncFailure(controller, reason string)
@@ -22,7 +22,7 @@ type NoOpRecorder struct{}
 
 func (NoOpRecorder) SetGPUSlots(string, float64, float64, float64) {}
 func (NoOpRecorder) SetActivationQueueDepth(float64)               {}
-func (NoOpRecorder) SetModelCacheInventory(map[string]float64, map[string]float64) {
+func (NoOpRecorder) SetModelCacheInventory(map[string]float64, map[string]float64, map[string]float64) {
 }
 func (NoOpRecorder) ObserveActivationDuration(time.Duration)    {}
 func (NoOpRecorder) ObserveCacheDownloadDuration(time.Duration) {}
@@ -37,6 +37,7 @@ type ControllerMetrics struct {
 	activationQueue     prometheus.Gauge
 	modelCachePhases    *prometheus.GaugeVec
 	modelCacheReserved  *prometheus.GaugeVec
+	modelCacheRefs      *prometheus.GaugeVec
 	activationDuration  prometheus.Histogram
 	cacheDownload       prometheus.Histogram
 	reconciliationError *prometheus.CounterVec
@@ -72,6 +73,10 @@ func NewControllerMetrics(registerer prometheus.Registerer) (*ControllerMetrics,
 			Name: "inferops_modelcache_reserved_bytes",
 			Help: "Reserved model-cache storage bytes by observed lifecycle phase.",
 		}, []string{"phase"}),
+		modelCacheRefs: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "inferops_modelcache_reference_count",
+			Help: "Live ModelDeployment references to ModelCache objects by observed lifecycle phase.",
+		}, []string{"phase"}),
 		activationDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "inferops_model_activation_duration_seconds",
 			Help:    "Time from runtime Deployment creation to readiness.",
@@ -102,6 +107,7 @@ func NewControllerMetrics(registerer prometheus.Registerer) (*ControllerMetrics,
 		metrics.activationQueue,
 		metrics.modelCachePhases,
 		metrics.modelCacheReserved,
+		metrics.modelCacheRefs,
 		metrics.activationDuration,
 		metrics.cacheDownload,
 		metrics.reconciliationError,
@@ -126,12 +132,15 @@ func (m *ControllerMetrics) SetActivationQueueDepth(depth float64) {
 	m.activationQueue.Set(depth)
 }
 
-func (m *ControllerMetrics) SetModelCacheInventory(phaseCounts, reservedBytes map[string]float64) {
+func (m *ControllerMetrics) SetModelCacheInventory(phaseCounts, reservedBytes, referenceCounts map[string]float64) {
 	for phase, count := range phaseCounts {
 		m.modelCachePhases.WithLabelValues(phase).Set(count)
 	}
 	for phase, bytes := range reservedBytes {
 		m.modelCacheReserved.WithLabelValues(phase).Set(bytes)
+	}
+	for phase, count := range referenceCounts {
+		m.modelCacheRefs.WithLabelValues(phase).Set(count)
 	}
 }
 

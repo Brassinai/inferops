@@ -148,6 +148,19 @@ class ModelDownloaderTests(unittest.TestCase):
             with mock.patch.object(sys, "argv", args):
                 self.assertEqual(self._run(), 1)
 
+    def test_rejects_overlapping_destination_and_staging(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = self._args(root)
+            args[args.index("--staging-subpath") + 1] = "model/staging"
+            with (
+                mock.patch.object(sys, "argv", args),
+                mock.patch.object(downloader, "download_source") as download_source,
+            ):
+                self.assertEqual(self._run(), 1)
+            download_source.assert_not_called()
+            self.assertFalse((root / "model").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

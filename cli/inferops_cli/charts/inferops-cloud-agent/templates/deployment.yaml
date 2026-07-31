@@ -1,0 +1,129 @@
+{{- $cloudAPIURL := required "cloud.apiUrl is required" .Values.cloud.apiUrl }}
+{{- $providerAccountID := required "cloud.providerAccountId is required" .Values.cloud.providerAccountId }}
+{{- $providerClusterID := required "cloud.providerClusterId is required" .Values.cloud.providerClusterId }}
+{{- $meshProvider := required "cloud.meshProvider is required" .Values.cloud.meshProvider }}
+{{- $meshHostname := required "cloud.meshHostname is required" .Values.cloud.meshHostname }}
+{{- $meshEndpointURL := required "cloud.meshEndpointUrl is required" .Values.cloud.meshEndpointUrl }}
+{{- $credentialSecretName := required "cloud.credentialSecretName is required" .Values.cloud.credentialSecretName }}
+{{- $gatewayAuthSecretName := required "cloud.gatewayAuthSecretName is required" .Values.cloud.gatewayAuthSecretName }}
+{{- if lt (int .Values.cloud.heartbeatIntervalSeconds) 5 }}
+{{- fail "cloud.heartbeatIntervalSeconds must be at least 5" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "inferops-cloud-agent.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inferops-cloud-agent.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: 3
+  progressDeadlineSeconds: 300
+  selector:
+    matchLabels:
+      {{- include "inferops-cloud-agent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "inferops-cloud-agent.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "inferops-cloud-agent.serviceAccountName" . }}
+      automountServiceAccountToken: true
+      enableServiceLinks: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: cloud-agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: INFEROPS_CLOUD_API_URL
+              value: {{ $cloudAPIURL | quote }}
+            - name: INFEROPS_PROVIDER_ACCOUNT_ID
+              value: {{ $providerAccountID | quote }}
+            - name: INFEROPS_PROVIDER_CLUSTER_ID
+              value: {{ $providerClusterID | quote }}
+            - name: INFEROPS_MESH_PROVIDER
+              value: {{ $meshProvider | quote }}
+            - name: INFEROPS_MESH_HOSTNAME
+              value: {{ $meshHostname | quote }}
+            - name: INFEROPS_MESH_IP
+              value: {{ .Values.cloud.meshIp | quote }}
+            - name: INFEROPS_MESH_ENDPOINT_URL
+              value: {{ $meshEndpointURL | quote }}
+            - name: INFEROPS_CLOUD_HEARTBEAT_INTERVAL_SECONDS
+              value: {{ .Values.cloud.heartbeatIntervalSeconds | quote }}
+            - name: INFEROPS_CLOUD_DISCOVERY_REQUIRED
+              value: {{ .Values.cloud.discoveryRequired | quote }}
+            - name: INFEROPS_CLOUD_AGENT_CREDENTIAL_FILE
+              value: /var/run/secrets/inferops-cloud/agentCredential
+            - name: INFEROPS_GATEWAY_AUTH_TOKEN_FILE
+              value: /var/run/secrets/inferops-gateway-auth/token
+          volumeMounts:
+            - name: cloud-connection
+              mountPath: /var/run/secrets/inferops-cloud
+              readOnly: true
+            - name: gateway-auth
+              mountPath: /var/run/secrets/inferops-gateway-auth
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.livenessPath }}
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readinessPath }}
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: cloud-connection
+          secret:
+            secretName: {{ $credentialSecretName | quote }}
+            defaultMode: 0444
+            items:
+              - key: agentCredential
+                path: agentCredential
+        - name: gateway-auth
+          secret:
+            secretName: {{ $gatewayAuthSecretName | quote }}
+            defaultMode: 0444
+            items:
+              - key: token
+                path: token
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: 30

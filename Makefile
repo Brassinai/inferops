@@ -27,11 +27,11 @@ KUBECONFORM ?= $(if $(wildcard $(LOCAL_KUBECONFORM)),$(LOCAL_KUBECONFORM),kubeco
 PYTHON ?= $(if $(wildcard $(LOCAL_PYTHON)),$(LOCAL_PYTHON),$(SYSTEM_PYTHON))
 
 GO_FILES := $(shell find . -type f -name '*.go' -not -path './vendor/*' -not -path './.git/*' | sort)
-CHARTS := $(sort $(dir $(wildcard deploy/helm/*/Chart.yaml)))
+CHARTS := $(filter-out deploy/helm/inferops-cloud-agent/,$(sort $(dir $(wildcard deploy/helm/*/Chart.yaml))))
 
 .PHONY: help setup tools-check fmt fmt-check test vet python-check python-test python-package runtime-conformance runtime-conformance-matrix \
-	operator-image gateway-image dashboard-image control-plane-images model-downloader-build model-downloader-test \
-	operator-image-push gateway-image-push dashboard-image-push control-plane-images-push model-downloader-push \
+	operator-image gateway-image dashboard-image cloud-agent-image control-plane-images model-downloader-build model-downloader-test \
+	operator-image-push gateway-image-push dashboard-image-push cloud-agent-image-push control-plane-images-push model-downloader-push \
 	helm-lint helm-template yaml-check schema-check verify
 
 help:
@@ -156,7 +156,13 @@ dashboard-image:
 		--tag inferops-dashboard:$(PUBLISH_IMAGE_TAG) \
 		.
 
-control-plane-images: operator-image gateway-image
+cloud-agent-image:
+	$(DOCKER) build \
+		--file cloud-agent/Dockerfile \
+		--tag inferops-cloud-agent:$(PUBLISH_IMAGE_TAG) \
+		.
+
+control-plane-images: operator-image gateway-image cloud-agent-image
 
 model-downloader-build:
 	$(DOCKER) build \
@@ -188,7 +194,15 @@ dashboard-image-push:
 		--push \
 		.
 
-control-plane-images-push: operator-image-push gateway-image-push
+cloud-agent-image-push:
+	$(DOCKER_BUILDX) build \
+		--platform $(PUBLISH_IMAGE_PLATFORMS) \
+		--file cloud-agent/Dockerfile \
+		--tag $(PUBLISH_IMAGE_NAMESPACE)/inferops-cloud-agent:$(PUBLISH_IMAGE_TAG) \
+		--push \
+		.
+
+control-plane-images-push: operator-image-push gateway-image-push cloud-agent-image-push
 
 model-downloader-push:
 	$(DOCKER_BUILDX) build \
@@ -209,7 +223,7 @@ helm-lint:
 			exit 1; \
 		}; \
 	done
-	@for chart in inferops-operator inferops-gateway inferops-dashboard; do \
+	@for chart in inferops-operator inferops-gateway inferops-dashboard inferops-cloud-agent; do \
 		diff -qr "deploy/helm/$$chart" "cli/inferops_cli/charts/$$chart" >/dev/null || { \
 			echo "error: packaged Helm chart is out of sync: $$chart"; \
 			exit 1; \
@@ -218,6 +232,12 @@ helm-lint:
 	@for chart in $(CHARTS); do \
 		$(HELM) lint "$$chart"; \
 	done
+	@$(HELM) lint deploy/helm/inferops-cloud-agent \
+		--set-string cloud.apiUrl=https://cloud.example.test \
+		--set-string cloud.providerAccountId=provider-test \
+		--set-string cloud.providerClusterId=cluster-test \
+		--set-string cloud.meshHostname=inferops \
+		--set-string cloud.meshEndpointUrl=https://inferops
 	@$(HELM) lint deploy/helm/inferops-runtime \
 		--values deploy/helm/inferops-runtime/values-cpu.yaml
 	@if $(HELM) template invalid deploy/helm/inferops-operator \
@@ -323,6 +343,14 @@ helm-template:
 		--set auth.enabled=true \
 		--set-string auth.secretName=inferops-gateway-token \
 		> .verify/helm/inferops-gateway-auth.yaml
+	@$(HELM) template inferops-cloud-agent deploy/helm/inferops-cloud-agent \
+		--namespace inferops-system \
+		--set-string cloud.apiUrl=https://cloud.example.test \
+		--set-string cloud.providerAccountId=provider-test \
+		--set-string cloud.providerClusterId=cluster-test \
+		--set-string cloud.meshHostname=inferops \
+		--set-string cloud.meshEndpointUrl=https://inferops \
+		> .verify/helm/inferops-cloud-agent.yaml
 	@$(HELM) template inferops-gateway-nginx deploy/helm/inferops-gateway \
 		--set ingress.enabled=true \
 		--set-string ingress.className=nginx \
@@ -386,8 +414,12 @@ helm-template:
 	@grep -q 'inferops-vllm-dashboard.json' .verify/helm/inferops-operator-observability.yaml
 	@grep -q 'inferops-llama-cpp-dashboard.json' .verify/helm/inferops-operator-observability.yaml
 	@grep -q '^kind: Deployment$$' .verify/helm/inferops-dashboard.yaml
+	@grep -q '^kind: Deployment$$' .verify/helm/inferops-cloud-agent.yaml
 	@grep -q '^kind: NetworkPolicy$$' .verify/helm/inferops-dashboard.yaml
+	@grep -q '^kind: NetworkPolicy$$' .verify/helm/inferops-cloud-agent.yaml
+	@grep -q 'INFEROPS_CLOUD_AGENT_CREDENTIAL_FILE' .verify/helm/inferops-cloud-agent.yaml
 	@grep -q '^kind: ClusterRole$$' .verify/helm/inferops-dashboard.yaml
+	@grep -q '^kind: ClusterRole$$' .verify/helm/inferops-cloud-agent.yaml
 	@! grep -q -- '- secrets$$' .verify/helm/inferops-dashboard.yaml
 	@$(PYTHON) scripts/check_operator_rbac.py .verify/helm/inferops-operator.yaml
 	@$(PYTHON) scripts/check_tenant_rbac.py .verify/helm/inferops-gateway-tenant.yaml

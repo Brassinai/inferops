@@ -149,7 +149,7 @@ runtime without a local port-forward. If the image already exists, omit
     max_model_len=4096,
     route_path="/models/qwen-chat",
     openai_compatible=True,
-    cache_enabled=True,
+    cache_enabled=True,             # must remain true in the current release
     cache_type="nodeLocal",
     cache_size="100Gi",
     cache_path="/var/lib/inferops/models",

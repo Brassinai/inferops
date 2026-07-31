@@ -229,6 +229,37 @@ class DoctorRequest:
     checks: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class CloudConnectRequest:
+    """Inputs for connecting an InferOps cluster to a cloud mesh."""
+
+    cluster: ClusterTarget
+    token: str
+    cloud_api_url: str | None = None
+    cluster_name: str | None = None
+    charts_dir: str | None = None
+    cloud_agent_image: str | None = None
+    cloud_agent_image_pull_policy: str | None = None
+    wait: bool = True
+    timeout_seconds: float = 300
+
+
+@dataclass(frozen=True)
+class CloudStatusRequest:
+    """Inputs for reading cloud mesh connection status."""
+
+    cluster: ClusterTarget
+
+
+@dataclass(frozen=True)
+class CloudDisconnectRequest:
+    """Inputs for disconnecting an InferOps cluster from a cloud mesh."""
+
+    cluster: ClusterTarget
+    charts_dir: str | None = None
+    disable_mesh_exposure: bool = False
+
+
 class KubernetesClient(Protocol):
     """Small boundary that can be replaced by a real or fake client."""
 
@@ -297,6 +328,15 @@ class KubernetesClient(Protocol):
 
     def doctor(self, request: DoctorRequest) -> dict[str, Any]:
         """Run diagnostic checks."""
+
+    def cloud_connect(self, request: CloudConnectRequest) -> dict[str, Any]:
+        """Connect the cluster to a cloud mesh."""
+
+    def cloud_status(self, request: CloudStatusRequest) -> dict[str, Any]:
+        """Read cloud mesh connection status."""
+
+    def cloud_disconnect(self, request: CloudDisconnectRequest) -> dict[str, Any]:
+        """Disconnect the cluster from a cloud mesh."""
 
 
 def build_cluster_target(args: Any) -> ClusterTarget:

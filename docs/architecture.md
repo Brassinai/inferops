@@ -32,9 +32,10 @@ Python SDK / CLI / YAML
   ready. The downloader resolves mutable Hugging Face revisions to an
   immutable provider revision and records both requested and resolved values
   in that marker before atomic publication.
-  Deployment-created caches use a deterministic namespace/name/repository/
-  revision identity and are not owner-referenced by `ModelDeployment`, so
-  deleting an endpoint never implicitly deletes its reusable cache record.
+  Deployment-created caches use a deterministic artifact identity made from
+  namespace, source, repository, revision, cache root, storage type, and
+  `secretRef`; deployment name is excluded so identical public artifacts share
+  one reusable cache record.
 - The gateway owns the stable client-facing endpoint and sends traffic only to
   an `Active`, non-draining runtime.
 - The SDK and CLI produce and consume the same CRD shapes documented in

@@ -16,6 +16,8 @@ from typing import Any
 from .cache_install import CacheNodePreparer, validate_cache_install_options
 from .errors import CLIError
 from .kube import (
+    CloudConnectRequest,
+    CloudDisconnectRequest,
     ClusterTarget,
     InstallRequest,
     ObservabilityEnableRequest,
@@ -57,6 +59,7 @@ CONTROL_PLANE_RELEASES = (
 )
 OBSERVABILITY_RELEASES = ("inferops-operator", "inferops-gateway")
 UNINSTALL_RELEASES = ("inferops-operator", "inferops-gateway", "inferops-dashboard")
+CLOUD_RELEASES = ("inferops-gateway", "inferops-cloud-agent")
 DEFAULT_TIMEOUT = "5m"
 CRD_FIELD_MANAGER = "inferops-cli"
 CRD_NAMES = (
@@ -81,6 +84,7 @@ LABEL_NAME = re.compile(r"^[A-Za-z0-9](?:[-_.A-Za-z0-9]{0,61}[A-Za-z0-9])?$")
 LABEL_VALUE = LABEL_NAME
 IMAGE_TAG = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
 EXPOSURE_METHODS = {"cluster-ip", "load-balancer", "ingress", "gateway-api"}
+IMAGE_PULL_POLICIES = {"Always", "IfNotPresent", "Never"}
 
 CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 
@@ -197,6 +201,106 @@ class HelmInstaller:
                 "releases": releases,
             },
         }
+
+    def cloud_connect(
+        self,
+        request: CloudConnectRequest,
+        *,
+        cloud_api_url: str,
+        provider_account_id: str,
+        provider_cluster_id: str,
+        mesh_provider: str,
+        mesh_mode: str,
+        mesh_hostname: str,
+        mesh_ip: str,
+        mesh_endpoint_url: str,
+        mesh_login_server: str,
+        heartbeat_interval_seconds: int,
+        credential_secret_name: str,
+        gateway_auth_secret_name: str,
+    ) -> dict[str, Any]:
+        """Upgrade gateway mesh exposure and install the cloud agent."""
+        charts_dir = _resolve_charts_dir(request.charts_dir, releases=CLOUD_RELEASES)
+        releases = []
+        for command in (
+            _build_cloud_gateway_upgrade_command(
+                request,
+                charts_dir / "inferops-gateway",
+                mesh_hostname,
+                mesh_mode,
+                mesh_login_server,
+                gateway_auth_secret_name,
+            ),
+            _build_cloud_agent_upgrade_command(
+                request,
+                charts_dir / "inferops-cloud-agent",
+                cloud_api_url=cloud_api_url,
+                provider_account_id=provider_account_id,
+                provider_cluster_id=provider_cluster_id,
+                mesh_provider=mesh_provider,
+                mesh_mode=mesh_mode,
+                mesh_hostname=mesh_hostname,
+                mesh_ip=mesh_ip,
+                mesh_endpoint_url=mesh_endpoint_url,
+                heartbeat_interval_seconds=heartbeat_interval_seconds,
+                credential_secret_name=credential_secret_name,
+                gateway_auth_secret_name=gateway_auth_secret_name,
+            ),
+        ):
+            try:
+                completed = self._runner(command)
+            except FileNotFoundError as exc:
+                raise CLIError(
+                    "helm executable not found; install Helm 3.15 or newer"
+                ) from exc
+            except subprocess.CalledProcessError as exc:
+                detail = (exc.stderr or exc.stdout or "unknown Helm error").strip()
+                raise CLIError(f"Helm cloud mesh configuration failed: {detail}") from exc
+            releases.append(
+                {
+                    "name": command[3],
+                    "status": "deployed",
+                    "output": completed.stdout.strip(),
+                }
+            )
+        return {"releases": releases}
+
+    def cloud_disconnect(self, request: CloudDisconnectRequest) -> dict[str, Any]:
+        """Remove cloud-agent and optionally disable gateway mesh exposure."""
+        charts_dir = _resolve_charts_dir(request.charts_dir, releases=CLOUD_RELEASES)
+        commands = [
+            _build_cloud_agent_uninstall_command(
+                "inferops-cloud-agent",
+                request.cluster,
+            )
+        ]
+        if request.disable_mesh_exposure:
+            commands.append(
+                _build_cloud_gateway_disconnect_command(
+                    request,
+                    charts_dir / "inferops-gateway",
+                )
+            )
+
+        releases = []
+        for command in commands:
+            try:
+                completed = self._runner(command)
+            except FileNotFoundError as exc:
+                raise CLIError(
+                    "helm executable not found; install Helm 3.15 or newer"
+                ) from exc
+            except subprocess.CalledProcessError as exc:
+                detail = (exc.stderr or exc.stdout or "unknown Helm error").strip()
+                raise CLIError(f"Helm cloud mesh disconnect failed: {detail}") from exc
+            releases.append(
+                {
+                    "name": command[2] if command[1] == "uninstall" else command[3],
+                    "status": "removed" if command[1] == "uninstall" else "configured",
+                    "output": completed.stdout.strip(),
+                }
+            )
+        return {"releases": releases}
 
     def upgrade(self, request: UpgradeRequest) -> dict[str, Any]:
         """Upgrade installed control-plane image tags."""
@@ -821,6 +925,237 @@ def _build_uninstall_command(
     ]
     _helm_cluster_options(command, request.cluster)
     return command
+
+
+def _build_cloud_agent_uninstall_command(
+    release_name: str,
+    cluster: ClusterTarget,
+) -> list[str]:
+    command = [
+        "helm",
+        "uninstall",
+        release_name,
+        "--namespace",
+        cluster.namespace,
+        "--ignore-not-found",
+        "--wait",
+        "--timeout",
+        DEFAULT_TIMEOUT,
+    ]
+    _helm_cluster_options(command, cluster)
+    return command
+
+
+def _build_cloud_gateway_upgrade_command(
+    request: CloudConnectRequest,
+    chart_dir: Path,
+    mesh_hostname: str,
+    mesh_mode: str,
+    mesh_login_server: str,
+    gateway_auth_secret_name: str,
+) -> list[str]:
+    _validate_tailscale_hostname(mesh_hostname)
+    if mesh_mode not in {"operator", "headscale"}:
+        raise CLIError("cloud mesh mode must be operator or headscale")
+    command = [
+        "helm",
+        "upgrade",
+        "--install",
+        "inferops-gateway",
+        str(chart_dir),
+        "--namespace",
+        request.cluster.namespace,
+        "--reuse-values",
+        "--wait" if request.wait else "--wait=false",
+        "--timeout",
+        _helm_timeout(request.timeout_seconds),
+        "--set",
+        "tailscale.enabled=true",
+        "--set-string",
+        f"tailscale.mode={_escape_helm_string(mesh_mode)}",
+        "--set-string",
+        f"tailscale.hostname={_escape_helm_string(mesh_hostname)}",
+        "--set",
+        "auth.enabled=true",
+        "--set-string",
+        f"auth.secretName={_escape_helm_string(gateway_auth_secret_name)}",
+    ]
+    if mesh_mode == "headscale":
+        command.extend(
+            [
+                "--set-string",
+                f"tailscale.loginServer={_escape_helm_string(mesh_login_server)}",
+                "--set-string",
+                f"tailscale.authKeySecretName={_escape_helm_string(gateway_auth_secret_name)}",
+                "--set-string",
+                "tailscale.authKeySecretKey=meshAuthKey",
+                "--set",
+                "tailscale.userspace=false",
+                "--set",
+                "tailscale.authOnce=true",
+                "--set-string",
+                "tailscale.kubeSecret=",
+                "--set",
+                "networkPolicy.enabled=false",
+            ]
+        )
+    _helm_cluster_options(command, request.cluster)
+    return command
+
+
+def _build_cloud_agent_upgrade_command(
+    request: CloudConnectRequest,
+    chart_dir: Path,
+    *,
+    cloud_api_url: str,
+    provider_account_id: str,
+    provider_cluster_id: str,
+    mesh_provider: str,
+    mesh_mode: str,
+    mesh_hostname: str,
+    mesh_ip: str,
+    mesh_endpoint_url: str,
+    heartbeat_interval_seconds: int,
+    credential_secret_name: str,
+    gateway_auth_secret_name: str,
+) -> list[str]:
+    command = [
+        "helm",
+        "upgrade",
+        "--install",
+        "inferops-cloud-agent",
+        str(chart_dir),
+        "--namespace",
+        request.cluster.namespace,
+        "--create-namespace",
+        "--atomic",
+        "--wait" if request.wait else "--wait=false",
+        "--timeout",
+        _helm_timeout(request.timeout_seconds),
+        "--set-string",
+        f"cloud.apiUrl={_escape_helm_string(cloud_api_url)}",
+        "--set-string",
+        f"cloud.providerAccountId={_escape_helm_string(provider_account_id)}",
+        "--set-string",
+        f"cloud.providerClusterId={_escape_helm_string(provider_cluster_id)}",
+        "--set-string",
+        f"cloud.meshProvider={_escape_helm_string(mesh_provider)}",
+        "--set-string",
+        f"cloud.meshMode={_escape_helm_string(mesh_mode)}",
+        "--set-string",
+        f"cloud.meshHostname={_escape_helm_string(mesh_hostname)}",
+        "--set-string",
+        f"cloud.meshIp={_escape_helm_string(mesh_ip)}",
+        "--set-string",
+        f"cloud.meshEndpointUrl={_escape_helm_string(mesh_endpoint_url)}",
+        "--set",
+        f"cloud.heartbeatIntervalSeconds={heartbeat_interval_seconds}",
+        "--set-string",
+        f"cloud.credentialSecretName={_escape_helm_string(credential_secret_name)}",
+        "--set-string",
+        f"cloud.gatewayAuthSecretName={_escape_helm_string(gateway_auth_secret_name)}",
+    ]
+    image_repository, image_tag = _split_image_reference(request.cloud_agent_image)
+    if image_repository:
+        command.extend(
+            [
+                "--set-string",
+                f"image.repository={_escape_helm_string(image_repository)}",
+            ]
+        )
+    if image_tag:
+        command.extend(
+            [
+                "--set-string",
+                f"image.tag={_escape_helm_string(image_tag)}",
+            ]
+        )
+    image_pull_policy = _cloud_agent_image_pull_policy(
+        request.cloud_agent_image_pull_policy,
+        cloud_api_url,
+    )
+    if image_pull_policy:
+        command.extend(
+            [
+                "--set-string",
+                f"image.pullPolicy={image_pull_policy}",
+            ]
+        )
+    if mesh_mode == "headscale":
+        command.extend(["--set", "networkPolicy.enabled=false"])
+    _helm_cluster_options(command, request.cluster)
+    return command
+
+
+def _split_image_reference(image: str | None) -> tuple[str, str]:
+    image = (image or "").strip()
+    if not image:
+        return "", ""
+    last_slash = image.rfind("/")
+    last_colon = image.rfind(":")
+    if last_colon > last_slash:
+        repository = image[:last_colon]
+        tag = image[last_colon + 1 :]
+        _validate_image_tag(tag)
+        return repository, tag
+    return image, ""
+
+
+def _cloud_agent_image_pull_policy(
+    requested_policy: str | None,
+    cloud_api_url: str,
+) -> str:
+    if requested_policy:
+        if requested_policy not in IMAGE_PULL_POLICIES:
+            raise CLIError(
+                "cloud agent image pull policy must be one of Always, IfNotPresent, Never"
+            )
+        return requested_policy
+    if _is_local_dev_cloud_api_url(cloud_api_url):
+        return "Never"
+    return ""
+
+
+def _is_local_dev_cloud_api_url(cloud_api_url: str) -> bool:
+    return cloud_api_url.startswith(
+        (
+            "http://127.0.0.1:",
+            "http://localhost:",
+            "http://host.docker.internal:",
+            "http://host.containers.internal:",
+            "http://kubernetes.docker.internal:",
+        )
+    )
+
+
+def _build_cloud_gateway_disconnect_command(
+    request: CloudDisconnectRequest,
+    chart_dir: Path,
+) -> list[str]:
+    command = [
+        "helm",
+        "upgrade",
+        "--install",
+        "inferops-gateway",
+        str(chart_dir),
+        "--namespace",
+        request.cluster.namespace,
+        "--reuse-values",
+        "--wait",
+        "--timeout",
+        DEFAULT_TIMEOUT,
+        "--set",
+        "tailscale.enabled=false",
+    ]
+    _helm_cluster_options(command, request.cluster)
+    return command
+
+
+def _helm_timeout(timeout_seconds: float) -> str:
+    seconds = int(timeout_seconds)
+    if seconds <= 0:
+        raise CLIError("timeout must be positive")
+    return f"{seconds}s"
 
 
 def _build_observability_stack_commands(

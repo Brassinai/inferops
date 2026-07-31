@@ -62,6 +62,8 @@ The operator and gateway provide the baseline signals used by
 
 - `inferops_modelcache_phase_count{phase}`: ModelCache availability by phase.
 - `inferops_modelcache_reserved_bytes{phase}`: reserved cache storage by phase.
+- `inferops_modelcache_reference_count{phase}`: live ModelDeployment
+  references to caches by phase.
 - `inferops_cache_download_duration_seconds`: cache download duration.
 - `inferops_cache_download_failures_total{reason}`: terminal cache failures.
 - `inferops_model_activation_duration_seconds`: activation-to-ready duration.

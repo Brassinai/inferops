@@ -439,8 +439,7 @@ func (v *ReconciliationValidator) validateSecrets(deployment *v1alpha1.ModelDepl
 		return &ValidationError{
 			Reason: v1alpha1.ReasonSecretRequired,
 			Message: fmt.Sprintf(
-				"spec.secrets.huggingFaceTokenSecretName %q is invalid: %s",
-				secretName,
+				"spec.secrets.huggingFaceTokenSecretName is invalid: %s",
 				strings.Join(messages, ", "),
 			),
 		}
@@ -531,7 +530,7 @@ func ValidateModelCache(cache v1alpha1.ModelCache) error {
 	}
 	if cache.Spec.SecretRef != "" {
 		if messages := utilvalidation.IsDNS1123Subdomain(cache.Spec.SecretRef); len(messages) != 0 {
-			return fmt.Errorf("spec.secretRef %q is invalid: %s", cache.Spec.SecretRef, strings.Join(messages, ", "))
+			return fmt.Errorf("spec.secretRef is invalid: %s", strings.Join(messages, ", "))
 		}
 	}
 	return nil

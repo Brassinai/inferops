@@ -1,4 +1,4 @@
-{{- if .Values.tailscale.enabled }}
+{{- if and .Values.tailscale.enabled (eq .Values.tailscale.mode "operator") }}
 {{- $hostname := required "tailscale.hostname is required when Tailscale exposure is enabled" .Values.tailscale.hostname }}
 {{- if or (gt (len $hostname) 63) (not (regexMatch "^[a-z]([a-z0-9-]*[a-z])?$" $hostname)) }}
 {{- fail "tailscale.hostname must be at most 63 characters, start and end with a lowercase letter, and contain only lowercase letters, digits, and hyphens" }}

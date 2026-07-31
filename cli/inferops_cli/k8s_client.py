@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
+import json
+import os
+import posixpath
 import re
+import secrets
 import time
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request as URLRequest
+from urllib.request import urlopen
 import uuid
 from typing import Any
 
@@ -29,6 +39,9 @@ from .errors import CLIError, NotFoundError
 from .kube import (
     ActivationRequest,
     CacheDeleteRequest,
+    CloudConnectRequest,
+    CloudDisconnectRequest,
+    CloudStatusRequest,
     ClusterTarget,
     DeactivationRequest,
     DiagnoseRequest,
@@ -49,6 +62,12 @@ from .kube import (
 from .lifecycle import activation_diagnosis, deployment_diagnosis_report
 
 CLI_FIELD_MANAGER = "inferops-cli"
+DEFAULT_CLOUD_API_URL = "https://cloud.inferops.dev"
+CLOUD_CONNECTION_SECRET = "inferops-cloud-connection"
+CLOUD_CONNECTION_CONFIG_MAP = "inferops-cloud-connection"
+GATEWAY_AUTH_SECRET = "inferops-gateway-auth"
+CLOUD_AGENT_DEPLOYMENT = "inferops-cloud-agent"
+GATEWAY_RELEASE = "inferops-gateway"
 
 
 def _load_config(cluster: ClusterTarget) -> None:
@@ -513,19 +532,34 @@ class LiveKubernetesClient(KubernetesClient):
             references_known = False
 
         items = resp.get("items", [])
+        legacy_duplicate_groups = _legacy_duplicate_cache_groups(items)
         caches: list[dict[str, Any]] = []
         for item in items:
             status = item.get("status", {})
             spec = item.get("spec", {})
             storage = spec.get("storage", {})
+            metadata = item.get("metadata", {})
+            labels = metadata.get("labels", {})
             cache_name = item["metadata"]["name"]
             cache_path = status.get("path", storage.get("path", ""))
             cache_size = status.get("size", storage.get("size", ""))
+            cache_mode = labels.get("inferops.dev/cache-mode", "legacy")
+            artifact_identity = labels.get("inferops.dev/cache-identity", "")
 
             refs = cache_references(item, deployments, cache_path)
 
             conditions = status.get("conditions", [])
             issues: list[str] = []
+            if cache_name in legacy_duplicate_groups:
+                duplicates = ", ".join(
+                    name for name in legacy_duplicate_groups[cache_name] if name != cache_name
+                )
+                issues.append(
+                    "legacy cache duplicates artifact reservation"
+                    + (f" with {duplicates}" if duplicates else "")
+                    + "; redeploy to shared cache and delete unreferenced "
+                    "legacy caches to recover capacity"
+                )
             for cond in conditions:
                 if cond.get("status") == "False" and cond.get("type") in (
                     "CacheReady",
@@ -547,6 +581,8 @@ class LiveKubernetesClient(KubernetesClient):
                     node=status.get("nodeName", storage.get("nodeName", "")),
                     path=cache_path,
                     size=cache_size,
+                    mode=cache_mode,
+                    artifact_identity=artifact_identity,
                     last_used=status.get("lastUsedTime", ""),
                     referenced_by=sorted(set(refs)),
                     references_known=references_known,
@@ -641,7 +677,7 @@ class LiveKubernetesClient(KubernetesClient):
 
         if request.force and (refs or ambiguous_refs or pod_refs):
             try:
-                api.patch_namespaced_custom_object(
+                patched = api.patch_namespaced_custom_object(
                     group="inference.inferops.dev",
                     version="v1alpha1",
                     namespace=namespace,
@@ -656,17 +692,26 @@ class LiveKubernetesClient(KubernetesClient):
                         }
                     },
                 )
+                if isinstance(patched, dict):
+                    cache_obj = patched
+                else:
+                    cache_obj = api.get_namespaced_custom_object(
+                        group="inference.inferops.dev",
+                        version="v1alpha1",
+                        namespace=namespace,
+                        plural="modelcaches",
+                        name=request.name,
+                    )
             except Exception as exc:
                 if _is_not_found(exc):
                     raise NotFoundError(f"cache not found: {request.name}")
                 raise CLIError(f"failed to annotate cache for deletion: {exc}")
 
-        if not request.force:
-            self._assert_cache_safety_snapshot(
-                namespace,
-                deployment_snapshot,
-                pod_snapshot,
-            )
+        self._assert_cache_safety_snapshot(
+            namespace,
+            deployment_snapshot,
+            pod_snapshot,
+        )
 
         try:
             resource_version = cache_obj.get("metadata", {}).get("resourceVersion")
@@ -774,6 +819,219 @@ class LiveKubernetesClient(KubernetesClient):
 
         return HelmInstaller().observability_setup(request)
 
+    def cloud_connect(self, request: CloudConnectRequest) -> dict[str, Any]:
+        """Redeem a bootstrap token and configure persistent cloud mesh access."""
+        self._validate_cloud_preconditions()
+        cloud_api_url = _normalize_url(
+            request.cloud_api_url
+            or os.environ.get("INFEROPS_CLOUD_API_URL")
+            or DEFAULT_CLOUD_API_URL
+        )
+        payload = _normalize_cloud_redeem_payload(
+            _redeem_cloud_token(
+                cloud_api_url=cloud_api_url,
+                token=request.token,
+                cluster=request.cluster,
+                cluster_name=request.cluster_name,
+            ),
+            fallback_cloud_api_url=cloud_api_url,
+        )
+        if payload["meshProvider"] != "tailscale":
+            raise CLIError(
+                f"unsupported cloud mesh provider: {payload['meshProvider']}; only tailscale is supported"
+            )
+
+        existing_gateway_secret = self._read_secret_data(GATEWAY_AUTH_SECRET)
+        existing_connection_secret = self._read_secret_data(CLOUD_CONNECTION_SECRET)
+        gateway_token = existing_gateway_secret.get("token") or secrets.token_urlsafe(32)
+        gateway_secret_data = {"token": gateway_token}
+        if payload.get("meshAuthKey"):
+            gateway_secret_data["meshAuthKey"] = payload["meshAuthKey"]
+        self._upsert_secret(
+            GATEWAY_AUTH_SECRET,
+            gateway_secret_data,
+        )
+        self._upsert_secret(
+            CLOUD_CONNECTION_SECRET,
+            {"agentCredential": payload["agentCredential"]},
+        )
+        connected_at = _now_iso()
+        config = {
+            "cloudApiUrl": payload["cloudApiUrl"],
+            "providerAccountId": payload["providerAccountId"],
+            "providerClusterId": payload["providerClusterId"],
+            "meshProvider": payload["meshProvider"],
+            "meshMode": payload["meshMode"],
+            "meshHostname": payload["meshHostname"],
+            "meshIp": payload["meshIp"],
+            "meshEndpointUrl": payload["meshEndpointUrl"],
+            "expectedEndpointPath": payload["expectedEndpointPath"],
+            "heartbeatIntervalSeconds": str(payload["heartbeatIntervalSeconds"]),
+            "lastConnectedAt": connected_at,
+        }
+        from .helm import HelmInstaller
+
+        try:
+            helm_result = HelmInstaller().cloud_connect(
+                request,
+                cloud_api_url=payload["cloudApiUrl"],
+                provider_account_id=payload["providerAccountId"],
+                provider_cluster_id=payload["providerClusterId"],
+                mesh_provider=payload["meshProvider"],
+                mesh_mode=payload["meshMode"],
+                mesh_hostname=payload["meshHostname"],
+                mesh_ip=payload["meshIp"],
+                mesh_endpoint_url=payload["meshEndpointUrl"],
+                mesh_login_server=payload.get("meshLoginServer", ""),
+                heartbeat_interval_seconds=payload["heartbeatIntervalSeconds"],
+                credential_secret_name=CLOUD_CONNECTION_SECRET,
+                gateway_auth_secret_name=GATEWAY_AUTH_SECRET,
+            )
+        except CLIError:
+            if existing_gateway_secret:
+                self._upsert_secret(GATEWAY_AUTH_SECRET, existing_gateway_secret)
+            else:
+                self._delete_secret(GATEWAY_AUTH_SECRET)
+            if existing_connection_secret:
+                self._upsert_secret(CLOUD_CONNECTION_SECRET, existing_connection_secret)
+            else:
+                self._delete_secret(CLOUD_CONNECTION_SECRET)
+            raise
+
+        if payload.get("meshTags"):
+            config["meshTags"] = json.dumps(payload["meshTags"])
+        if payload.get("meshLoginServer"):
+            config["meshLoginServer"] = payload["meshLoginServer"]
+        self._upsert_config_map(CLOUD_CONNECTION_CONFIG_MAP, config)
+
+        return {
+            "cluster": request.cluster.to_safe_dict(),
+            "connection": {
+                **config,
+                "meshTags": payload.get("meshTags", []),
+                "heartbeatIntervalSeconds": payload["heartbeatIntervalSeconds"],
+            },
+            "secrets": [
+                f"secret/{GATEWAY_AUTH_SECRET}",
+                f"secret/{CLOUD_CONNECTION_SECRET}",
+            ],
+            "configMap": f"configmap/{CLOUD_CONNECTION_CONFIG_MAP}",
+            "releases": helm_result["releases"],
+            "steps": (
+                "InferOps gateway and Service verified.",
+                f"Redeemed bootstrap token for provider account {payload['providerAccountId']}.",
+                "Stored cloud credentials in Kubernetes Secrets.",
+                (
+                    "Reused existing gateway auth token."
+                    if existing_gateway_secret.get("token")
+                    else "Created gateway auth token."
+                ),
+                f"Enabled authenticated Tailscale gateway exposure at {payload['meshEndpointUrl']}.",
+                "Installed persistent cloud agent.",
+            ),
+        }
+
+    def cloud_status(self, request: CloudStatusRequest) -> dict[str, Any]:
+        """Report layered cloud mesh connection status."""
+        checks: list[dict[str, str]] = []
+        config = self._read_config_map_data(CLOUD_CONNECTION_CONFIG_MAP)
+        secret = self._read_secret_data(CLOUD_CONNECTION_SECRET)
+        gateway_secret = self._read_secret_data(GATEWAY_AUTH_SECRET)
+
+        if config:
+            checks.append(
+                _cloud_check("cloud-config", "PASS", "cloud connection ConfigMap exists")
+            )
+        else:
+            checks.append(
+                _cloud_check(
+                    "cloud-config", "FAIL", "cloud connection ConfigMap is missing"
+                )
+            )
+        if secret and secret.get("agentCredential"):
+            checks.append(
+                _cloud_check(
+                    "agent-credential", "PASS", "agent credential Secret exists"
+                )
+            )
+        else:
+            checks.append(
+                _cloud_check(
+                    "agent-credential", "FAIL", "agent credential Secret is missing"
+                )
+            )
+        if gateway_secret and gateway_secret.get("token"):
+            checks.append(_cloud_check("gateway-auth", "PASS", "gateway auth Secret exists"))
+        else:
+            checks.append(_cloud_check("gateway-auth", "FAIL", "gateway auth Secret is missing"))
+
+        gateway = self._check_gateway()
+        checks.append(_doctor_to_cloud_check("gateway", gateway))
+        if config.get("meshMode") == "headscale":
+            checks.append(_headscale_mesh_check(config, gateway_secret))
+        else:
+            tailscale = self._check_tailscale()
+            if config.get("meshProvider") == "tailscale" and "not configured" in tailscale.message:
+                checks.append(
+                    _cloud_check(
+                        "mesh-exposure",
+                        "FAIL",
+                        "Tailscale mesh exposure is not configured for the cloud connection",
+                    )
+                )
+            else:
+                checks.append(_doctor_to_cloud_check("mesh-exposure", tailscale))
+
+        agent = self._deployment_check(CLOUD_AGENT_DEPLOYMENT)
+        checks.append(agent)
+
+        cloud_api = _cloud_api_status(config, secret)
+        checks.append(cloud_api)
+
+        failures = sum(1 for check in checks if check["status"] == "FAIL")
+        warnings = sum(1 for check in checks if check["status"] == "WARN")
+        summary = (
+            f"Cloud mesh status: {len(checks) - failures - warnings} OK, "
+            f"{warnings} warning(s), {failures} failure(s)."
+        )
+        return {
+            "cluster": request.cluster.to_safe_dict(),
+            "summary": summary,
+            "connection": _public_cloud_config(config),
+            "checks": checks,
+        }
+
+    def cloud_disconnect(self, request: CloudDisconnectRequest) -> dict[str, Any]:
+        """Disconnect cloud mesh resources while preserving local inference."""
+        config = self._read_config_map_data(CLOUD_CONNECTION_CONFIG_MAP)
+        secret = self._read_secret_data(CLOUD_CONNECTION_SECRET)
+        cloud_notified, cloud_notice = _notify_cloud_disconnect(config, secret)
+
+        from .helm import HelmInstaller
+
+        helm_result = HelmInstaller().cloud_disconnect(request)
+        self._delete_secret(CLOUD_CONNECTION_SECRET)
+        self._delete_config_map(CLOUD_CONNECTION_CONFIG_MAP)
+        if request.disable_mesh_exposure:
+            self._delete_secret(GATEWAY_AUTH_SECRET)
+
+        steps = [
+            cloud_notice,
+            "Removed cloud agent Helm release.",
+            "Removed cloud connection Secret and ConfigMap.",
+            "Preserved InferOps operator, gateway, model deployments, and caches.",
+        ]
+        if request.disable_mesh_exposure:
+            steps.append("Disabled InferOps-managed Tailscale gateway exposure.")
+        return {
+            "cluster": request.cluster.to_safe_dict(),
+            "disconnected": True,
+            "cloudNotified": cloud_notified,
+            "meshExposureDisabled": request.disable_mesh_exposure,
+            "releases": helm_result["releases"],
+            "steps": tuple(steps),
+        }
+
     def delete(self, request: NamedRequest) -> dict[str, Any]:
         """Delete one ModelDeployment."""
         api = self._custom_objects_api
@@ -824,6 +1082,236 @@ class LiveKubernetesClient(KubernetesClient):
                     )
                 )
         return {"checks": [check.to_dict() for check in checks]}
+
+    def _validate_cloud_preconditions(self) -> None:
+        """Verify local InferOps exists before cloud connect mutates resources."""
+        from kubernetes.client.rest import ApiException
+
+        namespace = self._cluster.namespace
+        try:
+            self._core_v1_api.read_namespace(namespace)
+        except ApiException as exc:
+            if getattr(exc, "status", None) == 404:
+                raise CLIError(
+                    f"namespace '{namespace}' not found; run 'inferops install --namespace {namespace}' first"
+                ) from exc
+            raise CLIError(
+                f"cannot access Kubernetes namespace '{namespace}': {exc.reason}"
+            ) from exc
+
+        for plural in ("modeldeployments", "modelruntimes", "modelcaches"):
+            try:
+                self._custom_objects_api.list_namespaced_custom_object(
+                    group="inference.inferops.dev",
+                    version="v1alpha1",
+                    namespace=namespace,
+                    plural=plural,
+                    limit=1,
+                )
+            except ApiException as exc:
+                if getattr(exc, "status", None) == 404:
+                    raise CLIError(
+                        "InferOps CRDs are not available; run 'inferops install' before cloud connect"
+                    ) from exc
+                raise CLIError(
+                    f"cannot verify InferOps CRD {plural}: {exc.reason}"
+                ) from exc
+
+        try:
+            self._apps_v1_api.read_namespaced_deployment(
+                name=GATEWAY_RELEASE,
+                namespace=namespace,
+            )
+            self._core_v1_api.read_namespaced_service(
+                name=GATEWAY_RELEASE,
+                namespace=namespace,
+            )
+        except ApiException as exc:
+            if getattr(exc, "status", None) == 404:
+                raise CLIError(
+                    "InferOps gateway is not installed; run 'inferops install' before cloud connect"
+                ) from exc
+            raise CLIError(f"cannot verify InferOps gateway: {exc.reason}") from exc
+
+    def _upsert_secret(self, name: str, string_data: dict[str, str]) -> None:
+        from kubernetes.client.rest import ApiException
+
+        data = {
+            key: base64.b64encode(value.encode()).decode()
+            for key, value in string_data.items()
+        }
+        body = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": name,
+                "namespace": self._cluster.namespace,
+                "labels": _cloud_labels(),
+            },
+            "type": "Opaque",
+            "data": data,
+        }
+        try:
+            existing = self._core_v1_api.read_namespaced_secret(
+                name=name,
+                namespace=self._cluster.namespace,
+            )
+            body["metadata"] = _replacement_metadata(
+                existing,
+                name=name,
+                namespace=self._cluster.namespace,
+                labels=_cloud_labels(),
+            )
+            self._core_v1_api.replace_namespaced_secret(
+                name=name,
+                namespace=self._cluster.namespace,
+                body=body,
+            )
+        except ApiException as exc:
+            if getattr(exc, "status", None) != 404:
+                raise CLIError(f"failed to update Secret/{name}: {exc.reason}") from exc
+            try:
+                self._core_v1_api.create_namespaced_secret(
+                    namespace=self._cluster.namespace,
+                    body=body,
+                )
+            except ApiException as create_exc:
+                raise CLIError(
+                    f"failed to create Secret/{name}: {create_exc.reason}"
+                ) from create_exc
+
+    def _upsert_config_map(self, name: str, data: dict[str, str]) -> None:
+        from kubernetes.client.rest import ApiException
+
+        body = {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": name,
+                "namespace": self._cluster.namespace,
+                "labels": _cloud_labels(),
+            },
+            "data": data,
+        }
+        try:
+            existing = self._core_v1_api.read_namespaced_config_map(
+                name=name,
+                namespace=self._cluster.namespace,
+            )
+            body["metadata"] = _replacement_metadata(
+                existing,
+                name=name,
+                namespace=self._cluster.namespace,
+                labels=_cloud_labels(),
+            )
+            self._core_v1_api.replace_namespaced_config_map(
+                name=name,
+                namespace=self._cluster.namespace,
+                body=body,
+            )
+        except ApiException as exc:
+            if getattr(exc, "status", None) != 404:
+                raise CLIError(f"failed to update ConfigMap/{name}: {exc.reason}") from exc
+            try:
+                self._core_v1_api.create_namespaced_config_map(
+                    namespace=self._cluster.namespace,
+                    body=body,
+                )
+            except ApiException as create_exc:
+                raise CLIError(
+                    f"failed to create ConfigMap/{name}: {create_exc.reason}"
+                ) from create_exc
+
+    def _read_config_map_data(self, name: str) -> dict[str, str]:
+        from kubernetes.client.rest import ApiException
+
+        try:
+            config_map = self._core_v1_api.read_namespaced_config_map(
+                name=name,
+                namespace=self._cluster.namespace,
+            )
+        except ApiException as exc:
+            if getattr(exc, "status", None) == 404:
+                return {}
+            raise CLIError(f"failed to read ConfigMap/{name}: {exc.reason}") from exc
+        return dict(config_map.data or {})
+
+    def _read_secret_data(self, name: str) -> dict[str, str]:
+        from kubernetes.client.rest import ApiException
+
+        try:
+            secret = self._core_v1_api.read_namespaced_secret(
+                name=name,
+                namespace=self._cluster.namespace,
+            )
+        except ApiException as exc:
+            if getattr(exc, "status", None) == 404:
+                return {}
+            raise CLIError(f"failed to read Secret/{name}: {exc.reason}") from exc
+        decoded: dict[str, str] = {}
+        for key, value in (secret.data or {}).items():
+            try:
+                decoded[key] = base64.b64decode(value).decode()
+            except Exception:
+                decoded[key] = ""
+        return decoded
+
+    def _delete_secret(self, name: str) -> None:
+        from kubernetes.client.rest import ApiException
+
+        try:
+            self._core_v1_api.delete_namespaced_secret(
+                name=name,
+                namespace=self._cluster.namespace,
+            )
+        except ApiException as exc:
+            if getattr(exc, "status", None) != 404:
+                raise CLIError(f"failed to delete Secret/{name}: {exc.reason}") from exc
+
+    def _delete_config_map(self, name: str) -> None:
+        from kubernetes.client.rest import ApiException
+
+        try:
+            self._core_v1_api.delete_namespaced_config_map(
+                name=name,
+                namespace=self._cluster.namespace,
+            )
+        except ApiException as exc:
+            if getattr(exc, "status", None) != 404:
+                raise CLIError(f"failed to delete ConfigMap/{name}: {exc.reason}") from exc
+
+    def _deployment_check(self, name: str) -> dict[str, str]:
+        from kubernetes.client.rest import ApiException
+
+        try:
+            deployment = self._apps_v1_api.read_namespaced_deployment(
+                name=name,
+                namespace=self._cluster.namespace,
+            )
+        except ApiException as exc:
+            if getattr(exc, "status", None) == 404:
+                return _cloud_check(
+                    "provider-agent", "FAIL", f"Deployment/{name} is missing"
+                )
+            return _cloud_check(
+                "provider-agent",
+                "FAIL",
+                f"cannot read Deployment/{name}: {exc.reason}",
+            )
+        status = getattr(deployment, "status", None)
+        ready = getattr(status, "ready_replicas", None) or 0
+        desired = (
+            getattr(getattr(deployment, "spec", None), "replicas", None)
+            or getattr(status, "replicas", None)
+            or 0
+        )
+        if desired > 0 and ready >= desired:
+            return _cloud_check(
+                "provider-agent", "PASS", f"Deployment/{name} ready {ready}/{desired}"
+            )
+        return _cloud_check(
+            "provider-agent", "FAIL", f"Deployment/{name} ready {ready}/{desired}"
+        )
 
     def _check_kubernetes_api(self) -> DoctorCheck:
         """Check Kubernetes API access and namespace existence."""
@@ -1913,11 +2401,9 @@ class LiveKubernetesClient(KubernetesClient):
         checked = list(evidence.get("checkedResources", []))
         cache_name = self._resolve_deployment_cache_name(namespace, name, deployment)
         service_name = str(deployment.get("serviceName") or f"{name}-runtime")
-        self._check_custom_resource(
+        self._check_modelcache(
             namespace,
-            "modelcaches",
             cache_name,
-            "ModelCache",
             checked,
         )
         self._check_job(namespace, f"{cache_name}-download", checked)
@@ -1946,15 +2432,11 @@ class LiveKubernetesClient(KubernetesClient):
                 version="v1alpha1",
                 namespace=namespace,
                 plural="modelcaches",
-                label_selector=f"inferops.dev/modeldeployment={name}",
             )
         except ApiException:
             return name
 
         items = response.get("items", []) if isinstance(response, dict) else []
-        if not items:
-            return name
-
         cache_path = ""
         cache = deployment.get("cache")
         if isinstance(cache, dict):
@@ -1970,8 +2452,81 @@ class LiveKubernetesClient(KubernetesClient):
             if cache_path and item_path == cache_path and item_name:
                 return item_name
 
-        first_name = str(items[0].get("metadata", {}).get("name", ""))
-        return first_name or name
+        model_repo = str(deployment.get("model") or "")
+        shared_matches = [
+            str(item.get("metadata", {}).get("name", ""))
+            for item in items
+            if item.get("metadata", {})
+            .get("labels", {})
+            .get("inferops.dev/cache-mode")
+            == "shared"
+            and item.get("spec", {}).get("modelRepo") == model_repo
+        ]
+        shared_matches = sorted(set(filter(None, shared_matches)))
+        if len(shared_matches) == 1:
+            return shared_matches[0]
+
+        legacy_matches = [
+            str(item.get("metadata", {}).get("name", ""))
+            for item in items
+            if item.get("metadata", {})
+            .get("labels", {})
+            .get("inferops.dev/modeldeployment")
+            == name
+        ]
+        legacy_matches = sorted(set(filter(None, legacy_matches)))
+        if legacy_matches:
+            return legacy_matches[0]
+        return name
+
+    def _check_modelcache(
+        self,
+        namespace: str,
+        name: str,
+        checked: list[dict[str, Any]],
+    ) -> None:
+        from kubernetes.client.rest import ApiException
+
+        try:
+            resource = self._custom_objects_api.get_namespaced_custom_object(
+                group="inference.inferops.dev",
+                version="v1alpha1",
+                namespace=namespace,
+                plural="modelcaches",
+                name=name,
+            )
+        except ApiException as exc:
+            checked.append(
+                {
+                    "kind": "ModelCache",
+                    "namespace": namespace,
+                    "name": name,
+                    "status": "missing" if _is_not_found(exc) else exc.reason,
+                }
+            )
+            return
+        status = resource.get("status", {})
+        storage = resource.get("spec", {}).get("storage", {})
+        cache_path = status.get("path", storage.get("path", ""))
+        item = {
+            "kind": "ModelCache",
+            "namespace": namespace,
+            "name": name,
+            "status": str(status.get("phase") or status.get("state") or "found"),
+        }
+        try:
+            deployments = self._custom_objects_api.list_namespaced_custom_object(
+                group="inference.inferops.dev",
+                version="v1alpha1",
+                namespace=namespace,
+                plural="modeldeployments",
+            ).get("items", [])
+            item["referencedBy"] = cache_references(resource, deployments, cache_path)
+        except Exception:
+            item["referencedBy"] = []
+            item["referencesKnown"] = False
+        checked.append(item)
+
 
     def _check_custom_resource(
         self,
@@ -2301,6 +2856,56 @@ class LiveKubernetesClient(KubernetesClient):
                 "name": getattr(involved, "name", ""),
             },
         }
+
+
+def _legacy_duplicate_cache_groups(items: list[dict[str, Any]]) -> dict[str, list[str]]:
+    groups: dict[tuple[str, str, str, str, str, str, str], list[str]] = {}
+    for item in items:
+        metadata = item.get("metadata", {})
+        labels = metadata.get("labels", {})
+        if labels.get("inferops.dev/cache-mode") == "shared":
+            continue
+        name = metadata.get("name", "")
+        namespace = metadata.get("namespace", "")
+        if not name:
+            continue
+        spec = item.get("spec", {})
+        storage = spec.get("storage", {})
+        repo = spec.get("modelRepo", "")
+        if not repo:
+            continue
+        annotations = metadata.get("annotations", {})
+        source = annotations.get("inferops.dev/cache-source", "huggingface")
+        revision = spec.get("revision") or "main"
+        key = (
+            namespace,
+            source,
+            repo,
+            revision,
+            spec.get("secretRef", ""),
+            storage.get("type", ""),
+            _legacy_cache_root(name, storage.get("path", "")),
+        )
+        groups.setdefault(key, []).append(name)
+    duplicates: dict[str, list[str]] = {}
+    for names in groups.values():
+        if len(names) > 1:
+            ordered = sorted(names)
+            for name in ordered:
+                duplicates[name] = ordered
+    return duplicates
+
+
+def _legacy_cache_root(cache_name: str, cache_path: str) -> str:
+    if not cache_name or not cache_path:
+        return ""
+    cleaned = posixpath.normpath(cache_path)
+    if posixpath.basename(cleaned) != cache_name:
+        return ""
+    namespace_dir = posixpath.dirname(cleaned)
+    if namespace_dir in ("", "."):
+        return ""
+    return posixpath.dirname(namespace_dir)
 
 
 def _clean_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -2773,6 +3378,433 @@ def _endpoint_app_service_body(
             ],
         },
     }
+
+
+def _redeem_cloud_token(
+    *,
+    cloud_api_url: str,
+    token: str,
+    cluster: ClusterTarget,
+    cluster_name: str | None,
+) -> dict[str, Any]:
+    body = {
+        "clusterName": cluster_name,
+        "namespace": cluster.namespace,
+    }
+    try:
+        response = _cloud_json_request(
+            "POST",
+            f"{cloud_api_url}/v1/provider-connections/redeem",
+            bearer_token=token,
+            body=body,
+        )
+    except CLIError as exc:
+        fallback_url = _loopback_cloud_api_url_for_local_alias(cloud_api_url)
+        if fallback_url == cloud_api_url or not _looks_like_dns_resolution_failure(str(exc)):
+            raise
+        response = _cloud_json_request(
+            "POST",
+            f"{fallback_url}/v1/provider-connections/redeem",
+            bearer_token=token,
+            body=body,
+        )
+    if not isinstance(response, dict):
+        raise CLIError("cloud token redemption returned an invalid response")
+    return response
+
+
+def _normalize_cloud_redeem_payload(
+    payload: dict[str, Any],
+    *,
+    fallback_cloud_api_url: str,
+) -> dict[str, Any]:
+    agent_config = payload.get("agent_config") or payload.get("agentConfig") or {}
+    if not isinstance(agent_config, dict):
+        raise CLIError(
+            "cloud token redemption response field agentConfig must be an object"
+        )
+    cloud_api_url = _normalize_url(
+        str(
+            payload.get("cloud_api_url")
+            or payload.get("cloudApiUrl")
+            or fallback_cloud_api_url
+        )
+    )
+    mesh_hostname = str(
+        payload.get("mesh_hostname") or payload.get("meshHostname") or ""
+    ).strip()
+    mesh_endpoint_url = str(
+        payload.get("mesh_endpoint_url")
+        or payload.get("meshEndpointUrl")
+        or f"https://{mesh_hostname}"
+    ).strip()
+    heartbeat_interval = (
+        agent_config.get("heartbeatIntervalSeconds")
+        or agent_config.get("heartbeat_interval_seconds")
+        or 10
+    )
+    try:
+        heartbeat_interval_seconds = int(heartbeat_interval)
+    except (TypeError, ValueError) as exc:
+        raise CLIError("cloud heartbeat interval must be an integer") from exc
+
+    normalized = {
+        "cloudApiUrl": cloud_api_url,
+        "providerAccountId": str(
+            payload.get("provider_account_id") or payload.get("providerAccountId") or ""
+        ).strip(),
+        "providerClusterId": str(
+            payload.get("provider_cluster_id") or payload.get("providerClusterId") or ""
+        ).strip(),
+        "agentCredential": str(
+            payload.get("agent_credential") or payload.get("agentCredential") or ""
+        ).strip(),
+        "meshProvider": str(
+            payload.get("mesh_provider") or payload.get("meshProvider") or ""
+        ).strip().lower(),
+        "meshMode": str(
+            payload.get("mesh_mode") or payload.get("meshMode") or "operator"
+        ).strip().lower(),
+        "meshHostname": mesh_hostname,
+        "meshIp": str(payload.get("mesh_ip") or payload.get("meshIp") or "").strip(),
+        "meshEndpointUrl": mesh_endpoint_url,
+        "meshTags": payload.get("mesh_tags") or payload.get("meshTags") or [],
+        "meshAuthKey": str(
+            payload.get("mesh_auth_key") or payload.get("meshAuthKey") or ""
+        ).strip(),
+        "meshLoginServer": str(
+            payload.get("mesh_login_server") or payload.get("meshLoginServer") or ""
+        ).strip().rstrip("/"),
+        "expectedEndpointPath": str(
+            payload.get("expected_endpoint_path")
+            or payload.get("expectedEndpointPath")
+            or "/"
+        ).strip(),
+        "heartbeatIntervalSeconds": heartbeat_interval_seconds,
+    }
+    missing = [
+        key
+        for key in (
+            "cloudApiUrl",
+            "providerAccountId",
+            "providerClusterId",
+            "agentCredential",
+            "meshProvider",
+            "meshHostname",
+            "meshEndpointUrl",
+        )
+        if not normalized[key]
+    ]
+    if missing:
+        raise CLIError(
+            f"cloud token redemption response is missing: {', '.join(missing)}"
+        )
+    if not isinstance(normalized["meshTags"], list):
+        raise CLIError("cloud token redemption response field meshTags must be a list")
+    if normalized["heartbeatIntervalSeconds"] < 5:
+        raise CLIError("cloud heartbeat interval must be at least 5 seconds")
+    if not normalized["expectedEndpointPath"].startswith("/"):
+        raise CLIError("cloud expected endpoint path must start with /")
+    if normalized["meshMode"] not in {"operator", "headscale"}:
+        raise CLIError("cloud token redemption response field meshMode must be operator or headscale")
+    if normalized["meshMode"] == "headscale":
+        if not normalized["meshAuthKey"]:
+            raise CLIError("cloud token redemption response is missing meshAuthKey for headscale mode")
+        if not normalized["meshLoginServer"]:
+            raise CLIError("cloud token redemption response is missing meshLoginServer for headscale mode")
+        _normalize_url(
+            normalized["meshLoginServer"],
+            label="mesh login server",
+            require_https_for_remote=False,
+        )
+    _normalize_url(
+        normalized["meshEndpointUrl"],
+        label="mesh endpoint URL",
+        require_https_for_remote=False,
+    )
+    return normalized
+
+
+def _cloud_api_status(
+    config: dict[str, str],
+    secret: dict[str, str],
+) -> dict[str, str]:
+    api_url = config.get("cloudApiUrl")
+    credential = secret.get("agentCredential")
+    if not api_url or not credential:
+        return _cloud_check(
+            "cloud-api", "FAIL", "cloud API URL or agent credential is missing"
+        )
+    try:
+        response = _cloud_json_request(
+            "GET",
+            f"{_normalize_url(api_url)}/v1/provider-agent/me",
+            bearer_token=credential,
+        )
+    except CLIError as exc:
+        return _cloud_check("cloud-api", "FAIL", f"cloud API check failed: {exc}")
+    if not isinstance(response, dict):
+        return _cloud_check(
+            "cloud-api", "FAIL", "cloud API check returned an invalid response"
+        )
+    heartbeat = response.get("lastHeartbeatAt") or response.get("last_heartbeat_at")
+    heartbeat_check = _heartbeat_freshness_check(
+        heartbeat,
+        _positive_int(config.get("heartbeatIntervalSeconds"), default=10),
+    )
+    if heartbeat_check is not None:
+        return heartbeat_check
+    offerings = (
+        response["offeringsCount"]
+        if "offeringsCount" in response
+        else response.get("offerings_count")
+    )
+    parts = ["cloud API accepted agent credential"]
+    if heartbeat:
+        parts.append(f"last heartbeat {heartbeat}")
+    if offerings is not None:
+        parts.append(f"offerings {offerings}")
+    return _cloud_check("cloud-api", "PASS", "; ".join(parts))
+
+
+def _notify_cloud_disconnect(
+    config: dict[str, str],
+    secret: dict[str, str],
+) -> tuple[bool, str]:
+    api_url = config.get("cloudApiUrl")
+    credential = secret.get("agentCredential")
+    if not api_url or not credential:
+        return (
+            False,
+            "Skipped cloud disconnect notification because saved credentials were unavailable.",
+        )
+    try:
+        _cloud_json_request(
+            "POST",
+            f"{_normalize_url(api_url)}/v1/provider-agent/disconnect",
+            bearer_token=credential,
+            body={
+                "providerAccountId": config.get("providerAccountId"),
+                "providerClusterId": config.get("providerClusterId"),
+            },
+        )
+    except CLIError as exc:
+        return False, f"Cloud disconnect notification failed: {exc}"
+    return True, "Notified cloud API that this provider cluster is disconnecting."
+
+
+def _cloud_json_request(
+    method: str,
+    url: str,
+    *,
+    bearer_token: str,
+    body: dict[str, Any] | None = None,
+) -> Any:
+    data = None
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {bearer_token}",
+        "User-Agent": "inferops-cli",
+    }
+    if body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    request = URLRequest(url, data=data, method=method, headers=headers)
+    try:
+        with urlopen(request, timeout=15) as response:
+            raw = response.read().decode()
+    except HTTPError as exc:
+        detail = exc.read().decode(errors="replace").strip()
+        raise CLIError(
+            f"{method} {url} returned HTTP {exc.code}: {detail or exc.reason}"
+        ) from exc
+    except URLError as exc:
+        raise CLIError(f"{method} {url} failed: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise CLIError(f"{method} {url} timed out") from exc
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise CLIError(f"{method} {url} returned invalid JSON") from exc
+
+
+def _normalize_url(
+    value: str,
+    *,
+    label: str = "cloud API URL",
+    require_https_for_remote: bool = True,
+) -> str:
+    normalized = value.strip().rstrip("/")
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise CLIError(f"{label} must start with http:// or https://")
+    if (
+        require_https_for_remote
+        and parsed.scheme == "http"
+        and not _is_local_development_host(parsed.hostname)
+    ):
+        raise CLIError(f"{label} must use https unless it targets a local development host")
+    return normalized
+
+
+def _is_local_development_host(hostname: str | None) -> bool:
+    return hostname in {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "host.docker.internal",
+        "host.containers.internal",
+        "gateway.docker.internal",
+        "kubernetes.docker.internal",
+    }
+
+
+def _loopback_cloud_api_url_for_local_alias(cloud_api_url: str) -> str:
+    parsed = urlparse(cloud_api_url)
+    if parsed.scheme != "http" or parsed.hostname not in {
+        "host.docker.internal",
+        "host.containers.internal",
+        "gateway.docker.internal",
+        "kubernetes.docker.internal",
+    }:
+        return cloud_api_url
+    port = f":{parsed.port}" if parsed.port else ""
+    return f"{parsed.scheme}://127.0.0.1{port}"
+
+
+def _looks_like_dns_resolution_failure(message: str) -> bool:
+    lower = message.lower()
+    return any(
+        marker in lower
+        for marker in (
+            "nodename nor servname",
+            "name or service not known",
+            "temporary failure in name resolution",
+            "no address associated with hostname",
+        )
+    )
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _cloud_labels() -> dict[str, str]:
+    return {
+        "app.kubernetes.io/managed-by": "inferops-cli",
+        "inferops.dev/component": "cloud-connection",
+    }
+
+
+def _replacement_metadata(
+    existing: Any,
+    *,
+    name: str,
+    namespace: str,
+    labels: dict[str, str],
+) -> dict[str, Any]:
+    metadata = {"name": name, "namespace": namespace}
+    existing_metadata = getattr(existing, "metadata", None)
+    existing_labels = dict(getattr(existing_metadata, "labels", None) or {})
+    metadata["labels"] = {**existing_labels, **labels}
+    annotations = getattr(existing_metadata, "annotations", None)
+    if annotations:
+        metadata["annotations"] = dict(annotations)
+    resource_version = getattr(existing_metadata, "resource_version", None)
+    if resource_version:
+        metadata["resourceVersion"] = resource_version
+    return metadata
+
+
+def _cloud_check(check_id: str, status: str, message: str) -> dict[str, str]:
+    return {"id": check_id, "status": status, "message": message}
+
+
+def _doctor_to_cloud_check(check_id: str, check: DoctorCheck) -> dict[str, str]:
+    return _cloud_check(check_id, check.status, check.message)
+
+
+def _headscale_mesh_check(
+    config: dict[str, str],
+    gateway_secret: dict[str, str],
+) -> dict[str, str]:
+    missing = []
+    if not config.get("meshHostname"):
+        missing.append("meshHostname")
+    if not config.get("meshEndpointUrl"):
+        missing.append("meshEndpointUrl")
+    if not config.get("meshLoginServer"):
+        missing.append("meshLoginServer")
+    if not gateway_secret.get("meshAuthKey"):
+        missing.append("meshAuthKey secret")
+    if missing:
+        return _cloud_check(
+            "mesh-exposure",
+            "FAIL",
+            "Headscale sidecar mesh configuration is missing: " + ", ".join(missing),
+        )
+    return _cloud_check(
+        "mesh-exposure",
+        "PASS",
+        f"Headscale sidecar mesh configured for {config['meshHostname']} via {config['meshLoginServer']}",
+    )
+
+
+def _public_cloud_config(config: dict[str, str]) -> dict[str, Any]:
+    public = dict(config)
+    if "meshTags" in public:
+        try:
+            public["meshTags"] = json.loads(public["meshTags"])
+        except json.JSONDecodeError:
+            public["meshTags"] = []
+    return public
+
+
+def _heartbeat_freshness_check(
+    heartbeat: Any,
+    interval_seconds: int,
+) -> dict[str, str] | None:
+    if not heartbeat:
+        return _cloud_check("cloud-api", "WARN", "cloud API accepted credential but reported no heartbeat")
+    try:
+        heartbeat_at = _parse_timestamp(str(heartbeat))
+    except ValueError:
+        return _cloud_check(
+            "cloud-api",
+            "WARN",
+            f"cloud API reported an unparsable heartbeat timestamp: {heartbeat}",
+        )
+    age_seconds = (datetime.now(timezone.utc) - heartbeat_at).total_seconds()
+    stale_after_seconds = max(interval_seconds * 3, 60)
+    if age_seconds > stale_after_seconds:
+        return _cloud_check(
+            "cloud-api",
+            "FAIL",
+            f"last cloud heartbeat is stale: {int(age_seconds)}s ago",
+        )
+    return None
+
+
+def _parse_timestamp(value: str) -> datetime:
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _positive_int(value: Any, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed <= 0:
+        return default
+    return parsed
 
 
 def _endpoint_app_selector(name: str) -> dict[str, str]:

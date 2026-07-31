@@ -267,15 +267,6 @@ func (r *ModelDeploymentController) reconcile(
 		}
 		return ctrl.Result{}, err
 	}
-	if _, err := r.ensureConfigMap(ctx, deployment, modelRuntime); err != nil {
-		if errors.Is(err, errPermanentLifecycle) {
-			if _, deleteErr := r.deleteRuntimeWorkload(ctx, deployment); deleteErr != nil {
-				return ctrl.Result{}, deleteErr
-			}
-			return r.failDeployment(ctx, deployment, original, v1alpha1.ReasonRuntimeUnavailable, err.Error())
-		}
-		return ctrl.Result{}, err
-	}
 	r.setStableIdentity(deployment)
 
 	cache, created, err := r.ensureModelCache(ctx, deployment)
@@ -285,6 +276,15 @@ func (r *ModelDeploymentController) reconcile(
 				return ctrl.Result{}, deleteErr
 			}
 			return r.failDeployment(ctx, deployment, original, v1alpha1.ReasonCacheFailed, err.Error())
+		}
+		return ctrl.Result{}, err
+	}
+	if _, err := r.ensureConfigMap(ctx, deployment, modelRuntime, cache.Spec.Storage.Path); err != nil {
+		if errors.Is(err, errPermanentLifecycle) {
+			if _, deleteErr := r.deleteRuntimeWorkload(ctx, deployment); deleteErr != nil {
+				return ctrl.Result{}, deleteErr
+			}
+			return r.failDeployment(ctx, deployment, original, v1alpha1.ReasonRuntimeUnavailable, err.Error())
 		}
 		return ctrl.Result{}, err
 	}
@@ -671,11 +671,19 @@ func (r *ModelDeploymentController) ensureModelCache(
 	ctx context.Context,
 	deployment *v1alpha1.ModelDeployment,
 ) (*v1alpha1.ModelCache, bool, error) {
-	name, err := cachecontract.Name(deployment)
+	name, err := cachecontract.Name(deployment, r.cacheRoot)
 	if err != nil {
 		return nil, false, permanentLifecycleError(err)
 	}
 	cachePath, err := cachecontract.Path(deployment, r.cacheRoot)
+	if err != nil {
+		return nil, false, permanentLifecycleError(err)
+	}
+	identityLabels, err := cachecontract.Labels(deployment, r.cacheRoot)
+	if err != nil {
+		return nil, false, permanentLifecycleError(err)
+	}
+	identityAnnotations, err := cachecontract.Annotations(deployment, r.cacheRoot)
 	if err != nil {
 		return nil, false, permanentLifecycleError(err)
 	}
@@ -685,7 +693,7 @@ func (r *ModelDeploymentController) ensureModelCache(
 	}
 	desiredSpec := v1alpha1.ModelCacheSpec{
 		ModelRepo: deployment.Spec.Model.Repo,
-		Revision:  deployment.Spec.Model.Revision,
+		Revision:  cachecontract.Revision(deployment),
 		Storage: v1alpha1.ModelCacheStorage{
 			Type:         "nodeLocal",
 			Size:         size,
@@ -701,6 +709,15 @@ func (r *ModelDeploymentController) ensureModelCache(
 		if !apierrors.IsNotFound(err) {
 			return nil, false, fmt.Errorf("get ModelCache %q: %w", name, err)
 		}
+		legacy, found, err := r.legacyModelCache(ctx, deployment, size)
+		if err != nil {
+			return nil, false, err
+		}
+		if found {
+			r.eventRecorder.Eventf(deployment, corev1.EventTypeNormal, v1alpha1.ReasonCachePending,
+				"Using legacy ModelCache %q during shared-cache migration", legacy.Name)
+			return legacy, false, nil
+		}
 		cache = v1alpha1.ModelCache{
 			TypeMeta: metav1.TypeMeta{
 				APIVersion: v1alpha1.GroupVersion.String(),
@@ -710,13 +727,14 @@ func (r *ModelDeploymentController) ensureModelCache(
 				Name:      name,
 				Namespace: deployment.Namespace,
 				Labels: map[string]string{
-					resources.LabelPartOf:          resources.ValuePartOf,
-					resources.LabelManagedBy:       resources.ValueManagedBy,
-					resources.LabelModelDeployment: deployment.Name,
+					resources.LabelPartOf:    resources.ValuePartOf,
+					resources.LabelManagedBy: resources.ValueManagedBy,
 				},
+				Annotations: identityAnnotations,
 			},
 			Spec: desiredSpec,
 		}
+		mergeLabels(&cache.Labels, identityLabels)
 		if err := r.client.Create(ctx, &cache); err != nil {
 			return nil, false, fmt.Errorf("create ModelCache %q: %w", name, err)
 		}
@@ -726,28 +744,89 @@ func (r *ModelDeploymentController) ensureModelCache(
 	}
 
 	if !reflect.DeepEqual(cache.Spec, desiredSpec) {
-		if cache.Status.Phase == v1alpha1.ModelCachePhaseReady &&
-			!readyCacheSpecsCompatible(cache.Spec, desiredSpec) {
-			return nil, false, permanentLifecycleError(fmt.Errorf(
-				"ModelCache %q is ready with a different immutable cache contract",
-				cache.Name,
-			))
-		}
+		return nil, false, permanentLifecycleError(fmt.Errorf(
+			"ModelCache %q already exists for this artifact with an incompatible cache placement contract",
+			cache.Name,
+		))
+	}
+
+	if !containsLabels(cache.Labels, identityLabels) ||
+		cache.Labels[resources.LabelManagedBy] != resources.ValueManagedBy ||
+		!containsAnnotations(cache.Annotations, identityAnnotations) {
 		before := cache.DeepCopy()
-		cache.Spec = desiredSpec
-		ensureStringMapValue(&cache.Labels, resources.LabelModelDeployment, deployment.Name)
 		ensureStringMapValue(&cache.Labels, resources.LabelManagedBy, resources.ValueManagedBy)
+		mergeLabels(&cache.Labels, identityLabels)
+		mergeAnnotations(&cache.Annotations, identityAnnotations)
 		if err := r.client.Patch(ctx, &cache, client.MergeFrom(before)); err != nil {
-			return nil, false, fmt.Errorf("patch ModelCache %q: %w", name, err)
-		}
-	} else if cache.Labels[resources.LabelModelDeployment] != deployment.Name {
-		before := cache.DeepCopy()
-		ensureStringMapValue(&cache.Labels, resources.LabelModelDeployment, deployment.Name)
-		if err := r.client.Patch(ctx, &cache, client.MergeFrom(before)); err != nil {
-			return nil, false, fmt.Errorf("label ModelCache %q: %w", name, err)
+			return nil, false, fmt.Errorf("patch ModelCache metadata %q: %w", name, err)
 		}
 	}
+	if cache.Status.Phase == v1alpha1.ModelCachePhaseReady {
+		r.eventRecorder.Eventf(deployment, corev1.EventTypeNormal, v1alpha1.ReasonCacheVerified,
+			"Reusing ready shared ModelCache %q", name)
+	} else {
+		r.eventRecorder.Eventf(deployment, corev1.EventTypeNormal, v1alpha1.ReasonCachePending,
+			"Waiting for shared ModelCache %q", name)
+	}
 	return &cache, false, nil
+}
+
+func (r *ModelDeploymentController) legacyModelCache(
+	ctx context.Context,
+	deployment *v1alpha1.ModelDeployment,
+	size string,
+) (*v1alpha1.ModelCache, bool, error) {
+	name, err := cachecontract.LegacyName(deployment)
+	if err != nil {
+		return nil, false, permanentLifecycleError(err)
+	}
+	path, err := cachecontract.LegacyPath(deployment, r.cacheRoot)
+	if err != nil {
+		return nil, false, permanentLifecycleError(err)
+	}
+	key := types.NamespacedName{Namespace: deployment.Namespace, Name: name}
+	var cache v1alpha1.ModelCache
+	if err := r.client.Get(ctx, key, &cache); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("get legacy ModelCache %q: %w", name, err)
+	}
+	if !legacyCacheSpecMatches(cache.Spec, deployment, size, path) {
+		return nil, false, permanentLifecycleError(fmt.Errorf(
+			"legacy ModelCache %q exists with an incompatible cache contract",
+			cache.Name,
+		))
+	}
+	return &cache, true, nil
+}
+
+func legacyCacheSpecMatches(
+	spec v1alpha1.ModelCacheSpec,
+	deployment *v1alpha1.ModelDeployment,
+	size string,
+	path string,
+) bool {
+	desired := v1alpha1.ModelCacheSpec{
+		ModelRepo: deployment.Spec.Model.Repo,
+		Revision:  deployment.Spec.Model.Revision,
+		Storage: v1alpha1.ModelCacheStorage{
+			Type:         "nodeLocal",
+			Size:         size,
+			Path:         path,
+			NodeSelector: copyStringMap(deployment.Spec.Scheduling.NodeSelector),
+			Tolerations:  copyTolerations(deployment.Spec.Scheduling.Tolerations),
+		},
+		SecretRef: deployment.Spec.Secrets.HuggingFaceTokenSecretName,
+	}
+	specRevision := spec.Revision
+	desiredRevision := desired.Revision
+	spec.Revision = ""
+	desired.Revision = ""
+	return (specRevision == desiredRevision ||
+		(specRevision == "" && desiredRevision == "main") ||
+		(specRevision == "main" && desiredRevision == "")) &&
+		reflect.DeepEqual(spec, desired)
 }
 
 func (r *ModelDeploymentController) ensureService(
@@ -845,16 +924,13 @@ func (r *ModelDeploymentController) ensureConfigMap(
 	ctx context.Context,
 	deployment *v1alpha1.ModelDeployment,
 	modelRuntime *v1alpha1.ModelRuntime,
+	cachePath string,
 ) (*corev1.ConfigMap, error) {
 	desired, err := resources.BuildRuntimeConfigMap(deployment, modelRuntime)
 	if err != nil {
 		return nil, permanentLifecycleError(fmt.Errorf("build runtime ConfigMap: %w", err))
 	}
-	resolvedCachePath, err := cachecontract.Path(deployment, r.cacheRoot)
-	if err != nil {
-		return nil, permanentLifecycleError(fmt.Errorf("resolve runtime ConfigMap cache path: %w", err))
-	}
-	desired.Data["cache.path"] = resolvedCachePath
+	desired.Data["cache.path"] = cachePath
 	var existing corev1.ConfigMap
 	key := types.NamespacedName{Namespace: desired.Namespace, Name: desired.Name}
 	if err := r.client.Get(ctx, key, &existing); err != nil {
@@ -2212,6 +2288,24 @@ func containsLabels(existing, desired map[string]string) bool {
 	return true
 }
 
+func mergeAnnotations(existing *map[string]string, desired map[string]string) {
+	if *existing == nil {
+		*existing = make(map[string]string, len(desired))
+	}
+	for key, value := range desired {
+		(*existing)[key] = value
+	}
+}
+
+func containsAnnotations(existing, desired map[string]string) bool {
+	for key, value := range desired {
+		if existing[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
 func copyStringMap(input map[string]string) map[string]string {
 	if input == nil {
 		return nil
@@ -2251,12 +2345,6 @@ func ensureStringMapValue(values *map[string]string, key, value string) {
 		*values = make(map[string]string)
 	}
 	(*values)[key] = value
-}
-
-func readyCacheSpecsCompatible(existing, desired v1alpha1.ModelCacheSpec) bool {
-	existing.SecretRef = ""
-	desired.SecretRef = ""
-	return reflect.DeepEqual(existing, desired)
 }
 
 func permanentLifecycleError(err error) error {
@@ -2326,16 +2414,41 @@ func (r *ModelDeploymentController) requestsForReplacementParticipant(
 }
 
 func (r *ModelDeploymentController) requestsForCache(
-	_ context.Context,
+	ctx context.Context,
 	object client.Object,
 ) []reconcile.Request {
-	name := object.GetLabels()[resources.LabelModelDeployment]
-	if name == "" {
+	var deployments v1alpha1.ModelDeploymentList
+	if err := r.client.List(ctx, &deployments, client.InNamespace(object.GetNamespace())); err != nil {
+		log.FromContext(ctx).Error(err, "could not list ModelDeployments after ModelCache change")
 		return nil
 	}
-	return []reconcile.Request{{
-		NamespacedName: types.NamespacedName{Namespace: object.GetNamespace(), Name: name},
-	}}
+	requests := make([]reconcile.Request, 0, len(deployments.Items))
+	seen := make(map[types.NamespacedName]bool)
+	if legacyOwner := object.GetLabels()[resources.LabelModelDeployment]; legacyOwner != "" {
+		key := types.NamespacedName{Namespace: object.GetNamespace(), Name: legacyOwner}
+		requests = append(requests, reconcile.Request{NamespacedName: key})
+		seen[key] = true
+	}
+	for i := range deployments.Items {
+		deployment := &deployments.Items[i]
+		name, err := cachecontract.Name(deployment, r.cacheRoot)
+		if err != nil {
+			continue
+		}
+		if name != object.GetName() {
+			continue
+		}
+		key := types.NamespacedName{
+			Namespace: deployment.Namespace,
+			Name:      deployment.Name,
+		}
+		if seen[key] {
+			continue
+		}
+		requests = append(requests, reconcile.Request{NamespacedName: key})
+		seen[key] = true
+	}
+	return requests
 }
 
 func (r *ModelDeploymentController) requestsForRuntime(

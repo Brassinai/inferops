@@ -5,6 +5,7 @@ from __future__ import annotations
 from . import (
     activate,
     cache,
+    cloud,
     deactivate,
     delete,
     diagnose,
@@ -39,6 +40,7 @@ def build_parser() -> CLIArgumentParser:
     subcommands.required = True
     activate.register(subcommands)
     cache.register(subcommands)
+    cloud.register(subcommands)
     deactivate.register(subcommands)
     delete.register(subcommands)
     diagnose.register(subcommands)

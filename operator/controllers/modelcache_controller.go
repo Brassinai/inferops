@@ -7,6 +7,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/brassinai/inferops/operator/api/v1alpha1"
+	"github.com/brassinai/inferops/operator/internal/cachecontract"
 	controllermetrics "github.com/brassinai/inferops/operator/internal/metrics"
 	"github.com/brassinai/inferops/operator/internal/resources"
 	"github.com/brassinai/inferops/operator/internal/scheduler"
@@ -69,6 +70,7 @@ type ModelCacheReconciler struct {
 	client               client.Client
 	builder              resources.Builder
 	planner              *scheduler.CachePlanner
+	cacheRoot            string
 	eventRecorder        record.EventRecorder
 	metrics              controllermetrics.Recorder
 	pendingRequeueAfter  time.Duration
@@ -125,6 +127,7 @@ func NewModelCacheReconciler(
 		client:               c,
 		builder:              builder,
 		planner:              planner,
+		cacheRoot:            config.CacheRoot,
 		eventRecorder:        eventRecorder,
 		metrics:              config.Metrics,
 		pendingRequeueAfter:  config.PendingRequeueAfter,
@@ -253,10 +256,10 @@ func (r *ModelCacheReconciler) reconcile(ctx context.Context, cache *v1alpha1.Mo
 					cache,
 					original,
 					v1alpha1.CacheReasonSecretNotFound,
-					fmt.Sprintf("Referenced Secret %q does not exist", cache.Spec.SecretRef),
+					"Referenced credential Secret does not exist",
 				)
 			}
-			return ctrl.Result{}, fmt.Errorf("get referenced Secret %q: %w", cache.Spec.SecretRef, err)
+			return ctrl.Result{}, fmt.Errorf("get referenced credential Secret: %w", err)
 		}
 		if len(secret.Data["token"]) == 0 {
 			return r.setPending(
@@ -264,7 +267,7 @@ func (r *ModelCacheReconciler) reconcile(ctx context.Context, cache *v1alpha1.Mo
 				cache,
 				original,
 				v1alpha1.CacheReasonSecretKeyMissing,
-				fmt.Sprintf("Referenced Secret %q does not contain a non-empty token key", cache.Spec.SecretRef),
+				"Referenced credential Secret does not contain a non-empty token key",
 			)
 		}
 	}
@@ -750,7 +753,11 @@ func (r *ModelCacheReconciler) observeCacheInventory(
 		return fmt.Errorf("list model caches for inventory metrics: %w", err)
 	}
 
-	phaseCounts, reservedBytes := emptyCacheInventory()
+	referenceCountsByCache, err := r.cacheReferenceCounts(ctx)
+	if err != nil {
+		return err
+	}
+	phaseCounts, reservedBytes, referenceCounts := emptyCacheInventory()
 	seenCurrent := false
 	for i := range caches.Items {
 		cache := &caches.Items[i]
@@ -763,19 +770,37 @@ func (r *ModelCacheReconciler) observeCacheInventory(
 		if !cache.DeletionTimestamp.IsZero() {
 			continue
 		}
-		addCacheInventory(cache, phaseCounts, reservedBytes)
+		addCacheInventory(cache, phaseCounts, reservedBytes, referenceCounts, referenceCountsByCache[cache.Namespace+"/"+cache.Name])
 	}
 	if current != nil && !seenCurrent && current.DeletionTimestamp.IsZero() {
-		addCacheInventory(current, phaseCounts, reservedBytes)
+		addCacheInventory(current, phaseCounts, reservedBytes, referenceCounts, referenceCountsByCache[current.Namespace+"/"+current.Name])
 	}
 
-	r.metrics.SetModelCacheInventory(phaseCounts, reservedBytes)
+	r.metrics.SetModelCacheInventory(phaseCounts, reservedBytes, referenceCounts)
 	return nil
 }
 
-func emptyCacheInventory() (map[string]float64, map[string]float64) {
+func (r *ModelCacheReconciler) cacheReferenceCounts(ctx context.Context) (map[string]float64, error) {
+	var deployments v1alpha1.ModelDeploymentList
+	if err := r.client.List(ctx, &deployments); err != nil {
+		return nil, fmt.Errorf("list model deployments for cache reference metrics: %w", err)
+	}
+	counts := make(map[string]float64)
+	for i := range deployments.Items {
+		deployment := &deployments.Items[i]
+		name, err := cachecontract.Name(deployment, r.cacheRoot)
+		if err != nil {
+			continue
+		}
+		counts[deployment.Namespace+"/"+name]++
+	}
+	return counts, nil
+}
+
+func emptyCacheInventory() (map[string]float64, map[string]float64, map[string]float64) {
 	phaseCounts := map[string]float64{}
 	reservedBytes := map[string]float64{}
+	referenceCounts := map[string]float64{}
 	for _, phase := range []string{
 		string(v1alpha1.ModelCachePhasePending),
 		string(v1alpha1.ModelCachePhaseDownloading),
@@ -785,20 +810,24 @@ func emptyCacheInventory() (map[string]float64, map[string]float64) {
 	} {
 		phaseCounts[phase] = 0
 		reservedBytes[phase] = 0
+		referenceCounts[phase] = 0
 	}
-	return phaseCounts, reservedBytes
+	return phaseCounts, reservedBytes, referenceCounts
 }
 
 func addCacheInventory(
 	cache *v1alpha1.ModelCache,
 	phaseCounts map[string]float64,
 	reservedBytes map[string]float64,
+	referenceCounts map[string]float64,
+	references float64,
 ) {
 	phase := string(cache.Status.Phase)
 	if phase == "" {
 		phase = "Unknown"
 	}
 	phaseCounts[phase]++
+	referenceCounts[phase] += references
 
 	size := cache.Status.ReservedSize
 	if size == "" {

@@ -83,8 +83,55 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-      {{- if .Values.auth.enabled }}
+        {{- if and .Values.tailscale.enabled (eq .Values.tailscale.mode "headscale") }}
+        - name: tailscale
+          image: "{{ .Values.tailscale.image.repository }}:{{ .Values.tailscale.image.tag }}"
+          imagePullPolicy: {{ .Values.tailscale.image.pullPolicy }}
+          env:
+            - name: TS_AUTHKEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "tailscale.authKeySecretName is required when tailscale.mode=headscale" .Values.tailscale.authKeySecretName | quote }}
+                  key: {{ required "tailscale.authKeySecretKey is required when tailscale.mode=headscale" .Values.tailscale.authKeySecretKey | quote }}
+            - name: TS_HOSTNAME
+              value: {{ .Values.tailscale.hostname | quote }}
+            - name: TS_STATE_DIR
+              value: {{ .Values.tailscale.stateDir | quote }}
+            - name: TS_KUBE_SECRET
+              value: {{ .Values.tailscale.kubeSecret | quote }}
+            - name: TS_USERSPACE
+              value: {{ .Values.tailscale.userspace | quote }}
+            - name: TS_AUTH_ONCE
+              value: {{ .Values.tailscale.authOnce | quote }}
+            - name: TS_DEST_IP
+              value: "127.0.0.1"
+            - name: TS_EXTRA_ARGS
+              value: {{ printf "--login-server=%s %s" (required "tailscale.loginServer is required when tailscale.mode=headscale" .Values.tailscale.loginServer) .Values.tailscale.extraArgs | quote }}
+          volumeMounts:
+            - name: tailscale-state
+              mountPath: {{ .Values.tailscale.stateDir | quote }}
+            {{- if not .Values.tailscale.userspace }}
+            - name: dev-net-tun
+              mountPath: /dev/net/tun
+            {{- end }}
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            allowPrivilegeEscalation: {{ ternary false true .Values.tailscale.userspace }}
+            readOnlyRootFilesystem: false
+            capabilities:
+              {{- if .Values.tailscale.userspace }}
+              drop:
+                - ALL
+              {{- else }}
+              add:
+                - NET_ADMIN
+                - SYS_MODULE
+              {{- end }}
+        {{- end }}
+      {{- if or .Values.auth.enabled (and .Values.tailscale.enabled (eq .Values.tailscale.mode "headscale")) }}
       volumes:
+        {{- if .Values.auth.enabled }}
         - name: gateway-auth
           secret:
             secretName: {{ required "auth.secretName is required when auth.enabled is true" .Values.auth.secretName | quote }}
@@ -92,6 +139,17 @@ spec:
             items:
               - key: {{ required "auth.secretKey is required when auth.enabled is true" .Values.auth.secretKey | quote }}
                 path: {{ .Values.auth.secretKey | quote }}
+        {{- end }}
+        {{- if and .Values.tailscale.enabled (eq .Values.tailscale.mode "headscale") }}
+        - name: tailscale-state
+          emptyDir: {}
+        {{- if not .Values.tailscale.userspace }}
+        - name: dev-net-tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice
+        {{- end }}
+        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

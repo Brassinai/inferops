@@ -295,6 +295,29 @@ func TestCachePlannerAccountsReservedCapacity(t *testing.T) {
 	}
 }
 
+func TestCachePlannerDoesNotDoubleReserveRequestedSharedCache(t *testing.T) {
+	t.Parallel()
+
+	planner := testPlanner(t)
+	cache := testCache("model-shared-cache")
+	cache.UID = "shared-cache-uid"
+	cache.Status = v1alpha1.ModelCacheStatus{
+		Phase:        v1alpha1.ModelCachePhaseDownloading,
+		NodeName:     "gpu-node-1",
+		Path:         cache.Spec.Storage.Path,
+		ReservedSize: "100Gi",
+	}
+	nodes := []corev1.Node{readyNode("gpu-node-1", "150Gi")}
+
+	placement, err := planner.Plan(cache, nodes, []v1alpha1.ModelCache{*cache})
+	if err != nil {
+		t.Fatalf("Plan() error = %v", err)
+	}
+	if placement.NodeName != "gpu-node-1" {
+		t.Fatalf("node = %q, want gpu-node-1", placement.NodeName)
+	}
+}
+
 func TestCachePlannerPrefersExistingReadyCopy(t *testing.T) {
 	t.Parallel()
 

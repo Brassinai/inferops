@@ -91,6 +91,10 @@ spec:
 | `cache.size` | Operator `cache.defaultSize` (`100Gi` by default) |
 | `cache.path` | Operator `cache.root` |
 
+`cache.enabled` is reserved for future cache modes and must remain `true` in
+the current release. The operator depends on node-local cache placement for
+runtime handoff, scheduling locality, and cache deletion safety.
+
 ### GPU rules
 
 - Include `resources.gpu` for GPU workloads; omit for CPU-only.
@@ -355,13 +359,19 @@ Phases: `Pending`, `Ready`, `Unavailable`, `Failed`. The controller publishes a
 
 ## ModelCache
 
-Tracks one model revision at one location.
+Tracks one model artifact at one location. Caches generated from
+`ModelDeployment` are artifact-scoped, not deployment-scoped: two deployments
+in the same namespace with the same source, repository, revision, cache root,
+storage type, and `secretRef` use the same `ModelCache`.
 
 ```yaml
 apiVersion: inference.inferops.dev/v1alpha1
 kind: ModelCache
 metadata:
-  name: qwen-chat-cache
+  name: model-8f4d2c4f0e6a9d12f1d7b2a08cbd7e61-cache
+  labels:
+    inferops.dev/cache-mode: shared
+    inferops.dev/cache-identity: 8f4d2c4f0e6a9d12f1d7b2a08cbd7e61
 spec:
   modelRepo: Qwen/Qwen2.5-7B-Instruct
   revision: main
@@ -376,7 +386,7 @@ spec:
         operator: Equal
         value: inference
         effect: NoSchedule
-    path: /var/lib/inferops/models/qwen-chat-cache
+    path: /var/lib/inferops/models/default/artifacts/8f4d2c4f0e6a9d12f1d7b2a08cbd7e61
   secretRef: hf-token
 ```
 
@@ -386,6 +396,21 @@ selects a node and records it in `status.nodeName` and `status.nodeUID`.
 `spec.storage.nodeSelector` and `spec.storage.tolerations` constrain both
 placement and the downloader Job. Generated caches inherit these fields from
 their `ModelDeployment`.
+
+Cache identity rules:
+
+- `model.revision` defaults to `main` before identity hashing.
+- Namespace is a hard sharing boundary.
+- `secretRef` is part of the identity, so public same-repo deployments share
+  while private/gated deployments using different token Secrets do not.
+- The deployment name and runtime engine are excluded from identity. Runtime
+  workloads can share when they consume the same artifact layout.
+- Cross-namespace shared caches are not supported in `v1alpha1`. Any future
+  cross-namespace mode must be an explicit opt-in API with separate RBAC,
+  credential, quota, and deletion-safety rules.
+- Incompatible placement contracts for the same artifact, such as different
+  node selectors or requested cache sizes, fail explicitly instead of mutating
+  a shared cache behind another deployment.
 
 Phases: `Pending`, `Downloading`, `Ready`, `Failed`.
 
@@ -429,10 +454,21 @@ unavailable. Job and Node watches normally reconcile sooner.
 
 Deleting a `ModelDeployment` garbage-collects its owned Service, ConfigMap,
 runtime Deployment, and `PodDisruptionBudget`. Its deterministic `ModelCache`
-is deliberately not owned by the deployment and remains available for reuse.
-Deleting a `ModelCache`
-object also does not remove on-disk files. Explicit, retry-safe cache cleanup
-will be added in a future release.
+is deliberately not owned by the deployment and remains available for reuse by
+other deployments with the same artifact identity. Deleting a `ModelCache`
+object also does not remove on-disk files. Use `inferops cache delete`; it
+refuses while live deployments or Pods still reference the cache unless
+`--force` is used.
+
+There is no automatic shared-cache garbage collector in `v1alpha1`. Unreferenced
+cache cleanup remains an explicit operator action through the CLI or Kubernetes
+API, and host filesystem cleanup remains outside CLI cache deletion.
+
+Existing deployment-scoped cache objects and node-local files remain readable
+after upgrade. If a matching legacy cache exists, the deployment keeps using
+that cache path. New deployments, and deployments whose legacy cache has been
+removed, create artifact-scoped caches under
+`<cache-root>/<namespace>/artifacts/<hash>`.
 
 `status.lastUsedTime` changes only when a runtime begins or ends a real
 consumer transition. Routine cache and deployment reconciliation does not
@@ -443,9 +479,9 @@ refresh it.
 For a `ModelDeployment` named `<name>` in namespace `<namespace>`:
 
 - Runtime Service: `<name>-runtime`
-- ModelCache: a label-safe name derived from namespace, deployment name, model
-  repository, and revision
-- ModelCache path: `<cache-root>/<namespace>/<derived-cache-name>`
+- ModelCache: `model-<artifact-hash>-cache`, derived from namespace, source,
+  model repository, revision, cache root, storage type, and `secretRef`
+- ModelCache path: `<cache-root>/<namespace>/artifacts/<artifact-hash>`
 - Gateway route: `/models/<name>/v1/...`
 - Gateway strips `/models/<name>` and forwards `/v1/...` to the runtime Service on port `8000`
 

@@ -8,7 +8,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestNameAndPathAreDeterministicAndRevisionScoped(t *testing.T) {
+func TestNameAndPathAreDeterministicAndArtifactScoped(t *testing.T) {
 	t.Parallel()
 
 	deployment := &v1alpha1.ModelDeployment{
@@ -21,11 +21,11 @@ func TestNameAndPathAreDeterministicAndRevisionScoped(t *testing.T) {
 			Cache: v1alpha1.CacheSpec{Path: "/var/lib/inferops/models"},
 		},
 	}
-	first, err := Name(deployment)
+	first, err := Name(deployment, "/ignored")
 	if err != nil {
 		t.Fatalf("Name() error = %v", err)
 	}
-	second, err := Name(deployment)
+	second, err := Name(deployment, "/ignored")
 	if err != nil {
 		t.Fatalf("Name() second error = %v", err)
 	}
@@ -43,14 +43,69 @@ func TestNameAndPathAreDeterministicAndRevisionScoped(t *testing.T) {
 	if !strings.HasPrefix(path, "/var/lib/inferops/models/tenant-a/") {
 		t.Errorf("path = %q, want deployment cache root and namespace", path)
 	}
+	if !strings.Contains(path, "/artifacts/") {
+		t.Errorf("path = %q, want artifact-scoped path", path)
+	}
+
+	sameArtifact := deployment.DeepCopy()
+	sameArtifact.Name = "other-deployment"
+	sameName, err := Name(sameArtifact, "/ignored")
+	if err != nil {
+		t.Fatalf("Name() same artifact error = %v", err)
+	}
+	if sameName != first {
+		t.Fatalf("same artifact cache name = %q, want shared %q", sameName, first)
+	}
 
 	deployment.Spec.Model.Revision = "v2"
-	changed, err := Name(deployment)
+	changed, err := Name(deployment, "/ignored")
 	if err != nil {
 		t.Fatalf("Name() changed revision error = %v", err)
 	}
 	if changed == first {
 		t.Error("cache name did not change with revision")
+	}
+}
+
+func TestIdentityBoundaries(t *testing.T) {
+	t.Parallel()
+
+	base := &v1alpha1.ModelDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "model-a", Namespace: "tenant-a"},
+		Spec: v1alpha1.ModelDeploymentSpec{
+			Model: v1alpha1.ModelSpec{Repo: "org/model"},
+			Cache: v1alpha1.CacheSpec{Path: "/cache"},
+		},
+	}
+	baseName, err := Name(base, "/ignored")
+	if err != nil {
+		t.Fatalf("Name() base error = %v", err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*v1alpha1.ModelDeployment)
+	}{
+		{name: "namespace", mutate: func(d *v1alpha1.ModelDeployment) { d.Namespace = "tenant-b" }},
+		{name: "repo", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Model.Repo = "org/other" }},
+		{name: "revision", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Model.Revision = "v2" }},
+		{name: "source", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Model.Source = "s3" }},
+		{name: "root", mutate: func(d *v1alpha1.ModelDeployment) { d.Spec.Cache.Path = "/other-cache" }},
+		{name: "secret", mutate: func(d *v1alpha1.ModelDeployment) {
+			d.Spec.Secrets.HuggingFaceTokenSecretName = "hf-private"
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			deployment := base.DeepCopy()
+			test.mutate(deployment)
+			name, err := Name(deployment, "/ignored")
+			if err != nil {
+				t.Fatalf("Name() error = %v", err)
+			}
+			if name == baseName {
+				t.Fatalf("cache name did not change across %s boundary", test.name)
+			}
+		})
 	}
 }
 

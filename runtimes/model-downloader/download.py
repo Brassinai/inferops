@@ -18,7 +18,7 @@ import tempfile
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 MANIFEST_NAME = ".inferops-cache.json"
 
@@ -50,6 +50,14 @@ def main() -> int:
     args = parse_args()
 
     cache_root = Path(args.cache_root)
+    try:
+        validate_subpath(args.dest_subpath, "dest-subpath")
+        validate_subpath(args.staging_subpath, "staging-subpath")
+        validate_distinct_paths(args.dest_subpath, args.staging_subpath)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
     dest_path = cache_root / args.dest_subpath
     staging_path = cache_root / args.staging_subpath
     manifest_path = dest_path / MANIFEST_NAME
@@ -60,6 +68,9 @@ def main() -> int:
         staging_path.resolve().relative_to(cache_root.resolve())
     except ValueError as exc:
         print(f"error: destination or staging escapes cache root: {exc}", file=sys.stderr)
+        return 1
+    if dest_path.is_symlink() or staging_path.is_symlink():
+        print("error: destination and staging paths must not be symlinks", file=sys.stderr)
         return 1
 
     # If a valid marker for the same identity already exists, succeed without
@@ -107,6 +118,25 @@ def main() -> int:
         if staging_path.exists():
             shutil.rmtree(staging_path)
         return 1
+
+
+def validate_subpath(value: str, field: str) -> None:
+    path = PurePosixPath(value)
+    if not value or value.strip() != value:
+        raise ValueError(f"{field} must be a non-empty relative path")
+    if path.is_absolute():
+        raise ValueError(f"{field} must be relative")
+    if path.parts in ((), (".",)) or any(part in ("", ".", "..") for part in path.parts):
+        raise ValueError(f"{field} must not contain empty, current, or parent segments")
+
+
+def validate_distinct_paths(dest_subpath: str, staging_subpath: str) -> None:
+    dest = PurePosixPath(dest_subpath)
+    staging = PurePosixPath(staging_subpath)
+    if dest == staging:
+        raise ValueError("dest-subpath and staging-subpath must be different")
+    if dest in staging.parents or staging in dest.parents:
+        raise ValueError("dest-subpath and staging-subpath must not be nested")
 
 
 def manifest_matches(existing: object, args: argparse.Namespace) -> bool:

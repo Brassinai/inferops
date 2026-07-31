@@ -81,6 +81,21 @@ with `--compute-profile nvidia-gpu`.
 Activation is explicit. Applying a manifest declares the model, prepares cache
 state, and keeps the runtime inactive until you request compute.
 
+Deployments in the same namespace that use the same model source, repository,
+revision, cache root, storage type, and Hugging Face Secret reuse one
+artifact-scoped `ModelCache`. Changing the revision or Secret creates a
+separate cache.
+
+To see cache reuse directly, apply the paired CPU example:
+
+```bash
+kubectl --context orbstack apply -f examples/yaml-deploy/modeldeployment-cpu-shared.yaml
+inferops cache list --context orbstack
+```
+
+The two deployments, `cpu-smollm-a` and `cpu-smollm-b`, should reference one
+`mode=shared` cache.
+
 ## CPU llama.cpp
 
 Use `modeldeployment-cpu.yaml` for a portable CPU path with llama.cpp and a

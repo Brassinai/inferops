@@ -1,0 +1,61 @@
+apiVersion: inference.inferops.dev/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: cpu-smollm-a
+spec:
+  model:
+    name: cpu-smollm
+    source: huggingface
+    repo: jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF
+    revision: main
+  runtime:
+    ref: llama-cpp
+    maxModelLen: 512
+  resources:
+    cpu: "4"
+    memory: 2Gi
+  activation:
+    desiredState: Inactive
+    whenFull: Queue
+  scaling:
+    minReplicas: 0
+    maxReplicas: 1
+  routing:
+    enabled: true
+    path: /models/cpu-smollm-a
+    openAICompatible: true
+  cache:
+    enabled: true
+    type: nodeLocal
+    size: 1Gi
+---
+apiVersion: inference.inferops.dev/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: cpu-smollm-b
+spec:
+  model:
+    name: cpu-smollm
+    source: huggingface
+    repo: jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF
+    revision: main
+  runtime:
+    ref: llama-cpp
+    maxModelLen: 512
+  resources:
+    cpu: "4"
+    memory: 2Gi
+  activation:
+    desiredState: Inactive
+    whenFull: Queue
+  scaling:
+    minReplicas: 0
+    maxReplicas: 1
+  routing:
+    enabled: true
+    path: /models/cpu-smollm-b
+    openAICompatible: true
+  cache:
+    enabled: true
+    type: nodeLocal
+    size: 1Gi

@@ -105,6 +105,15 @@ class SDKCustomEndpointTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "bind_runtime"):
             asyncio.run(QwenChat().generate("hello"))
 
+    def test_model_decorator_rejects_disabled_cache(self) -> None:
+        app = App("support")
+
+        with self.assertRaisesRegex(ValueError, "cache_enabled=False is not supported"):
+
+            @app.model(name="qwen-chat", model="repo/chat", cache_enabled=False)
+            class QwenChat:
+                pass
+
     def test_custom_endpoint_semantics_cover_response_and_streaming(self) -> None:
         app = App("support")
 

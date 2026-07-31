@@ -154,10 +154,12 @@ inferops gpu list
 
 After the host prerequisites and install checks pass, run the recorded
 single-node GPU acceptance workflow from the repository root. The script runs
-install, doctor, GPU inventory, deploy, cache inspection, activation, streaming
-OpenAI-compatible inference, deactivation, GPU release inspection,
-re-activation, and cache inspection. It writes timings, command output, and
-defects to a Markdown report.
+a preflight for `inferops`, `kubectl`, and Kubernetes API reachability; install;
+doctor; GPU inventory; deploy; cache inspection; activation; streaming
+OpenAI-compatible inference; deactivation; GPU release inspection;
+re-activation; and cache inspection. It writes timings, command output, and
+defects to a Markdown report. Pass `--context` and `--kubeconfig` when the
+target cluster is not the current kubeconfig context.
 
 ```bash
 scripts/homelab_acceptance.py \
@@ -169,7 +171,25 @@ scripts/homelab_acceptance.py \
 ```
 
 If the platform is already installed, add `--skip-install`. To validate
-explicit single-GPU replacement, add a second manifest and name:
+shared cache reuse with the paired CPU manifest, pass the peer deployment name:
+
+```bash
+scripts/homelab_acceptance.py \
+  --manifest examples/yaml-deploy/modeldeployment-cpu-shared.yaml \
+  --model-name cpu-smollm-a \
+  --shared-cache-peer cpu-smollm-b \
+  --gateway-url http://<gateway-host> \
+  --namespace inferops-system \
+  --context <cluster-context> \
+  --skip-install \
+  --output homelab-shared-cache-acceptance.md
+```
+
+That run validates that cache inspection shows one `mode=shared` cache
+referenced by both deployments, and that `inferops cache delete <cache>` refuses
+while either deployment still references it.
+
+To validate explicit single-GPU replacement, add a second manifest and name:
 
 ```bash
 scripts/homelab_acceptance.py \

@@ -218,7 +218,8 @@ inferops delete qwen-chat
 Delete removes the deployment and Service. Cache remains until you run:
 
 ```bash
-inferops cache delete qwen-chat
+inferops cache list
+inferops cache delete <cache-name>
 ```
 
 ## Next steps

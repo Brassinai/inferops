@@ -252,9 +252,24 @@ data:
         },
         {
           "id": 14,
+          "type": "timeseries",
+          "title": "Cache references by phase",
+          "description": "Live ModelDeployment references to artifact caches.",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 28},
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "sum by (phase) (inferops_modelcache_reference_count{phase=~\"$cache_phase\"})",
+              "legendFormat": "{{`{{phase}}`}}"
+            }
+          ],
+          "fieldConfig": {"defaults": {"unit": "short"}}
+        },
+        {
+          "id": 15,
           "type": "text",
           "title": "Runtime dashboard standard",
-          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 28},
+          "gridPos": {"h": 8, "w": 24, "x": 0, "y": 36},
           "options": {
             "mode": "markdown",
             "content": "Use this platform dashboard for InferOps-owned signals that apply to every runtime. Add a runtime dashboard only for engine-native metrics, keep labels bounded, and document panels whose metrics are not exported by a runtime."

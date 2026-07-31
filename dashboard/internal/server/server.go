@@ -549,6 +549,12 @@ func defaultMetricQueries() []MetricQuery {
 			Query:       "sum(inferops_modelcache_reserved_bytes) by (phase)",
 		},
 		{
+			Name:        "Cache references",
+			Category:    "Cache",
+			Description: "Live ModelDeployment references to ModelCache objects by lifecycle phase.",
+			Query:       "sum(inferops_modelcache_reference_count) by (phase)",
+		},
+		{
 			Name:        "Cache download p95",
 			Category:    "Cache",
 			Description: "Downloader Job duration from creation to verified cache completion.",

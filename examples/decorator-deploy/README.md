@@ -32,6 +32,20 @@ curl -X POST http://127.0.0.1:8080/models/cpu-smollm-decorator/v1/chat/completio
 The CPU app uses the small GGUF model from the YAML smoke test and sets
 `gpu=None`, so it does not request Kubernetes GPU resources.
 
+## Shared Cache
+
+Use `app_shared_cache.py` to declare two CPU deployments that reference the
+same model repository, revision, cache root, and Secret boundary:
+
+```bash
+inferops deploy examples/decorator-deploy/app_shared_cache.py --context orbstack
+inferops cache list --context orbstack
+```
+
+Both `cpu-smollm-a` and `cpu-smollm-b` should reference one `mode=shared`
+cache. Changing either deployment's `model_revision` or
+`hugging_face_token_secret_name` creates a separate cache.
+
 ## GPU vLLM
 
 Use `app.py` for GPU testing with vLLM:

@@ -143,6 +143,7 @@ kubectl apply -f modeldeployment.yaml
 - [SDK reference](docs/sdk.md)
 - [CRD reference](docs/crds.md)
 - [Cluster and ingress support](docs/cluster-ingress.md)
+- [Cloud mesh connect](docs/cloud-mesh-connect.md)
 - [Self-hosted dashboard](docs/dashboard.md)
 - [Production notes](docs/production.md)
 - [Namespace tenancy](docs/tenancy.md)

@@ -48,16 +48,87 @@ class CacheReferenceTest(unittest.TestCase):
 
         self.assertEqual(refs, ["cpu-smollm-a"])
 
+    def test_shared_artifact_cache_references_same_identity_deployments(self) -> None:
+        cache = shared_cache()
+        deployments = [
+            deployment("cpu-smollm-a", ""),
+            deployment("cpu-smollm-b", ""),
+            deployment("cpu-smollm-c", "", revision="other"),
+            deployment("cpu-smollm-private", "", secret="hf-private"),
+        ]
 
-def deployment(name: str, cache_path: str) -> dict:
+        refs = cache_references(
+            cache,
+            deployments,
+            "/var/lib/inferops/models/default/artifacts/abc123",
+        )
+
+        self.assertEqual(refs, ["cpu-smollm-a", "cpu-smollm-b"])
+
+    def test_shared_cache_reference_respects_explicit_cache_root(self) -> None:
+        cache = shared_cache()
+        deployments = [
+            deployment("cpu-smollm-a", "", cache_root="/other-cache"),
+            deployment("cpu-smollm-b", ""),
+        ]
+
+        refs = cache_references(
+            cache,
+            deployments,
+            "/var/lib/inferops/models/default/artifacts/abc123",
+        )
+
+        self.assertEqual(refs, ["cpu-smollm-b"])
+
+
+def shared_cache() -> dict:
     return {
-        "metadata": {"name": name},
+        "metadata": {
+            "name": "model-abc123-cache",
+            "namespace": "default",
+            "labels": {
+                "inferops.dev/cache-mode": "shared",
+                "inferops.dev/cache-identity": "abc123",
+            },
+            "annotations": {
+                "inferops.dev/cache-source": "huggingface",
+                "inferops.dev/cache-root": "/var/lib/inferops/models",
+            },
+        },
         "spec": {
-            "cache": {"enabled": True},
+            "modelRepo": "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF",
+            "revision": "main",
+            "storage": {
+                "path": "/var/lib/inferops/models/default/artifacts/abc123"
+            },
+        },
+        "status": {},
+    }
+
+
+def deployment(
+    name: str,
+    cache_path: str,
+    *,
+    revision: str = "main",
+    secret: str = "",
+    cache_root: str = "",
+) -> dict:
+    secrets = {}
+    if secret:
+        secrets["huggingFaceTokenSecretName"] = secret
+    cache_spec = {"enabled": True}
+    if cache_root:
+        cache_spec["path"] = cache_root
+    return {
+        "metadata": {"name": name, "namespace": "default"},
+        "spec": {
+            "cache": cache_spec,
             "model": {
                 "repo": "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF",
-                "revision": "main",
+                "revision": revision,
             },
+            "secrets": secrets,
         },
         "status": {"cache": {"path": cache_path}},
     }

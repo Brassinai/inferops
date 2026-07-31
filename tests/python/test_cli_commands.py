@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta, timezone
 import io
 import json
 from pathlib import Path
@@ -15,6 +16,7 @@ import unittest
 from inferops_cli import (
     activate,
     cache,
+    cloud,
     deactivate,
     delete,
     diagnose,
@@ -37,14 +39,21 @@ from inferops_cli import (
 )
 from inferops_cli.errors import CLIError
 from inferops_cli.k8s_client import (
+    _heartbeat_freshness_check,
     _endpoint_app_deployment_body,
     _endpoint_app_labels,
     _ensure_endpoint_app_owned,
     _ensure_endpoint_selector_compatible,
+    _loopback_cloud_api_url_for_local_alias,
+    _normalize_cloud_redeem_payload,
+    _normalize_url,
 )
 from inferops_cli.kube import ClusterTarget, EndpointAppDeployRequest
 from inferops_cli.output import CommandResult, emit_result
 from tests.python.fake_kube_client import FakeKubernetesClient
+
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def make_args(**overrides) -> argparse.Namespace:
@@ -123,6 +132,7 @@ class CLICommandParserTest(unittest.TestCase):
         for command in (
             "activate",
             "cache",
+            "cloud",
             "deactivate",
             "deploy",
             "deploy-endpoints",
@@ -157,6 +167,7 @@ class CLICommandParserTest(unittest.TestCase):
         serve_help = self._parse_help(["serve", "--help"])
         deploy_endpoints_help = self._parse_help(["deploy-endpoints", "--help"])
         observability_help = self._parse_help(["observability", "setup", "--help"])
+        cloud_help = self._parse_help(["cloud", "connect", "--help"])
         uninstall_help = self._parse_help(["uninstall", "--help"])
 
         self.assertIn("List GPU capacity, occupancy, and availability", gpu_help)
@@ -167,6 +178,7 @@ class CLICommandParserTest(unittest.TestCase):
         self.assertIn("@inferops.web_endpoint", serve_help)
         self.assertIn("@inferops.web_endpoint", deploy_endpoints_help)
         self.assertIn("kube-prometheus-stack", observability_help)
+        self.assertIn("bootstrap token", cloud_help)
         self.assertIn("Uninstall InferOps Helm releases", uninstall_help)
 
     def test_install_help_documents_profile_configuration(self) -> None:
@@ -1247,6 +1259,27 @@ class CLICommandHandlerTest(unittest.TestCase):
             "team-b",
         )
 
+    def test_fake_client_decorator_shared_cache_example_reuses_one_cache(self) -> None:
+        app_path = ROOT / "examples/decorator-deploy/app_shared_cache.py"
+        fake_client = FakeKubernetesClient()
+
+        self._run(
+            deploy.run,
+            make_args(app=str(app_path), namespace="team-a"),
+            fake_client,
+        )
+        cache_stdout, _, _ = self._run(
+            cache.run_list, make_args(namespace="team-a"), fake_client
+        )
+        payload = json.loads(cache_stdout)
+
+        self.assertEqual(len(payload["caches"]), 1)
+        self.assertEqual(payload["caches"][0]["mode"], "shared")
+        self.assertEqual(
+            payload["caches"][0]["referencedBy"],
+            ["cpu-smollm-a", "cpu-smollm-b"],
+        )
+
     def test_output_redacts_sensitive_fields(self) -> None:
         stdout = io.StringIO()
         with redirect_stdout(stdout):
@@ -1384,6 +1417,156 @@ class CLICommandHandlerTest(unittest.TestCase):
         self.assertTrue(payload.get("annotated"))
         self.assertTrue(payload.get("deleted"))
         self.assertFalse(payload.get("nodeFilesModified"))
+
+    def test_cloud_connect_status_and_disconnect(self) -> None:
+        fake_client = FakeKubernetesClient()
+        connect_stdout, _, exit_code = self._run_main(
+            [
+                "cloud",
+                "connect",
+                "--token",
+                "bootstrap-token",
+                "--cluster-name",
+                "dev-cluster",
+                "--namespace",
+                "team-a",
+                "-o",
+                "json",
+            ],
+            fake_client,
+        )
+
+        self.assertEqual(exit_code, 0)
+        connect_payload = json.loads(connect_stdout)
+        self.assertEqual(connect_payload["connection"]["providerClusterId"], "dev-cluster")
+        self.assertIn("secret/inferops-cloud-connection", connect_payload["secrets"])
+
+        status_stdout, _, exit_code = self._run_main(
+            ["cloud", "status", "--namespace", "team-a", "-o", "json"],
+            fake_client,
+        )
+
+        self.assertEqual(exit_code, 0)
+        status_payload = json.loads(status_stdout)
+        self.assertEqual(status_payload["checks"][0]["status"], "PASS")
+
+        disconnect_stdout, _, exit_code = self._run_main(
+            ["cloud", "disconnect", "--namespace", "team-a", "-o", "json"],
+            fake_client,
+        )
+
+        self.assertEqual(exit_code, 0)
+        disconnect_payload = json.loads(disconnect_stdout)
+        self.assertTrue(disconnect_payload["disconnected"])
+
+    def test_cloud_connect_requires_token(self) -> None:
+        stdout, stderr, exit_code = self._run_main(
+            ["cloud", "connect", "--namespace", "team-a"],
+            FakeKubernetesClient(),
+        )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("cloud bootstrap token is required", stderr)
+
+    def test_cloud_payload_normalization_accepts_private_http_mesh_endpoint(self) -> None:
+        payload = _normalize_cloud_redeem_payload(
+            {
+                "cloudApiUrl": "https://cloud.example.test",
+                "providerAccountId": "provider",
+                "providerClusterId": "cluster",
+                "agentCredential": "agent-secret",
+                "meshProvider": "tailscale",
+                "meshHostname": "inferops",
+                "meshEndpointUrl": "http://100.64.0.5:80",
+                "meshTags": ["tag:provider-agent"],
+                "agentConfig": {"heartbeatIntervalSeconds": "15"},
+            },
+            fallback_cloud_api_url="https://cloud.example.test",
+        )
+
+        self.assertEqual(payload["meshEndpointUrl"], "http://100.64.0.5:80")
+        self.assertEqual(payload["heartbeatIntervalSeconds"], 15)
+        self.assertEqual(payload["meshMode"], "operator")
+
+    def test_cloud_payload_normalization_accepts_headscale_mesh_contract(self) -> None:
+        payload = _normalize_cloud_redeem_payload(
+            {
+                "cloudApiUrl": "http://host.docker.internal:8080",
+                "providerAccountId": "provider",
+                "providerClusterId": "cluster",
+                "agentCredential": "agent-secret",
+                "meshProvider": "tailscale",
+                "meshMode": "headscale",
+                "meshHostname": "inferops",
+                "meshEndpointUrl": "http://100.64.0.5:8080",
+                "meshAuthKey": "hskey:dev",
+                "meshLoginServer": "http://host.docker.internal:18080",
+            },
+            fallback_cloud_api_url="https://cloud.example.test",
+        )
+
+        self.assertEqual(payload["meshMode"], "headscale")
+        self.assertEqual(payload["meshAuthKey"], "hskey:dev")
+        self.assertEqual(payload["meshLoginServer"], "http://host.docker.internal:18080")
+
+    def test_cloud_payload_rejects_insecure_remote_cloud_api(self) -> None:
+        with self.assertRaisesRegex(CLIError, "must use https"):
+            _normalize_cloud_redeem_payload(
+                {
+                    "cloudApiUrl": "http://cloud.example.test",
+                    "providerAccountId": "provider",
+                    "providerClusterId": "cluster",
+                    "agentCredential": "agent-secret",
+                    "meshProvider": "tailscale",
+                    "meshHostname": "inferops",
+                },
+                fallback_cloud_api_url="https://cloud.example.test",
+            )
+
+    def test_cloud_url_allows_local_http_for_development(self) -> None:
+        self.assertEqual(
+            _normalize_url("http://127.0.0.1:8080/"),
+            "http://127.0.0.1:8080",
+        )
+        self.assertEqual(
+            _normalize_url("http://host.docker.internal:8080/"),
+            "http://host.docker.internal:8080",
+        )
+
+    def test_cloud_redeem_can_fallback_to_loopback_for_host_alias(self) -> None:
+        self.assertEqual(
+            _loopback_cloud_api_url_for_local_alias("http://host.docker.internal:8080"),
+            "http://127.0.0.1:8080",
+        )
+        self.assertEqual(
+            _loopback_cloud_api_url_for_local_alias("http://127.0.0.1:8080"),
+            "http://127.0.0.1:8080",
+        )
+        self.assertEqual(
+            _loopback_cloud_api_url_for_local_alias("https://cloud.example.test"),
+            "https://cloud.example.test",
+        )
+
+    def test_cloud_heartbeat_freshness_accepts_recent_timestamp(self) -> None:
+        heartbeat = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+
+        self.assertIsNone(_heartbeat_freshness_check(heartbeat, 10))
+
+    def test_cloud_heartbeat_freshness_fails_stale_timestamp(self) -> None:
+        heartbeat = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+
+        check = _heartbeat_freshness_check(heartbeat, 10)
+
+        self.assertIsNotNone(check)
+        self.assertEqual(check["status"], "FAIL")
+        self.assertIn("stale", check["message"])
+
+    def test_cloud_heartbeat_freshness_warns_missing_timestamp(self) -> None:
+        check = _heartbeat_freshness_check(None, 10)
+
+        self.assertIsNotNone(check)
+        self.assertEqual(check["status"], "WARN")
 
     def _run(
         self,

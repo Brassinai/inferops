@@ -71,6 +71,8 @@ class CacheEntry:
     node: str
     path: str
     size: str
+    mode: str = "legacy"
+    artifact_identity: str = ""
     last_used: str = ""
     referenced_by: list[str] = field(default_factory=list)
     references_known: bool = True
@@ -85,6 +87,8 @@ class CacheEntry:
             "node": self.node,
             "path": self.path,
             "size": self.size,
+            "mode": self.mode,
+            "artifactIdentity": self.artifact_identity,
             "lastUsed": self.last_used,
             "referencedBy": self.referenced_by,
             "referencesKnown": self.references_known,

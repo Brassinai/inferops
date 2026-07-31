@@ -250,7 +250,7 @@ def normalize_model_config(
         openai_compatible=_normalize_bool(
             raw.get("openai_compatible", DEFAULT_OPENAI_COMPATIBLE), field_name="openai_compatible"
         ),
-        cache_enabled=_normalize_bool(raw.get("cache_enabled", DEFAULT_CACHE_ENABLED), field_name="cache_enabled"),
+        cache_enabled=_normalize_cache_enabled(raw.get("cache_enabled", DEFAULT_CACHE_ENABLED)),
         cache_type=_require_non_empty_string(raw.get("cache_type", DEFAULT_CACHE_TYPE), field_name="cache_type"),
         cache_size=_normalize_resource_quantity(raw.get("cache_size", DEFAULT_CACHE_SIZE), field_name="cache_size"),
         cache_path=_normalize_absolute_path(raw.get("cache_path", DEFAULT_CACHE_PATH), field_name="cache_path"),
@@ -353,6 +353,13 @@ def _normalize_bool(value: Any, *, field_name: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError(f"{field_name} must be a boolean")
     return value
+
+
+def _normalize_cache_enabled(value: Any) -> bool:
+    enabled = _normalize_bool(value, field_name="cache_enabled")
+    if not enabled:
+        raise ValueError("cache_enabled=False is not supported; InferOps requires node-local model caching")
+    return enabled
 
 
 def _normalize_activation_state(value: Any) -> str:

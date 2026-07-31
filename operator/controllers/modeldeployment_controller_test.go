@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	v1alpha1 "github.com/brassinai/inferops/operator/api/v1alpha1"
@@ -72,6 +73,11 @@ func TestReconcileValidInactiveDeployment(t *testing.T) {
 
 	if len(recorder.Events) == 0 {
 		t.Error("expected events to be recorded")
+	}
+	for _, event := range recorder.Events {
+		if strings.Contains(event.Message, "hf-token") {
+			t.Fatalf("event leaked Secret reference: %q", event.Message)
+		}
 	}
 	if result.Runtime.Image() != "ghcr.io/inferops/nano-vllm:v0.1.0" {
 		t.Errorf("resolved runtime image = %q, want %q", result.Runtime.Image(), "ghcr.io/inferops/nano-vllm:v0.1.0")

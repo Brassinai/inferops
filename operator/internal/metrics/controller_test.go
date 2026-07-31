@@ -22,6 +22,7 @@ func TestControllerMetricsUseBoundedLabels(t *testing.T) {
 	recorder.SetModelCacheInventory(
 		map[string]float64{"Ready": 1, "Pending": 2},
 		map[string]float64{"Ready": 100, "Pending": 200},
+		map[string]float64{"Ready": 3, "Pending": 1},
 	)
 	recorder.ObserveActivationDuration(2 * time.Second)
 	recorder.ObserveCacheDownloadDuration(10 * time.Second)
@@ -34,6 +35,7 @@ func TestControllerMetricsUseBoundedLabels(t *testing.T) {
 		"inferops_activation_queue_depth",
 		"inferops_modelcache_phase_count",
 		"inferops_modelcache_reserved_bytes",
+		"inferops_modelcache_reference_count",
 		"inferops_model_activation_duration_seconds",
 		"inferops_cache_download_duration_seconds",
 		"inferops_controller_failures_total",
@@ -43,8 +45,8 @@ func TestControllerMetricsUseBoundedLabels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GatherAndCount() error = %v", err)
 	}
-	if count != 12 {
-		t.Fatalf("metric family count = %d, want 12", count)
+	if count != 14 {
+		t.Fatalf("metric family count = %d, want 14", count)
 	}
 	output := testutil.ToFloat64(recorder.activationQueue)
 	if output != 2 {
@@ -55,6 +57,9 @@ func TestControllerMetricsUseBoundedLabels(t *testing.T) {
 	}
 	if pendingBytes := testutil.ToFloat64(recorder.modelCacheReserved.WithLabelValues("Pending")); pendingBytes != 200 {
 		t.Errorf("pending cache reserved bytes = %v, want 200", pendingBytes)
+	}
+	if readyRefs := testutil.ToFloat64(recorder.modelCacheRefs.WithLabelValues("Ready")); readyRefs != 3 {
+		t.Errorf("ready cache references = %v, want 3", readyRefs)
 	}
 	families, err := registry.Gather()
 	if err != nil {

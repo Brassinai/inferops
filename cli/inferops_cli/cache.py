@@ -52,6 +52,7 @@ def run_list(args, client=None) -> int:
         for cache in caches:
             line = (
                 f"{cache['name']}  {cache['phase']}  "
+                f"mode={cache.get('mode', 'legacy')}  "
                 f"node={cache.get('node', 'unknown')}  "
                 f"path={cache.get('path', '')}  size={cache.get('size', '')}"
             )
@@ -60,6 +61,9 @@ def run_list(args, client=None) -> int:
                 line += f"  referencedBy={','.join(refs)}"
             if not cache.get("referencesKnown", True):
                 line += "  referencedBy=unknown"
+            issues = cache.get("issues", [])
+            if issues:
+                line += f"  issues={'; '.join(str(issue) for issue in issues)}"
             details.append(line)
         emit_result(
             args.output,

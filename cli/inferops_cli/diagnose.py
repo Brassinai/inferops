@@ -126,4 +126,8 @@ def _format_checked_resource(item: dict[str, Any]) -> str:
         str(item.get(key, "")).strip()
         for key in ("kind", "namespace", "name", "status")
     ]
-    return " ".join(part for part in parts if part)
+    rendered = " ".join(part for part in parts if part)
+    referenced_by = item.get("referencedBy") or []
+    if referenced_by:
+        rendered += " referencedBy=" + ",".join(str(name) for name in referenced_by)
+    return rendered

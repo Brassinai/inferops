@@ -61,6 +61,131 @@ func TestLifecycleInactiveCreatesStableResourcesWithoutRuntime(t *testing.T) {
 	assertObjectMissing(t, c, types.NamespacedName{Namespace: deployment.Namespace, Name: templates.RuntimeServiceName(deployment.Name)}, &appsv1.Deployment{})
 }
 
+func TestLifecycleDeploymentsShareArtifactCache(t *testing.T) {
+	t.Parallel()
+
+	first := lifecycleDeployment(v1alpha1.ActivationDesiredStateInactive, v1alpha1.ActivationWhenFullQueue)
+	second := lifecycleDeployment(v1alpha1.ActivationDesiredStateInactive, v1alpha1.ActivationWhenFullQueue)
+	second.Name = "qwen-copy"
+	second.UID = "qwen-copy-uid"
+	c, reconciler := lifecycleTestController(t, first, second, lifecycleRuntime())
+
+	reconcileLifecycle(t, reconciler, first)
+	reconcileLifecycle(t, reconciler, second)
+
+	var caches v1alpha1.ModelCacheList
+	if err := c.List(context.Background(), &caches, client.InNamespace(first.Namespace)); err != nil {
+		t.Fatalf("list ModelCaches: %v", err)
+	}
+	if len(caches.Items) != 1 {
+		t.Fatalf("ModelCache count = %d, want 1", len(caches.Items))
+	}
+	cache := caches.Items[0]
+	if cache.Labels[cachecontract.LabelCacheMode] != cachecontract.ModeShared {
+		t.Fatalf("cache mode label = %q, want shared", cache.Labels[cachecontract.LabelCacheMode])
+	}
+	if cache.Labels[resources.LabelModelDeployment] != "" {
+		t.Fatalf("ModelCache has deployment owner label %q, want none", cache.Labels[resources.LabelModelDeployment])
+	}
+	if cache.Spec.Revision != "main" {
+		t.Fatalf("cache revision = %q, want normalized main", cache.Spec.Revision)
+	}
+	expectedPath, err := cachecontract.Path(first, "/var/lib/inferops/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cache.Spec.Storage.Path != expectedPath || !strings.Contains(cache.Spec.Storage.Path, "/artifacts/") {
+		t.Fatalf("cache path = %q, want artifact path %q", cache.Spec.Storage.Path, expectedPath)
+	}
+
+	requests := reconciler.requestsForCache(context.Background(), &cache)
+	got := map[string]bool{}
+	for _, request := range requests {
+		got[request.Name] = true
+	}
+	if !got[first.Name] || !got[second.Name] || len(got) != 2 {
+		t.Fatalf("cache update requests = %#v, want both shared deployments", requests)
+	}
+}
+
+func TestLifecycleDeletingOneSharedDeploymentPreservesCache(t *testing.T) {
+	t.Parallel()
+
+	first := lifecycleDeployment(v1alpha1.ActivationDesiredStateInactive, v1alpha1.ActivationWhenFullQueue)
+	second := lifecycleDeployment(v1alpha1.ActivationDesiredStateInactive, v1alpha1.ActivationWhenFullQueue)
+	second.Name = "qwen-copy"
+	second.UID = "qwen-copy-uid"
+	c, reconciler := lifecycleTestController(t, first, second, lifecycleRuntime())
+
+	reconcileLifecycle(t, reconciler, first)
+	reconcileLifecycle(t, reconciler, second)
+	cache := getLifecycleCache(t, c, first)
+
+	if err := c.Delete(context.Background(), first); err != nil {
+		t.Fatalf("delete first deployment: %v", err)
+	}
+	reconcileLifecycle(t, reconciler, second)
+
+	var retained v1alpha1.ModelCache
+	getObject(t, c, client.ObjectKeyFromObject(cache), &retained)
+	if retained.UID != cache.UID {
+		t.Fatalf("retained cache UID = %q, want %q", retained.UID, cache.UID)
+	}
+}
+
+func TestLifecycleSharedCacheRejectsIncompatiblePlacementContract(t *testing.T) {
+	t.Parallel()
+
+	first := lifecycleDeployment(v1alpha1.ActivationDesiredStateInactive, v1alpha1.ActivationWhenFullQueue)
+	second := lifecycleDeployment(v1alpha1.ActivationDesiredStateInactive, v1alpha1.ActivationWhenFullQueue)
+	second.Name = "qwen-copy"
+	second.UID = "qwen-copy-uid"
+	second.Spec.Scheduling.NodeSelector = map[string]string{"inferops.dev/cache-tier": "large"}
+	c, reconciler := lifecycleTestController(t, first, second, lifecycleRuntime())
+
+	reconcileLifecycle(t, reconciler, first)
+	reconcileLifecycle(t, reconciler, second)
+
+	var updated v1alpha1.ModelDeployment
+	getObject(t, c, client.ObjectKeyFromObject(second), &updated)
+	if updated.Status.Phase != v1alpha1.ModelDeploymentPhaseFailed {
+		t.Fatalf("phase = %q, want Failed for incompatible shared cache contract", updated.Status.Phase)
+	}
+	assertLifecycleCondition(
+		t,
+		updated.Status.Conditions,
+		v1alpha1.ConditionReady,
+		metav1.ConditionFalse,
+		v1alpha1.ReasonCacheFailed,
+	)
+}
+
+func TestLifecycleUsesLegacyDeploymentScopedCacheDuringMigration(t *testing.T) {
+	t.Parallel()
+
+	deployment := lifecycleDeployment(v1alpha1.ActivationDesiredStateInactive, v1alpha1.ActivationWhenFullQueue)
+	legacyCache := lifecycleLegacyReadyCache(t, deployment, "gpu-node-1")
+	c, reconciler := lifecycleTestController(t, deployment, lifecycleRuntime(), legacyCache)
+
+	reconcileLifecycle(t, reconciler, deployment)
+
+	var caches v1alpha1.ModelCacheList
+	if err := c.List(context.Background(), &caches, client.InNamespace(deployment.Namespace)); err != nil {
+		t.Fatalf("list ModelCaches: %v", err)
+	}
+	if len(caches.Items) != 1 || caches.Items[0].Name != legacyCache.Name {
+		t.Fatalf("ModelCaches = %#v, want only legacy cache %q", caches.Items, legacyCache.Name)
+	}
+	var config corev1.ConfigMap
+	getObject(t, c, types.NamespacedName{
+		Namespace: deployment.Namespace,
+		Name:      deployment.Name + "-runtime-config",
+	}, &config)
+	if config.Data["cache.path"] != legacyCache.Spec.Storage.Path {
+		t.Fatalf("ConfigMap cache.path = %q, want legacy path %q", config.Data["cache.path"], legacyCache.Spec.Storage.Path)
+	}
+}
+
 func TestLifecycleActiveReservesGPUAndProjectsReadiness(t *testing.T) {
 	t.Parallel()
 
@@ -522,8 +647,6 @@ func TestLifecycleSimulatedMultiGPUCapacityDoesNotOvercommit(t *testing.T) {
 		third,
 		lifecycleRuntime(),
 		lifecycleReadyCache(t, first, "gpu-node-1"),
-		lifecycleReadyCache(t, second, "gpu-node-1"),
-		lifecycleReadyCache(t, third, "gpu-node-1"),
 		lifecycleGPUNode("gpu-node-1", 2),
 	)
 
@@ -768,14 +891,12 @@ func TestLifecycleAdvancedRolloutSurgeReservationPreventsOvercommit(t *testing.T
 	contender.Name = "contender"
 	contender.UID = "contender-uid"
 	cache := lifecycleReadyCache(t, deployment, "gpu-node-1")
-	contenderCache := lifecycleReadyCache(t, contender, "gpu-node-1")
 	c, reconciler := lifecycleTestController(
 		t,
 		deployment,
 		contender,
 		lifecycleRuntime(),
 		cache,
-		contenderCache,
 		lifecycleGPUNode("gpu-node-1", 2),
 	)
 	reconcileLifecycle(t, reconciler, deployment)
@@ -1636,58 +1757,6 @@ func TestLifecycleRecoversGPUReservationFromManagedDeployment(t *testing.T) {
 	}
 }
 
-func TestReadyCacheSpecsCompatible(t *testing.T) {
-	t.Parallel()
-
-	base := v1alpha1.ModelCacheSpec{
-		ModelRepo: "org/model",
-		Revision:  "main",
-		SecretRef: "old-token",
-		Storage: v1alpha1.ModelCacheStorage{
-			Type: "nodeLocal", Size: "20Gi", Path: "/cache/model",
-		},
-	}
-	tests := []struct {
-		name       string
-		mutate     func(*v1alpha1.ModelCacheSpec)
-		compatible bool
-	}{
-		{name: "identical", compatible: true},
-		{
-			name: "credential rotation",
-			mutate: func(spec *v1alpha1.ModelCacheSpec) {
-				spec.SecretRef = "new-token"
-			},
-			compatible: true,
-		},
-		{
-			name: "revision change",
-			mutate: func(spec *v1alpha1.ModelCacheSpec) {
-				spec.Revision = "v2"
-			},
-		},
-		{
-			name: "path change",
-			mutate: func(spec *v1alpha1.ModelCacheSpec) {
-				spec.Storage.Path = "/cache/other"
-			},
-		},
-	}
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			desired := *base.DeepCopy()
-			if tt.mutate != nil {
-				tt.mutate(&desired)
-			}
-			if got := readyCacheSpecsCompatible(base, desired); got != tt.compatible {
-				t.Errorf("readyCacheSpecsCompatible() = %t, want %t", got, tt.compatible)
-			}
-		})
-	}
-}
-
 func TestLifecycleDeletionRefreshesQueueDepthMetric(t *testing.T) {
 	t.Parallel()
 
@@ -1861,7 +1930,7 @@ func (*recordingControllerMetrics) SetGPUSlots(string, float64, float64, float64
 func (m *recordingControllerMetrics) SetActivationQueueDepth(depth float64) {
 	m.queueDepth = depth
 }
-func (*recordingControllerMetrics) SetModelCacheInventory(map[string]float64, map[string]float64) {
+func (*recordingControllerMetrics) SetModelCacheInventory(map[string]float64, map[string]float64, map[string]float64) {
 }
 func (*recordingControllerMetrics) ObserveActivationDuration(time.Duration)    {}
 func (*recordingControllerMetrics) ObserveCacheDownloadDuration(time.Duration) {}
@@ -1977,7 +2046,7 @@ func lifecycleReadyCache(
 	node string,
 ) *v1alpha1.ModelCache {
 	t.Helper()
-	name, err := cachecontract.Name(deployment)
+	name, err := cachecontract.Name(deployment, "/var/lib/inferops/models")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1985,11 +2054,70 @@ func lifecycleReadyCache(
 	if err != nil {
 		t.Fatal(err)
 	}
+	labels, err := cachecontract.Labels(deployment, "/var/lib/inferops/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	annotations, err := cachecontract.Annotations(deployment, "/var/lib/inferops/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels[resources.LabelManagedBy] = resources.ValueManagedBy
 	return &v1alpha1.ModelCache{
 		TypeMeta: metav1.TypeMeta{APIVersion: v1alpha1.GroupVersion.String(), Kind: "ModelCache"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: deployment.Namespace, UID: types.UID(name + "-uid"),
-			Labels: map[string]string{resources.LabelModelDeployment: deployment.Name},
+			Labels:      labels,
+			Annotations: annotations,
+		},
+		Spec: v1alpha1.ModelCacheSpec{
+			ModelRepo: deployment.Spec.Model.Repo,
+			Revision:  cachecontract.Revision(deployment),
+			SecretRef: deployment.Spec.Secrets.HuggingFaceTokenSecretName,
+			Storage: v1alpha1.ModelCacheStorage{
+				Type:         "nodeLocal",
+				Size:         "20Gi",
+				Path:         path,
+				NodeSelector: copyStringMap(deployment.Spec.Scheduling.NodeSelector),
+				Tolerations:  copyTolerations(deployment.Spec.Scheduling.Tolerations),
+			},
+		},
+		Status: v1alpha1.ModelCacheStatus{
+			ObservedGeneration: 1,
+			Phase:              v1alpha1.ModelCachePhaseReady,
+			Revision:           "main", NodeName: node, NodeUID: node + "-uid",
+			Path: path, Size: "20Gi", ReservedSize: "20Gi",
+			Conditions: []v1alpha1.Condition{{
+				Type: v1alpha1.CacheConditionReady, Status: metav1.ConditionTrue,
+				Reason: v1alpha1.CacheReasonCacheReady,
+			}},
+		},
+	}
+}
+
+func lifecycleLegacyReadyCache(
+	t *testing.T,
+	deployment *v1alpha1.ModelDeployment,
+	node string,
+) *v1alpha1.ModelCache {
+	t.Helper()
+	name, err := cachecontract.LegacyName(deployment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := cachecontract.LegacyPath(deployment, "/var/lib/inferops/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &v1alpha1.ModelCache{
+		TypeMeta: metav1.TypeMeta{APIVersion: v1alpha1.GroupVersion.String(), Kind: "ModelCache"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: deployment.Namespace,
+			UID:       types.UID(name + "-uid"),
+			Labels: map[string]string{
+				resources.LabelModelDeployment: deployment.Name,
+			},
 		},
 		Spec: v1alpha1.ModelCacheSpec{
 			ModelRepo: deployment.Spec.Model.Repo,
@@ -2006,8 +2134,12 @@ func lifecycleReadyCache(
 		Status: v1alpha1.ModelCacheStatus{
 			ObservedGeneration: 1,
 			Phase:              v1alpha1.ModelCachePhaseReady,
-			Revision:           "main", NodeName: node, NodeUID: node + "-uid",
-			Path: path, Size: "20Gi", ReservedSize: "20Gi",
+			Revision:           "main",
+			NodeName:           node,
+			NodeUID:            node + "-uid",
+			Path:               path,
+			Size:               "20Gi",
+			ReservedSize:       "20Gi",
 			Conditions: []v1alpha1.Condition{{
 				Type: v1alpha1.CacheConditionReady, Status: metav1.ConditionTrue,
 				Reason: v1alpha1.CacheReasonCacheReady,
@@ -2265,7 +2397,7 @@ func getLifecycleCache(
 	deployment *v1alpha1.ModelDeployment,
 ) *v1alpha1.ModelCache {
 	t.Helper()
-	name, err := cachecontract.Name(deployment)
+	name, err := cachecontract.Name(deployment, "/var/lib/inferops/models")
 	if err != nil {
 		t.Fatal(err)
 	}

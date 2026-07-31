@@ -12,6 +12,7 @@ import unittest
 from inferops_cli.errors import CLIError
 from inferops_cli.helm import HelmInstaller
 from inferops_cli.kube import (
+    CloudConnectRequest,
     ClusterTarget,
     InstallRequest,
     ObservabilityEnableRequest,
@@ -1108,6 +1109,56 @@ class HelmInstallerTest(unittest.TestCase):
                     charts_dir="/not-used",
                 )
             )
+
+    def test_cloud_connect_uses_local_cloud_agent_image_policy_for_dev_api(self) -> None:
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            charts_dir = Path(directory)
+            for chart in ("inferops-gateway", "inferops-cloud-agent"):
+                chart_dir = charts_dir / chart
+                chart_dir.mkdir()
+                (chart_dir / "Chart.yaml").write_text(
+                    "apiVersion: v2\nname: test\nversion: 0.0.0\n"
+                )
+
+            HelmInstaller(runner=run).cloud_connect(
+                CloudConnectRequest(
+                    cluster=ClusterTarget(namespace="default", context="orbstack"),
+                    token="token",
+                    cloud_api_url="http://host.docker.internal:8080",
+                    charts_dir=str(charts_dir),
+                    cloud_agent_image="ghcr.io/brassinai/inferops-cloud-agent:v0.1.0",
+                ),
+                cloud_api_url="http://host.docker.internal:8080",
+                provider_account_id="provider",
+                provider_cluster_id="cluster",
+                mesh_provider="tailscale",
+                mesh_mode="headscale",
+                mesh_hostname="provider-inferops-dev",
+                mesh_endpoint_url="http://provider-inferops-dev:8080",
+                mesh_login_server="http://host.docker.internal:18080",
+                heartbeat_interval_seconds=10,
+                credential_secret_name="inferops-cloud-connection",
+                gateway_auth_secret_name="inferops-gateway-auth",
+            )
+
+        cloud_agent_command = next(
+            command for command in commands if command[3] == "inferops-cloud-agent"
+        )
+        self.assertIn("image.repository=ghcr.io/brassinai/inferops-cloud-agent", cloud_agent_command)
+        self.assertIn("image.tag=v0.1.0", cloud_agent_command)
+        self.assertIn("image.pullPolicy=Never", cloud_agent_command)
+        gateway_command = next(
+            command for command in commands if command[3] == "inferops-gateway"
+        )
+        self.assertIn("tailscale.userspace=false", gateway_command)
+        self.assertIn("tailscale.authOnce=true", gateway_command)
+        self.assertIn("tailscale.kubeSecret=", gateway_command)
 
     @staticmethod
     def _node(

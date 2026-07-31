@@ -64,6 +64,78 @@ class CLIGenerateTest(unittest.TestCase):
             {key: expected[key] for key in ("apiVersion", "kind", "metadata", "spec")},
         )
 
+    def test_generate_preserves_shared_cache_identity_inputs(self) -> None:
+        source = textwrap.dedent(
+            """
+            import inferops
+
+            app = inferops.App("shared")
+
+            @app.model(
+                name="chat-a",
+                model="Qwen/Qwen2.5-0.5B-Instruct",
+                model_revision="main",
+                gpu=None,
+                cache_size="10Gi",
+                cache_path="/var/lib/inferops/models",
+            )
+            class ChatA:
+                pass
+
+            @app.model(
+                name="chat-b",
+                model="Qwen/Qwen2.5-0.5B-Instruct",
+                model_revision="main",
+                gpu=None,
+                cache_size="10Gi",
+                cache_path="/var/lib/inferops/models",
+            )
+            class ChatB:
+                pass
+            """
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            app_path = Path(directory) / "app.py"
+            app_path.write_text(source, encoding="utf-8")
+            args = argparse.Namespace(app=str(app_path))
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = generate.run(args)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(stderr.getvalue(), "")
+        manifests = list(yaml.safe_load_all(stdout.getvalue()))
+        self.assertEqual(
+            [item["metadata"]["name"] for item in manifests],
+            ["chat-a", "chat-b"],
+        )
+        identities = {
+            (
+                item["spec"]["model"]["source"],
+                item["spec"]["model"]["repo"],
+                item["spec"]["model"]["revision"],
+                item["spec"]["cache"]["type"],
+                item["spec"]["cache"]["path"],
+                item["spec"].get("secrets", {}).get("huggingFaceTokenSecretName", ""),
+            )
+            for item in manifests
+        }
+        self.assertEqual(
+            identities,
+            {
+                (
+                    "huggingface",
+                    "Qwen/Qwen2.5-0.5B-Instruct",
+                    "main",
+                    "nodeLocal",
+                    "/var/lib/inferops/models",
+                    "",
+                )
+            },
+        )
+
     def test_generate_reports_missing_app_instance(self) -> None:
         source = "VALUE = 1\n"
 

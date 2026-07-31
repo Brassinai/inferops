@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from typing import Any
 
 from inferops_cli.errors import CLIError, NotFoundError
 from inferops_cli.kube import (
     ActivationRequest,
     CacheDeleteRequest,
+    CloudConnectRequest,
+    CloudDisconnectRequest,
+    CloudStatusRequest,
     ClusterTarget,
     DeactivationRequest,
     DiagnoseRequest,
@@ -43,18 +47,29 @@ class FakeKubernetesClient:
     def __init__(self) -> None:
         self._deployments: dict[_ResourceKey, dict[str, Any]] = {}
         self._caches: dict[_ResourceKey, dict[str, Any]] = {}
+        self._cache_identities: dict[_ResourceKey, tuple[str, ...]] = {}
         self._installs: list[dict[str, Any]] = []
         self._endpoint_apps: dict[_ResourceKey, dict[str, Any]] = {}
         self._gpus: list[dict[str, Any]] = []
         self._doctor_checks: list[dict[str, Any]] = []
+        self._cloud_connection: dict[_ResourceKey, dict[str, Any]] = {}
         self._cache_deletable: bool = True
         self._activation_outcomes: dict[_ResourceKey, str] = {}
 
     def deploy(self, request: DeployRequest) -> dict[str, Any]:
         deployments = []
+        identities = [
+            _cache_identity(manifest, request.cluster.namespace)
+            for manifest in request.manifests
+        ]
+        identity_counts = {
+            identity: identities.count(identity)
+            for identity in set(identities)
+        }
         for manifest in request.manifests:
             name = manifest["metadata"]["name"]
             key = self._resource_key(request.cluster, name)
+            identity = _cache_identity(manifest, request.cluster.namespace)
             deployment = {
                 "name": name,
                 "namespace": request.cluster.namespace,
@@ -82,19 +97,62 @@ class FakeKubernetesClient:
             self._deployments[key] = deployment
 
             cache_spec = manifest["spec"]["cache"]
-            self._caches[key] = {
-                "name": name,
-                "namespace": request.cluster.namespace,
-                "phase": "Prepared" if cache_spec["enabled"] else "Disabled",
-                "repository": manifest["spec"]["model"]["repo"],
-                "revision": manifest["spec"]["model"].get("revision", "main"),
-                "node": "",
-                "path": cache_spec["path"],
-                "size": cache_spec["size"],
-                "lastUsed": "",
-                "referencedBy": [name],
-                "referencesKnown": True,
-                "issues": [],
+            cache_name = name
+            cache_path = cache_spec["path"]
+            cache_mode = "legacy"
+            artifact_identity = ""
+            existing_cache_key = self._cache_key_for_identity(request.cluster, identity)
+            should_share = identity_counts[identity] > 1 or existing_cache_key is not None
+            if should_share:
+                artifact_identity = _cache_identity_hash(identity)
+                cache_name = f"model-{artifact_identity}-cache"
+                cache_path = _shared_cache_path(
+                    cache_spec["path"],
+                    request.cluster.namespace,
+                    artifact_identity,
+                )
+                cache_mode = "shared"
+            cache_key = self._resource_key(request.cluster, cache_name)
+            if existing_cache_key is not None and existing_cache_key != cache_key:
+                cache_entry = self._caches.pop(existing_cache_key)
+                self._cache_identities.pop(existing_cache_key, None)
+                cache_entry.update(
+                    {
+                        "name": cache_name,
+                        "path": cache_path,
+                        "mode": cache_mode,
+                        "artifactIdentity": artifact_identity,
+                    }
+                )
+                self._caches[cache_key] = cache_entry
+                self._cache_identities[cache_key] = identity
+            cache_entry = self._caches.get(cache_key)
+            if cache_entry is None:
+                cache_entry = {
+                    "name": cache_name,
+                    "namespace": request.cluster.namespace,
+                    "phase": "Prepared" if cache_spec["enabled"] else "Disabled",
+                    "repository": manifest["spec"]["model"]["repo"],
+                    "revision": manifest["spec"]["model"].get("revision", "main"),
+                    "node": "",
+                    "path": cache_path,
+                    "size": cache_spec["size"],
+                    "mode": cache_mode,
+                    "artifactIdentity": artifact_identity,
+                    "lastUsed": "",
+                    "referencedBy": [],
+                    "referencesKnown": True,
+                    "issues": [],
+                }
+                self._caches[cache_key] = cache_entry
+                self._cache_identities[cache_key] = identity
+            cache_entry["referencedBy"] = sorted(
+                set(cache_entry.get("referencedBy", []) + [name])
+            )
+            deployment["cache"] = {
+                "name": cache_name,
+                "state": cache_entry["phase"],
+                "path": cache_path,
             }
             result = deployment.copy()
             result["phase"] = manifest["spec"]["activation"]["desiredState"]
@@ -517,6 +575,7 @@ class FakeKubernetesClient:
         if request.force and refs:
             cache["deleteAnnotated"] = True
         self._caches.pop(key, None)
+        self._cache_identities.pop(key, None)
         return {
             "mode": "fake",
             "cluster": request.cluster.to_safe_dict(),
@@ -579,6 +638,89 @@ class FakeKubernetesClient:
             "cluster": request.cluster.to_safe_dict(),
             "install": install,
             "message": "Placeholder install executed against the fake Kubernetes client.",
+        }
+
+    def cloud_connect(self, request: CloudConnectRequest) -> dict[str, Any]:
+        key = self._resource_key(request.cluster, "cloud")
+        connection = {
+            "cloudApiUrl": request.cloud_api_url or "https://cloud.inferops.dev",
+            "providerAccountId": "provider-fake",
+            "providerClusterId": request.cluster_name or "cluster-fake",
+            "meshProvider": "tailscale",
+            "meshMode": "operator",
+            "meshHostname": "inferops",
+            "meshEndpointUrl": "https://inferops",
+            "expectedEndpointPath": "/",
+            "lastConnectedAt": "2026-07-28T00:00:00+00:00",
+            "meshTags": ["tag:provider-agent", "tag:provider-endpoint"],
+            "heartbeatIntervalSeconds": 10,
+        }
+        self._cloud_connection[key] = connection
+        return {
+            "mode": "fake",
+            "cluster": request.cluster.to_safe_dict(),
+            "connection": connection,
+            "secrets": ["secret/inferops-gateway-auth", "secret/inferops-cloud-connection"],
+            "configMap": "configmap/inferops-cloud-connection",
+            "releases": [
+                {"name": "inferops-gateway", "status": "deployed", "output": ""},
+                {"name": "inferops-cloud-agent", "status": "deployed", "output": ""},
+            ],
+            "steps": (
+                "InferOps gateway and Service verified.",
+                "Redeemed bootstrap token for provider account provider-fake.",
+                "Stored cloud credentials in Kubernetes Secrets.",
+                "Enabled authenticated Tailscale gateway exposure at https://inferops.",
+                "Installed persistent cloud agent.",
+            ),
+        }
+
+    def cloud_status(self, request: CloudStatusRequest) -> dict[str, Any]:
+        key = self._resource_key(request.cluster, "cloud")
+        connected = key in self._cloud_connection
+        checks = [
+            {
+                "id": "cloud-config",
+                "status": "PASS" if connected else "FAIL",
+                "message": "cloud connection ConfigMap exists" if connected else "cloud connection ConfigMap is missing",
+            },
+            {
+                "id": "gateway",
+                "status": "PASS" if connected else "FAIL",
+                "message": "gateway ready" if connected else "gateway not verified",
+            },
+            {
+                "id": "provider-agent",
+                "status": "PASS" if connected else "FAIL",
+                "message": "Deployment/inferops-cloud-agent ready 1/1" if connected else "Deployment/inferops-cloud-agent is missing",
+            },
+        ]
+        failures = sum(1 for check in checks if check["status"] == "FAIL")
+        return {
+            "mode": "fake",
+            "cluster": request.cluster.to_safe_dict(),
+            "summary": f"Cloud mesh status: {len(checks) - failures} OK, 0 warning(s), {failures} failure(s).",
+            "connection": self._cloud_connection.get(key, {}),
+            "checks": checks,
+        }
+
+    def cloud_disconnect(self, request: CloudDisconnectRequest) -> dict[str, Any]:
+        key = self._resource_key(request.cluster, "cloud")
+        self._cloud_connection.pop(key, None)
+        return {
+            "mode": "fake",
+            "cluster": request.cluster.to_safe_dict(),
+            "disconnected": True,
+            "meshExposureDisabled": request.disable_mesh_exposure,
+            "releases": [
+                {"name": "inferops-cloud-agent", "status": "removed", "output": ""}
+            ],
+            "steps": (
+                "Notified cloud API when saved credentials were available.",
+                "Removed cloud agent Helm release.",
+                "Removed cloud connection Secret and ConfigMap.",
+                "Preserved InferOps operator, gateway, model deployments, and caches.",
+            ),
         }
 
     def upgrade(self, request: UpgradeRequest) -> dict[str, Any]:
@@ -809,9 +951,12 @@ class FakeKubernetesClient:
         deployment = self._require_deployment(request).copy()
         key = self._resource_key(request.cluster, request.name)
         self._deployments.pop(key, None)
-        cache = self._caches.get(key)
-        if cache is not None:
-            cache["referencedBy"] = []
+        for cache in self._caches.values():
+            refs = cache.get("referencedBy", [])
+            if request.name in refs:
+                cache["referencedBy"] = [
+                    ref for ref in refs if ref != request.name
+                ]
         return {
             "mode": "fake",
             "cluster": request.cluster.to_safe_dict(),
@@ -843,3 +988,41 @@ class FakeKubernetesClient:
         return _ResourceKey(
             namespace=cluster.namespace, context=cluster.context, name=name
         )
+
+    def _cache_key_for_identity(
+        self,
+        cluster: ClusterTarget,
+        identity: tuple[str, ...],
+    ) -> _ResourceKey | None:
+        for key, value in self._cache_identities.items():
+            if (
+                key.namespace == cluster.namespace
+                and key.context == cluster.context
+                and value == identity
+            ):
+                return key
+        return None
+
+
+def _cache_identity(manifest: dict[str, Any], namespace: str) -> tuple[str, ...]:
+    spec = manifest["spec"]
+    model = spec["model"]
+    cache = spec["cache"]
+    secrets = spec.get("secrets", {})
+    return (
+        namespace,
+        model.get("source", "huggingface"),
+        model["repo"],
+        model.get("revision") or "main",
+        cache.get("type", "nodeLocal"),
+        cache["path"].rstrip("/"),
+        secrets.get("huggingFaceTokenSecretName", ""),
+    )
+
+
+def _cache_identity_hash(identity: tuple[str, ...]) -> str:
+    return hashlib.sha256("\n".join(identity).encode("utf-8")).hexdigest()[:32]
+
+
+def _shared_cache_path(cache_root: str, namespace: str, artifact_identity: str) -> str:
+    return f"{cache_root.rstrip('/')}/{namespace}/artifacts/{artifact_identity}"

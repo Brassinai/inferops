@@ -27,6 +27,11 @@ Do not install multiple cluster-wide operators to simulate tenancy. Their
 watches and managed-resource ownership would overlap. The shared operator plus
 namespace-local gateways and RBAC is the supported layout.
 
+Model cache sharing is namespace-local. A public model used in two namespaces
+creates two `ModelCache` objects and two independent capacity reservations.
+Cross-namespace shared caches are intentionally deferred until there is an
+explicit API for RBAC, credential, quota, and deletion-safety ownership.
+
 ## Team gateway values
 
 The gateway chart can create namespace-scoped access, quota, and default

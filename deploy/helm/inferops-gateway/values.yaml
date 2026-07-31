@@ -141,8 +141,23 @@ serviceMonitor:
 
 tailscale:
   enabled: false
+  # operator creates a Tailscale Ingress through the Kubernetes operator.
+  # headscale runs a local-dev Tailscale sidecar in the gateway Pod.
+  mode: operator
   hostname: inferops
   annotations: {}
+  loginServer: ""
+  authKeySecretName: ""
+  authKeySecretKey: meshAuthKey
+  image:
+    repository: tailscale/tailscale
+    tag: v1.80.3
+    pullPolicy: IfNotPresent
+  stateDir: /var/lib/tailscale
+  kubeSecret: ""
+  userspace: false
+  authOnce: true
+  extraArgs: "--accept-dns=false"
 
 probes:
   livenessPath: /healthz

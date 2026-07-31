@@ -59,8 +59,8 @@ cluster.
 When `serviceMonitor.enabled=true` and `dashboards.enabled=true` are set on the
 operator chart, Grafana sidecar installations can discover:
 
-- `InferOps / Platform` for runtime-independent cache, activation, GPU, and
-  gateway signals.
+- `InferOps / Platform` for runtime-independent cache, shared-cache reference,
+  activation, GPU, and gateway signals.
 - `InferOps / vLLM Runtime` for vLLM-native request, token, TTFT, and KV-cache
   metrics.
 - `InferOps / llama.cpp Runtime` for llama.cpp-native token and request metrics.
