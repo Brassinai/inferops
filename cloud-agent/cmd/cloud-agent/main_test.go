@@ -1,9 +1,13 @@
 package main
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/brassinai/inferops/internal/runtimecontract"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -91,13 +95,30 @@ func TestHeartbeatTimeout(t *testing.T) {
 func TestModelOfferings(t *testing.T) {
 	items := []unstructured.Unstructured{
 		{Object: map[string]any{
-			"metadata": map[string]any{"name": "z-model"},
+			"apiVersion": runtimecontract.ModelDeploymentAPIVersion,
+			"kind":       runtimecontract.ModelDeploymentKind,
+			"metadata": map[string]any{
+				"name":            "z-model",
+				"namespace":       "team-a",
+				"resourceVersion": "should-not-drift",
+			},
+			"spec": map[string]any{
+				"runtime": map[string]any{
+					"image": "ghcr.io/inferops/runtime:v1.2.3",
+				},
+				"secrets": map[string]any{
+					"huggingFaceTokenSecretName": "hf-secret",
+				},
+			},
 			"status": map[string]any{
 				"phase":        "Active",
 				"endpoint":     "/models/z-model",
 				"modelName":    "org/z-model",
 				"runtime":      "llama.cpp",
 				"endpointPath": "/v1",
+				"metrics": map[string]any{
+					"activeRequests": int64(9),
+				},
 				"gpu": map[string]any{
 					"vendor":   "NVIDIA",
 					"type":     "L4",
@@ -160,7 +181,48 @@ func TestModelOfferings(t *testing.T) {
 			},
 		}},
 	}
-	offerings := modelOfferings(items, "team-a", "us-test-1", gpuSnapshot{Vendor: "unknown", Type: "unknown", Count: 1, MemoryGB: 1})
+	pods := map[string][]unstructured.Unstructured{
+		"z-model": {
+			{Object: map[string]any{
+				"metadata": map[string]any{
+					"name":      "z-model-runtime-abc",
+					"namespace": "team-a",
+					"labels": map[string]any{
+						"inferops.dev/modeldeployment": "z-model",
+					},
+				},
+				"spec": map[string]any{
+					"nodeName":           "node-a",
+					"serviceAccountName": "default",
+					"containers": []any{
+						map[string]any{
+							"name":  "runtime",
+							"image": "ghcr.io/inferops/runtime:v1.2.3",
+							"env": []any{
+								map[string]any{"name": "API_KEY", "value": "runtime-secret"},
+							},
+							"resources": map[string]any{
+								"limits": map[string]any{"cpu": "2"},
+							},
+						},
+					},
+				},
+				"status": map[string]any{
+					"phase": "Running",
+					"podIP": "10.42.0.12",
+					"containerStatuses": []any{
+						map[string]any{
+							"name":         "runtime",
+							"imageID":      "ghcr.io/inferops/runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+							"ready":        true,
+							"restartCount": int64(1),
+						},
+					},
+				},
+			}},
+		},
+	}
+	offerings := modelOfferings(items, "team-a", "us-test-1", gpuSnapshot{Vendor: "unknown", Type: "unknown", Count: 1, MemoryGB: 1}, pods)
 	if len(offerings) != 4 {
 		t.Fatalf("got %d offerings, want 4", len(offerings))
 	}
@@ -182,6 +244,30 @@ func TestModelOfferings(t *testing.T) {
 	if offerings[3].ObservedCapacity.MaxConcurrentRequests != 4 || offerings[3].ObservedCapacity.TokensPerSecondEstimate != 42 {
 		t.Fatalf("capacity evidence not discovered: %#v", offerings[3].ObservedCapacity)
 	}
+	if offerings[3].Evidence.ImageMetadata["runtimeImage"] != "ghcr.io/inferops/runtime:v1.2.3" {
+		t.Fatalf("image evidence not discovered: %#v", offerings[3].Evidence.ImageMetadata)
+	}
+	if !containsString(offerings[3].Evidence.ImageMetadata["podImageIDs"], "ghcr.io/inferops/runtime@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") {
+		t.Fatalf("pod image ID evidence not discovered: %#v", offerings[3].Evidence.ImageMetadata)
+	}
+	if offerings[3].Evidence.PodMetadata["totalPods"] != 1 {
+		t.Fatalf("pod metadata did not include matched runtime pod: %#v", offerings[3].Evidence.PodMetadata)
+	}
+	if offerings[3].Evidence.PodMetadata["bindingVerified"] != true {
+		t.Fatalf("pod binding was not marked verified: %#v", offerings[3].Evidence.PodMetadata)
+	}
+	if strings.Contains(fmt.Sprint(offerings[3].Evidence.PodMetadata), "runtime-secret") {
+		t.Fatalf("pod metadata includes sensitive values: %#v", offerings[3].Evidence.PodMetadata)
+	}
+	if !strings.Contains(offerings[3].Evidence.ManifestYAML, "kind: ModelDeployment") {
+		t.Fatalf("manifest evidence missing kind: %s", offerings[3].Evidence.ManifestYAML)
+	}
+	if strings.Contains(offerings[3].Evidence.ManifestYAML, "resourceVersion") || strings.Contains(offerings[3].Evidence.ManifestYAML, "activeRequests") {
+		t.Fatalf("manifest evidence includes volatile fields: %s", offerings[3].Evidence.ManifestYAML)
+	}
+	if strings.Contains(offerings[3].Evidence.ManifestYAML, "hf-secret") || strings.Contains(offerings[3].Evidence.ManifestYAML, "runtime-secret") {
+		t.Fatalf("manifest evidence includes sensitive values: %s", offerings[3].Evidence.ManifestYAML)
+	}
 	if offerings[1].Model != "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF" || offerings[1].Runtime != "llama-cpp" {
 		t.Fatalf("yaml model/runtime not discovered: %#v", offerings[1])
 	}
@@ -191,6 +277,108 @@ func TestModelOfferings(t *testing.T) {
 	if offerings[2].Model != "org/status-model-map" {
 		t.Fatalf("status model map was not unwrapped: %#v", offerings[2])
 	}
+}
+
+func TestPodsByModelDeploymentRequiresInferOpsOwnership(t *testing.T) {
+	trustedPod := unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{
+			"name":      "cpu-smollm-runtime-trusted",
+			"namespace": "team-a",
+			"labels": map[string]any{
+				runtimecontract.ModelDeploymentLabel: "cpu-smollm",
+				runtimecontract.LabelManagedBy:       runtimecontract.ValueManagedBy,
+				runtimecontract.LabelPartOf:          runtimecontract.ValuePartOf,
+				runtimecontract.LabelComponent:       runtimecontract.ValueRuntimeComponent,
+			},
+			"ownerReferences": []any{
+				map[string]any{
+					"apiVersion": "apps/v1",
+					"kind":       "ReplicaSet",
+					"name":       "cpu-smollm-runtime-rs",
+				},
+			},
+		},
+	}}
+	copiedLabelPod := unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{
+			"name":      "cpu-smollm-runtime-copy",
+			"namespace": "team-a",
+			"labels": map[string]any{
+				runtimecontract.ModelDeploymentLabel: "cpu-smollm",
+				runtimecontract.LabelManagedBy:       runtimecontract.ValueManagedBy,
+				runtimecontract.LabelPartOf:          runtimecontract.ValuePartOf,
+				runtimecontract.LabelComponent:       runtimecontract.ValueRuntimeComponent,
+			},
+		},
+	}}
+	replicaSet := unstructured.Unstructured{}
+	replicaSet.SetName("cpu-smollm-runtime-rs")
+	replicaSet.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: "apps/v1",
+		Kind:       "Deployment",
+		Name:       "cpu-smollm-runtime",
+	}})
+	deployment := unstructured.Unstructured{}
+	deployment.SetName("cpu-smollm-runtime")
+	deployment.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: runtimecontract.ModelDeploymentAPIVersion,
+		Kind:       runtimecontract.ModelDeploymentKind,
+		Name:       "cpu-smollm",
+	}})
+
+	grouped := podsByModelDeployment([]unstructured.Unstructured{copiedLabelPod, trustedPod}, []unstructured.Unstructured{replicaSet}, []unstructured.Unstructured{deployment})
+
+	pods := grouped["cpu-smollm"]
+	if len(pods) != 1 || pods[0].GetName() != "cpu-smollm-runtime-trusted" {
+		t.Fatalf("trusted pod grouping = %#v", grouped)
+	}
+}
+
+func TestModelDeploymentOwnerNameRejectsCyclicOwnerReferences(t *testing.T) {
+	replicaSet := unstructured.Unstructured{}
+	replicaSet.SetName("loop-rs")
+	replicaSet.SetOwnerReferences([]metav1.OwnerReference{{
+		APIVersion: "apps/v1",
+		Kind:       "ReplicaSet",
+		Name:       "loop-rs",
+	}})
+
+	got := modelDeploymentOwnerName(
+		[]metav1.OwnerReference{{
+			APIVersion: "apps/v1",
+			Kind:       "ReplicaSet",
+			Name:       "loop-rs",
+		}},
+		map[string]unstructured.Unstructured{"loop-rs": replicaSet},
+		nil,
+		0,
+		map[string]struct{}{},
+	)
+	if got != "" {
+		t.Fatalf("cyclic owner reference resolved to %q", got)
+	}
+}
+
+func containsString(value any, want string) bool {
+	items, ok := value.([]string)
+	if ok {
+		for _, item := range items {
+			if item == want {
+				return true
+			}
+		}
+		return false
+	}
+	anyItems, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range anyItems {
+		if text, ok := item.(string); ok && text == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestNodeCapacityFiltersRelevantResources(t *testing.T) {

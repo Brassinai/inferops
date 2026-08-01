@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/brassinai/inferops/internal/runtimecontract"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,12 +27,22 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/yaml"
 )
 
 const (
 	defaultAddress           = ":8080"
 	defaultHeartbeatInterval = 30 * time.Second
+	maxEvidencePods          = 10
+	maxOwnerReferenceDepth   = 4
+	podEvidenceBindingPolicy = "inferops-modeldeployment-owner-reference"
 )
+
+var requiredInferOpsRuntimePodLabels = map[string]string{
+	runtimecontract.LabelManagedBy: runtimecontract.ValueManagedBy,
+	runtimecontract.LabelPartOf:    runtimecontract.ValuePartOf,
+	runtimecontract.LabelComponent: runtimecontract.ValueRuntimeComponent,
+}
 
 type config struct {
 	address           string
@@ -89,6 +100,14 @@ type offeringSnapshot struct {
 	Pricing                pricingSnapshot   `json:"pricing"`
 	ObservedCapacity       capacitySnapshot  `json:"observedCapacity"`
 	RateLimits             rateLimitSnapshot `json:"rateLimits"`
+	Evidence               evidenceSnapshot  `json:"evidence,omitempty"`
+}
+
+type evidenceSnapshot struct {
+	ManifestYAML    string         `json:"manifestYaml,omitempty"`
+	PodMetadata     map[string]any `json:"podMetadata,omitempty"`
+	RuntimeMetadata map[string]any `json:"runtimeMetadata,omitempty"`
+	ImageMetadata   map[string]any `json:"imageMetadata,omitempty"`
 }
 
 type gpuSnapshot struct {
@@ -442,7 +461,7 @@ func newKubernetesDiscovery(namespace, region string) (*kubernetesDiscovery, err
 
 func (d *kubernetesDiscovery) Snapshot(ctx context.Context) (clusterSnapshot, error) {
 	deployments, err := d.client.Resource(schema.GroupVersionResource{
-		Group:    "inference.inferops.dev",
+		Group:    runtimecontract.ModelDeploymentAPIGroup,
 		Version:  "v1alpha1",
 		Resource: "modeldeployments",
 	}).Namespace(d.namespace).List(ctx, metav1.ListOptions{})
@@ -450,7 +469,7 @@ func (d *kubernetesDiscovery) Snapshot(ctx context.Context) (clusterSnapshot, er
 		return clusterSnapshot{}, fmt.Errorf("list ModelDeployments: %w", err)
 	}
 	runtimes, err := d.client.Resource(schema.GroupVersionResource{
-		Group:    "inference.inferops.dev",
+		Group:    runtimecontract.ModelDeploymentAPIGroup,
 		Version:  "v1alpha1",
 		Resource: "modelruntimes",
 	}).Namespace(d.namespace).List(ctx, metav1.ListOptions{})
@@ -458,7 +477,7 @@ func (d *kubernetesDiscovery) Snapshot(ctx context.Context) (clusterSnapshot, er
 		return clusterSnapshot{}, fmt.Errorf("list ModelRuntimes: %w", err)
 	}
 	caches, err := d.client.Resource(schema.GroupVersionResource{
-		Group:    "inference.inferops.dev",
+		Group:    runtimecontract.ModelDeploymentAPIGroup,
 		Version:  "v1alpha1",
 		Resource: "modelcaches",
 	}).Namespace(d.namespace).List(ctx, metav1.ListOptions{})
@@ -473,22 +492,46 @@ func (d *kubernetesDiscovery) Snapshot(ctx context.Context) (clusterSnapshot, er
 	if err != nil {
 		return clusterSnapshot{}, fmt.Errorf("list Nodes: %w", err)
 	}
+	pods, err := d.client.Resource(schema.GroupVersionResource{
+		Group:    "",
+		Version:  "v1",
+		Resource: "pods",
+	}).Namespace(d.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return clusterSnapshot{}, fmt.Errorf("list Pods: %w", err)
+	}
+	replicaSets, err := d.client.Resource(schema.GroupVersionResource{
+		Group:    "apps",
+		Version:  "v1",
+		Resource: "replicasets",
+	}).Namespace(d.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return clusterSnapshot{}, fmt.Errorf("list ReplicaSets: %w", err)
+	}
+	workloadDeployments, err := d.client.Resource(schema.GroupVersionResource{
+		Group:    "apps",
+		Version:  "v1",
+		Resource: "deployments",
+	}).Namespace(d.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return clusterSnapshot{}, fmt.Errorf("list Deployments: %w", err)
+	}
 
 	snapshot := clusterSnapshot{
 		ModelDeployments: len(deployments.Items),
 		ModelRuntimes:    len(runtimes.Items),
 		ModelCaches:      len(caches.Items),
 		Region:           d.region,
-		Offerings:        modelOfferings(deployments.Items, d.namespace, d.region, nodeGPU(nodes.Items)),
+		Offerings:        modelOfferings(deployments.Items, d.namespace, d.region, nodeGPU(nodes.Items), podsByModelDeployment(pods.Items, replicaSets.Items, workloadDeployments.Items)),
 		Nodes:            nodeCapacity(nodes.Items),
 	}
 	return snapshot, nil
 }
 
-func modelOfferings(items []unstructured.Unstructured, namespace, region string, defaultGPU gpuSnapshot) []offeringSnapshot {
+func modelOfferings(items []unstructured.Unstructured, namespace, region string, defaultGPU gpuSnapshot, podsByDeployment map[string][]unstructured.Unstructured) []offeringSnapshot {
 	offerings := make([]offeringSnapshot, 0, len(items))
 	for _, item := range items {
-		if offering, ok := modelDeploymentOffering(item, namespace, region, defaultGPU); ok {
+		if offering, ok := modelDeploymentOffering(item, namespace, region, defaultGPU, podsByDeployment[item.GetName()]); ok {
 			offerings = append(offerings, offering)
 		}
 	}
@@ -498,7 +541,115 @@ func modelOfferings(items []unstructured.Unstructured, namespace, region string,
 	return offerings
 }
 
-func modelDeploymentOffering(item unstructured.Unstructured, namespace, region string, defaultGPU gpuSnapshot) (offeringSnapshot, bool) {
+func podsByModelDeployment(items, replicaSets, deployments []unstructured.Unstructured) map[string][]unstructured.Unstructured {
+	grouped := map[string][]unstructured.Unstructured{}
+	replicaSetByName := unstructuredByName(replicaSets)
+	deploymentByName := unstructuredByName(deployments)
+	for _, item := range items {
+		owner, ok := trustedModelDeploymentOwner(item, replicaSetByName, deploymentByName)
+		if !ok {
+			continue
+		}
+		grouped[owner] = append(grouped[owner], item)
+	}
+	for owner := range grouped {
+		pods := grouped[owner]
+		sort.Slice(pods, func(i, j int) bool {
+			return pods[i].GetName() < pods[j].GetName()
+		})
+		grouped[owner] = pods
+	}
+	return grouped
+}
+
+func unstructuredByName(items []unstructured.Unstructured) map[string]unstructured.Unstructured {
+	out := make(map[string]unstructured.Unstructured, len(items))
+	for _, item := range items {
+		name := strings.TrimSpace(item.GetName())
+		if name != "" {
+			out[name] = item
+		}
+	}
+	return out
+}
+
+func trustedModelDeploymentOwner(pod unstructured.Unstructured, replicaSetByName, deploymentByName map[string]unstructured.Unstructured) (string, bool) {
+	labels := pod.GetLabels()
+	if !hasRequiredInferOpsRuntimeLabels(labels) {
+		return "", false
+	}
+	labeledOwner := strings.TrimSpace(labels[runtimecontract.ModelDeploymentLabel])
+	if labeledOwner == "" {
+		return "", false
+	}
+	owner := modelDeploymentOwnerName(pod.GetOwnerReferences(), replicaSetByName, deploymentByName, 0, map[string]struct{}{})
+	if owner == "" || owner != labeledOwner {
+		return "", false
+	}
+	return owner, true
+}
+
+func hasRequiredInferOpsRuntimeLabels(labels map[string]string) bool {
+	for key, want := range requiredInferOpsRuntimePodLabels {
+		if labels[key] != want {
+			return false
+		}
+	}
+	return true
+}
+
+func modelDeploymentOwnerName(ownerRefs []metav1.OwnerReference, replicaSetByName, deploymentByName map[string]unstructured.Unstructured, depth int, visited map[string]struct{}) string {
+	if depth > maxOwnerReferenceDepth {
+		return ""
+	}
+	for _, owner := range ownerRefs {
+		if isInferOpsModelDeploymentOwner(owner) {
+			return strings.TrimSpace(owner.Name)
+		}
+		ownerKey := owner.APIVersion + "/" + owner.Kind + "/" + owner.Name
+		if _, seen := visited[ownerKey]; seen {
+			continue
+		}
+		visited[ownerKey] = struct{}{}
+		switch owner.Kind {
+		case "ReplicaSet":
+			replicaSet, ok := replicaSetByName[owner.Name]
+			if !ok {
+				continue
+			}
+			if name := modelDeploymentOwnerName(replicaSet.GetOwnerReferences(), replicaSetByName, deploymentByName, depth+1, visited); name != "" {
+				return name
+			}
+		case "Deployment":
+			deployment, ok := deploymentByName[owner.Name]
+			if !ok {
+				continue
+			}
+			if name := modelDeploymentOwnerName(deployment.GetOwnerReferences(), replicaSetByName, deploymentByName, depth+1, visited); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+func isInferOpsModelDeploymentOwner(owner metav1.OwnerReference) bool {
+	if owner.Kind != runtimecontract.ModelDeploymentKind || strings.TrimSpace(owner.Name) == "" {
+		return false
+	}
+	return strings.HasPrefix(owner.APIVersion, runtimecontract.ModelDeploymentAPIGroup+"/")
+}
+
+func isHuggingFaceSource(source string) bool {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "huggingface", "hugging-face", "hf":
+		return true
+	default:
+		return false
+	}
+}
+
+func modelDeploymentOffering(item unstructured.Unstructured, namespace, region string, defaultGPU gpuSnapshot, pods []unstructured.Unstructured) (offeringSnapshot, bool) {
 	spec, _, _ := unstructured.NestedMap(item.Object, "spec")
 	status, _, _ := unstructured.NestedMap(item.Object, "status")
 	modelMap, _, _ := unstructured.NestedMap(spec, "model")
@@ -568,8 +719,338 @@ func modelDeploymentOffering(item unstructured.Unstructured, namespace, region s
 			MaxRequestsPerMinute:  maxInt(1, intFromAny(firstNonEmptyAny(firstNestedValue(rateLimitMap, "maxRequestsPerMinute"), firstNestedValue(spec, "maxRequestsPerMinute"), 60))),
 			MaxTokensPerMinute:    maxInt(1, intFromAny(firstNonEmptyAny(firstNestedValue(rateLimitMap, "maxTokensPerMinute"), firstNestedValue(spec, "maxTokensPerMinute"), 1000))),
 		},
+		Evidence: modelDeploymentEvidence(item, model, runtime, endpointPath, pods),
 	}
 	return offering, strings.TrimSpace(offering.Model) != ""
+}
+
+func modelDeploymentEvidence(item unstructured.Unstructured, model, runtime, endpointPath string, pods []unstructured.Unstructured) evidenceSnapshot {
+	manifestYAML := ""
+	if payload, err := yaml.Marshal(redactEvidenceValue(stableModelDeploymentManifest(item))); err == nil {
+		manifestYAML = string(payload)
+	}
+	metadata, _, _ := unstructured.NestedMap(item.Object, "metadata")
+	spec, _, _ := unstructured.NestedMap(item.Object, "spec")
+	status, _, _ := unstructured.NestedMap(item.Object, "status")
+	modelMap, _, _ := unstructured.NestedMap(spec, "model")
+	statusModelMap, _, _ := unstructured.NestedMap(status, "model")
+	runtimeMap, _, _ := unstructured.NestedMap(spec, "runtime")
+	modelRepo := firstNonEmptyString(firstNestedString(modelMap, "repo"), firstNestedString(statusModelMap, "repo"))
+	modelName := firstNonEmptyString(firstNestedString(modelMap, "name"), firstNestedString(statusModelMap, "name"))
+	modelSource := firstNonEmptyString(firstNestedString(modelMap, "source"), firstNestedString(statusModelMap, "source"))
+	modelRevision := firstNonEmptyString(
+		firstNestedString(modelMap, "revision"),
+		firstNestedString(modelMap, "ref"),
+		firstNestedString(statusModelMap, "revision"),
+		firstNestedString(statusModelMap, "resolvedRevision"),
+		firstNestedString(statusModelMap, "commit"),
+		firstNestedString(statusModelMap, "commitHash"),
+	)
+	if modelSource == "" && modelRepo != "" {
+		modelSource = "huggingface"
+	}
+	runtimeMetadata := map[string]any{
+		"model":                model,
+		"runtime":              runtime,
+		"endpointPath":         endpointPath,
+		"phase":                firstNestedString(status, "phase"),
+		"modelRepo":            modelRepo,
+		"modelName":            modelName,
+		"modelSource":          modelSource,
+		"modelRevision":        modelRevision,
+		"runtimeRef":           firstNestedString(runtimeMap, "ref"),
+		"runtimeImage":         firstNestedString(runtimeMap, "image"),
+		"podBindingPolicy":     podEvidenceBindingPolicy,
+		"podBindingVerified":   len(pods) > 0,
+		"dtype":                firstNestedString(runtimeMap, "dtype"),
+		"maxModelLen":          firstNestedValue(runtimeMap, "maxModelLen"),
+		"tensorParallelSize":   firstNestedValue(runtimeMap, "tensorParallelSize"),
+		"gpuMemoryUtilization": firstNestedValue(runtimeMap, "gpuMemoryUtilization"),
+	}
+	if isHuggingFaceSource(modelSource) {
+		runtimeMetadata["huggingFaceRepo"] = modelRepo
+		runtimeMetadata["huggingFaceRevision"] = modelRevision
+	}
+	for _, key := range []string{"runtimeVersion", "runtimeClassName", "schedulerName"} {
+		if value := firstNonEmptyAny(firstNestedValue(status, key), firstNestedValue(spec, key)); value != nil {
+			runtimeMetadata[key] = value
+		}
+	}
+	imageMetadata := map[string]any{}
+	for _, key := range []string{"image", "containerImage", "runtimeImage", "imageDigest"} {
+		if value := firstNonEmptyAny(firstNestedValue(status, key), firstNestedValue(spec, key), firstNestedValue(runtimeMap, key)); value != nil {
+			imageMetadata[key] = value
+		}
+	}
+	if imageMetadata["runtimeImage"] == nil {
+		if value := firstNestedValue(runtimeMap, "image"); value != nil {
+			imageMetadata["runtimeImage"] = value
+		}
+	}
+	podMetadata := podEvidenceMetadata(item, metadata, status, pods)
+	addPodImageEvidence(imageMetadata, pods)
+	return evidenceSnapshot{
+		ManifestYAML:    manifestYAML,
+		PodMetadata:     redactEvidenceMap(compactEvidenceMap(podMetadata)),
+		RuntimeMetadata: redactEvidenceMap(compactEvidenceMap(runtimeMetadata)),
+		ImageMetadata:   redactEvidenceMap(compactEvidenceMap(imageMetadata)),
+	}
+}
+
+func podEvidenceMetadata(item unstructured.Unstructured, metadata, status map[string]any, pods []unstructured.Unstructured) map[string]any {
+	base := map[string]any{
+		"bindingPolicy":     podEvidenceBindingPolicy,
+		"bindingVerified":   len(pods) > 0,
+		"requiredLabels":    requiredInferOpsRuntimePodLabels,
+		"selectorLabel":     runtimecontract.ModelDeploymentLabel,
+		"selectorValue":     item.GetName(),
+		"totalVerifiedPods": len(pods),
+		"totalPods":         len(pods),
+	}
+	if len(pods) == 0 {
+		if nested, _, _ := unstructured.NestedMap(status, "podMetadata"); len(nested) > 0 {
+			base["fallback"] = nested
+		} else {
+			base["fallback"] = map[string]any{
+				"name":        item.GetName(),
+				"namespace":   firstNonEmptyString(item.GetNamespace(), firstNestedString(metadata, "namespace")),
+				"labels":      item.GetLabels(),
+				"annotations": item.GetAnnotations(),
+			}
+		}
+		return base
+	}
+	limit := len(pods)
+	if limit > maxEvidencePods {
+		limit = maxEvidencePods
+		base["truncated"] = true
+	}
+	podItems := make([]any, 0, limit)
+	for _, pod := range pods[:limit] {
+		podSpec, _, _ := unstructured.NestedMap(pod.Object, "spec")
+		podStatus, _, _ := unstructured.NestedMap(pod.Object, "status")
+		podItems = append(podItems, compactEvidenceMap(map[string]any{
+			"name":               pod.GetName(),
+			"namespace":          pod.GetNamespace(),
+			"phase":              firstNestedString(podStatus, "phase"),
+			"nodeName":           firstNestedString(podSpec, "nodeName"),
+			"podIP":              firstNestedString(podStatus, "podIP"),
+			"serviceAccountName": firstNestedString(podSpec, "serviceAccountName"),
+			"runtimeClassName":   firstNestedString(podSpec, "runtimeClassName"),
+			"labels":             pod.GetLabels(),
+			"annotations":        pod.GetAnnotations(),
+			"containers":         podContainerEvidence(podSpec, podStatus),
+		}))
+	}
+	base["pods"] = podItems
+	return base
+}
+
+func podContainerEvidence(podSpec, podStatus map[string]any) []any {
+	statusByName := map[string]map[string]any{}
+	for _, item := range firstNestedSlice(podStatus, "containerStatuses") {
+		status, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		name := firstNestedString(status, "name")
+		if name != "" {
+			statusByName[name] = status
+		}
+	}
+	containers := firstNestedSlice(podSpec, "containers")
+	out := make([]any, 0, len(containers))
+	for _, item := range containers {
+		container, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		name := firstNestedString(container, "name")
+		status := statusByName[name]
+		out = append(out, compactEvidenceMap(map[string]any{
+			"name":         name,
+			"image":        firstNestedString(container, "image"),
+			"imageID":      firstNestedString(status, "imageID"),
+			"ready":        firstNestedValue(status, "ready"),
+			"restartCount": firstNestedValue(status, "restartCount"),
+			"resources":    objectOrNil(container, "resources"),
+		}))
+	}
+	return out
+}
+
+func addPodImageEvidence(imageMetadata map[string]any, pods []unstructured.Unstructured) {
+	images := map[string]bool{}
+	imageIDs := map[string]bool{}
+	for _, pod := range pods {
+		podSpec, _, _ := unstructured.NestedMap(pod.Object, "spec")
+		podStatus, _, _ := unstructured.NestedMap(pod.Object, "status")
+		for _, item := range firstNestedSlice(podSpec, "containers") {
+			container, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if image := firstNestedString(container, "image"); image != "" {
+				images[image] = true
+			}
+		}
+		for _, item := range firstNestedSlice(podStatus, "containerStatuses") {
+			status, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if imageID := firstNestedString(status, "imageID"); imageID != "" {
+				imageIDs[imageID] = true
+			}
+		}
+	}
+	if len(images) > 0 {
+		imageMetadata["podImages"] = sortedKeys(images)
+	}
+	if len(imageIDs) > 0 {
+		imageMetadata["podImageIDs"] = sortedKeys(imageIDs)
+	}
+}
+
+func stableModelDeploymentManifest(item unstructured.Unstructured) map[string]any {
+	metadata, _, _ := unstructured.NestedMap(item.Object, "metadata")
+	status, _, _ := unstructured.NestedMap(item.Object, "status")
+	manifest := map[string]any{
+		"apiVersion": firstNonEmptyString(item.GetAPIVersion(), runtimecontract.ModelDeploymentAPIVersion),
+		"kind":       firstNonEmptyString(item.GetKind(), runtimecontract.ModelDeploymentKind),
+		"metadata": compactEvidenceMap(map[string]any{
+			"name":        item.GetName(),
+			"namespace":   firstNonEmptyString(item.GetNamespace(), firstNestedString(metadata, "namespace")),
+			"labels":      item.GetLabels(),
+			"annotations": item.GetAnnotations(),
+		}),
+		"spec": objectOrNil(item.Object, "spec"),
+	}
+	stableStatus := compactEvidenceMap(map[string]any{
+		"phase":                  firstNestedString(status, "phase"),
+		"modelName":              firstNonEmptyString(firstNestedString(status, "modelName"), firstNestedString(status, "model")),
+		"runtime":                firstNestedString(status, "runtime"),
+		"endpoint":               objectOrNil(status, "endpoint"),
+		"endpointPath":           firstNestedString(status, "endpointPath"),
+		"customEndpointsPresent": firstNonEmptyAny(firstNestedValue(status, "customEndpointsPresent"), firstNestedValue(status, "customEndpoints")),
+		"gpu":                    objectOrNil(status, "gpu"),
+		"region":                 firstNestedString(status, "region"),
+		"pricing":                objectOrNil(status, "pricing"),
+		"rateLimits":             objectOrNil(status, "rateLimits"),
+		"podMetadata":            objectOrNil(status, "podMetadata"),
+		"runtimeVersion":         firstNestedString(status, "runtimeVersion"),
+		"image":                  firstNestedString(status, "image"),
+		"containerImage":         firstNestedString(status, "containerImage"),
+		"runtimeImage":           firstNestedString(status, "runtimeImage"),
+		"imageDigest":            firstNestedString(status, "imageDigest"),
+	})
+	if len(stableStatus) > 0 {
+		manifest["status"] = stableStatus
+	}
+	return manifest
+}
+
+func objectOrNil(parent map[string]any, key string) any {
+	value, ok := parent[key]
+	if !ok {
+		return nil
+	}
+	nested, ok := value.(map[string]any)
+	if !ok || len(nested) == 0 {
+		return nil
+	}
+	return nested
+}
+
+func compactEvidenceMap(input map[string]any) map[string]any {
+	if len(input) == 0 {
+		return nil
+	}
+	out := map[string]any{}
+	for key, value := range input {
+		if value == nil {
+			continue
+		}
+		if text, ok := value.(string); ok && strings.TrimSpace(text) == "" {
+			continue
+		}
+		if nested, ok := value.(map[string]any); ok {
+			if compacted := compactEvidenceMap(nested); len(compacted) > 0 {
+				out[key] = compacted
+			}
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+func redactEvidenceMap(input map[string]any) map[string]any {
+	if len(input) == 0 {
+		return nil
+	}
+	out := map[string]any{}
+	if evidenceMapDeclaresSensitiveName(input) {
+		for key, value := range input {
+			if key == "value" || key == "valueFrom" {
+				out[key] = "[redacted]"
+				continue
+			}
+			out[key] = redactEvidenceValue(value)
+		}
+		return out
+	}
+	for key, value := range input {
+		if evidenceKeySensitive(key) {
+			out[key] = "[redacted]"
+			continue
+		}
+		out[key] = redactEvidenceValue(value)
+	}
+	return out
+}
+
+func redactEvidenceValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return redactEvidenceMap(typed)
+	case map[string]string:
+		out := make(map[string]string, len(typed))
+		for key, item := range typed {
+			if evidenceKeySensitive(key) {
+				out[key] = "[redacted]"
+				continue
+			}
+			out[key] = item
+		}
+		return out
+	case []any:
+		out := make([]any, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, redactEvidenceValue(item))
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func evidenceMapDeclaresSensitiveName(input map[string]any) bool {
+	name, ok := input["name"]
+	if !ok {
+		return false
+	}
+	return evidenceKeySensitive(fmt.Sprint(name))
+}
+
+func evidenceKeySensitive(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	for _, marker := range []string{"secret", "token", "password", "credential", "authorization", "api_key", "apikey", "private_key"} {
+		if strings.Contains(key, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func nodeCapacity(items []unstructured.Unstructured) []nodeSnapshot {
@@ -667,6 +1148,12 @@ func firstNestedString(parent map[string]any, key string) string {
 	return strings.TrimSpace(fmt.Sprint(value))
 }
 
+func firstNestedSlice(parent map[string]any, key string) []any {
+	value := firstNestedValue(parent, key)
+	items, _ := value.([]any)
+	return items
+}
+
 func firstNonEmptyAny(values ...any) any {
 	for _, value := range values {
 		if nonEmptyAny(value) {
@@ -687,6 +1174,15 @@ func firstNonEmptyString(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func sortedKeys(values map[string]bool) []string {
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func boolFromAny(value any) bool {
