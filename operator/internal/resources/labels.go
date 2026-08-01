@@ -9,19 +9,19 @@ import (
 
 // Well-known label keys used across all managed resources.
 const (
-	LabelPartOf          = "app.kubernetes.io/part-of"
+	LabelPartOf          = runtimecontract.LabelPartOf
 	LabelName            = "app.kubernetes.io/name"
-	LabelManagedBy       = "app.kubernetes.io/managed-by"
-	LabelComponent       = "app.kubernetes.io/component"
+	LabelManagedBy       = runtimecontract.LabelManagedBy
+	LabelComponent       = runtimecontract.LabelComponent
 	LabelModelDeployment = runtimecontract.ModelDeploymentLabel
 	LabelModelCache      = "inferops.dev/modelcache"
 )
 
 // Common label values.
 const (
-	ValuePartOf    = "inferops"
-	ValueManagedBy = "inferops-operator"
-	ValueComponent = "model-runtime"
+	ValuePartOf    = runtimecontract.ValuePartOf
+	ValueManagedBy = runtimecontract.ValueManagedBy
+	ValueComponent = runtimecontract.ValueRuntimeComponent
 )
 
 // BaseLabels returns the shared label set for a ModelDeployment's managed resources.
@@ -45,7 +45,7 @@ func SelectorLabels(modelDeploymentName string) map[string]string {
 
 // OwnerReferenceForModelDeployment returns an owner reference pointing to the ModelDeployment.
 func OwnerReferenceForModelDeployment(md *v1alpha1.ModelDeployment) metav1.OwnerReference {
-	return *metav1.NewControllerRef(md, v1alpha1.GroupVersion.WithKind("ModelDeployment"))
+	return *metav1.NewControllerRef(md, v1alpha1.GroupVersion.WithKind(runtimecontract.ModelDeploymentKind))
 }
 
 // CacheLabels returns labels for resources managed on behalf of a ModelCache.
