@@ -240,6 +240,7 @@ class CloudConnectRequest:
     charts_dir: str | None = None
     cloud_agent_image: str | None = None
     cloud_agent_image_pull_policy: str | None = None
+    benchmark_offerings: bool = False
     wait: bool = True
     timeout_seconds: float = 300
 

@@ -1,12 +1,19 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/brassinai/inferops/internal/runtimecontract"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/expfmt"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -159,7 +166,11 @@ func TestModelOfferings(t *testing.T) {
 					"openAICompatible": true,
 				},
 			},
-			"status": map[string]any{"phase": "Active"},
+			"status": map[string]any{
+				"phase":        "Active",
+				"endpoint":     "/models/cpu-smollm/v1",
+				"endpointPath": "/v1",
+			},
 		}},
 		{Object: map[string]any{
 			"metadata": map[string]any{"name": "status-model-map"},
@@ -271,7 +282,7 @@ func TestModelOfferings(t *testing.T) {
 	if offerings[1].Model != "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF" || offerings[1].Runtime != "llama-cpp" {
 		t.Fatalf("yaml model/runtime not discovered: %#v", offerings[1])
 	}
-	if offerings[1].Endpoint != "/models/cpu-smollm" || offerings[1].EndpointPath != "/v1" || offerings[1].CustomEndpointsPresent {
+	if offerings[1].Endpoint != "/models/cpu-smollm/v1" || offerings[1].EndpointPath != "/v1" || offerings[1].CustomEndpointsPresent {
 		t.Fatalf("yaml endpoint eligibility not discovered: %#v", offerings[1])
 	}
 	if offerings[2].Model != "org/status-model-map" {
@@ -357,6 +368,654 @@ func TestModelDeploymentOwnerNameRejectsCyclicOwnerReferences(t *testing.T) {
 	if got != "" {
 		t.Fatalf("cyclic owner reference resolved to %q", got)
 	}
+}
+
+func TestModelOfferingAutomaticallyEstimatesCapacityAndTokenLimit(t *testing.T) {
+	item := unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "qwen-7b"},
+		"spec": map[string]any{
+			"model": map[string]any{
+				"repo": "Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4",
+			},
+			"runtime": map[string]any{
+				"ref":         "vllm",
+				"dtype":       "int4",
+				"maxModelLen": int64(2048),
+			},
+			"routing": map[string]any{
+				"path":             "/models/qwen-7b",
+				"openAICompatible": true,
+			},
+		},
+		"status": map[string]any{
+			"phase":        "Active",
+			"endpoint":     "/models/qwen-7b/v1",
+			"endpointPath": "/v1",
+		},
+	}}
+	offering, ok := modelDeploymentOffering(item, "team-a", "us-test-1", gpuSnapshot{
+		Vendor:   "NVIDIA",
+		Type:     "L4",
+		Count:    1,
+		MemoryGB: 24,
+	}, nil)
+	if !ok {
+		t.Fatal("expected offering")
+	}
+	if offering.ObservedCapacity.CapacitySource != "hardware-model-estimate" {
+		t.Fatalf("capacity source = %q", offering.ObservedCapacity.CapacitySource)
+	}
+	if offering.ObservedCapacity.TokensPerSecondEstimate <= 1 {
+		t.Fatalf("tokens/sec was not estimated: %#v", offering.ObservedCapacity)
+	}
+	if offering.ObservedCapacity.TokensPerMinuteEstimate != int(offering.ObservedCapacity.TokensPerSecondEstimate*60) {
+		t.Fatalf("tokens/minute = %d, tokens/sec = %v", offering.ObservedCapacity.TokensPerMinuteEstimate, offering.ObservedCapacity.TokensPerSecondEstimate)
+	}
+	if offering.RateLimits.MaxTokensPerMinute != offering.ObservedCapacity.TokensPerMinuteEstimate {
+		t.Fatalf("rate limit tokens/minute = %d, want %d", offering.RateLimits.MaxTokensPerMinute, offering.ObservedCapacity.TokensPerMinuteEstimate)
+	}
+	if offering.ObservedCapacity.MaxConcurrentRequests <= 1 {
+		t.Fatalf("concurrency was not estimated: %#v", offering.ObservedCapacity)
+	}
+	if offering.Pricing.Unit != "million_input_tokens" || offering.Pricing.PriceUSD != "0.01" {
+		t.Fatalf("pricing should remain provider/cloud contract defaults: %#v", offering.Pricing)
+	}
+}
+
+func TestDeploymentRuntimeProbeEligibility(t *testing.T) {
+	activeDefault := unstructured.Unstructured{Object: map[string]any{
+		"status": map[string]any{"phase": "Active", "endpointPath": "/v1"},
+		"spec":   map[string]any{"routing": map[string]any{"openAICompatible": true}},
+	}}
+	if !deploymentRuntimeProbeEligible(activeDefault) {
+		t.Fatal("active default OpenAI runtime should be probe eligible")
+	}
+	modelPrefixedDefault := unstructured.Unstructured{Object: map[string]any{
+		"status": map[string]any{"phase": "Active", "endpointPath": "/models/cpu-smollm/v1"},
+		"spec":   map[string]any{"routing": map[string]any{"openAICompatible": true}},
+	}}
+	if !deploymentRuntimeProbeEligible(modelPrefixedDefault) {
+		t.Fatal("active model-prefixed OpenAI runtime should be probe eligible")
+	}
+	inactive := unstructured.Unstructured{Object: map[string]any{
+		"status": map[string]any{"phase": "Cached", "endpointPath": "/v1"},
+	}}
+	if deploymentRuntimeProbeEligible(inactive) {
+		t.Fatal("inactive runtime should not be probe eligible")
+	}
+	customEndpoint := unstructured.Unstructured{Object: map[string]any{
+		"status": map[string]any{"phase": "Active", "endpointPath": "/custom"},
+	}}
+	if deploymentRuntimeProbeEligible(customEndpoint) {
+		t.Fatal("custom runtime endpoint should not be probe eligible")
+	}
+	customModelEndpoint := unstructured.Unstructured{Object: map[string]any{
+		"status": map[string]any{"phase": "Active", "endpointPath": "/models/cpu-smollm/custom"},
+	}}
+	if deploymentRuntimeProbeEligible(customModelEndpoint) {
+		t.Fatal("custom model-prefixed runtime endpoint should not be probe eligible")
+	}
+}
+
+func TestModelOfferingKeepsModelPrefixedEndpointPath(t *testing.T) {
+	item := unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "cpu-smollm"},
+		"spec": map[string]any{
+			"model":   map[string]any{"repo": "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF"},
+			"runtime": map[string]any{"ref": "llama-cpp", "maxModelLen": int64(512)},
+			"routing": map[string]any{"openAICompatible": true},
+		},
+		"status": map[string]any{
+			"phase":       "Active",
+			"endpoint":    "/models/cpu-smollm/v1",
+			"serviceName": "cpu-smollm-runtime",
+		},
+	}}
+	if !deploymentRuntimeProbeEligible(item) {
+		t.Fatal("model-prefixed default endpoint should be benchmark eligible")
+	}
+	offering, ok := modelDeploymentOfferingWithMetrics(item, "default", "local-dev", gpuSnapshot{}, nil, runtimeMetricSnapshot{
+		InputTokensPerSecondEstimate:  26.91,
+		OutputTokensPerSecondEstimate: 11.12,
+		TokensPerSecondEstimate:       38.03,
+		Source:                        "runtime-metrics-gauge",
+	})
+	if !ok {
+		t.Fatal("expected offering")
+	}
+	if offering.EndpointPath != "/models/cpu-smollm/v1" || offering.CustomEndpointsPresent {
+		t.Fatalf("offering endpoint should remain the public default path: %#v", offering)
+	}
+}
+
+func TestRuntimeMetricsCountersComputeTokenRates(t *testing.T) {
+	discovery := &kubernetesDiscovery{tokenSamples: map[string]tokenCounterSample{}}
+	first := discovery.runtimeMetricsFromFamilies("team-a/qwen-runtime", time.Unix(100, 0), parseMetricFamilies(t, `
+# TYPE vllm:prompt_tokens_total counter
+vllm:prompt_tokens_total{model_name="qwen"} 50
+# TYPE vllm:generation_tokens_total counter
+vllm:generation_tokens_total{model_name="qwen"} 100
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{model_name="qwen"} 3
+# TYPE vllm:num_requests_waiting gauge
+vllm:num_requests_waiting{model_name="qwen"} 2
+# TYPE vllm:kv_cache_usage_perc gauge
+vllm:kv_cache_usage_perc{model_name="qwen"} 0.5
+# TYPE vllm:prefix_cache_hits counter
+vllm:prefix_cache_hits{model_name="qwen"} 10
+# TYPE vllm:prefix_cache_queries counter
+vllm:prefix_cache_queries{model_name="qwen"} 20
+# TYPE vllm:prompt_tokens_cached_total counter
+vllm:prompt_tokens_cached_total{model_name="qwen"} 100
+`))
+	if first.TokensPerSecondEstimate != 0 || first.ActiveRequests != 3 || first.QueueDepth != 2 || first.GPUMemoryPressurePercent != 50 || first.KVCacheUsagePercent != 50 {
+		t.Fatalf("first metric sample = %#v", first)
+	}
+	if !first.PromptCacheSupported || first.PrefixCacheHitRatePercent != 50 {
+		t.Fatalf("first cache metrics = %#v", first)
+	}
+
+	second := discovery.runtimeMetricsFromFamilies("team-a/qwen-runtime", time.Unix(110, 0), parseMetricFamilies(t, `
+# TYPE vllm:prompt_tokens_total counter
+vllm:prompt_tokens_total{model_name="qwen"} 80
+# TYPE vllm:generation_tokens_total counter
+vllm:generation_tokens_total{model_name="qwen"} 250
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{model_name="qwen"} 4
+# TYPE vllm:prefix_cache_hits counter
+vllm:prefix_cache_hits{model_name="qwen"} 40
+# TYPE vllm:prefix_cache_queries counter
+vllm:prefix_cache_queries{model_name="qwen"} 80
+# TYPE vllm:prompt_tokens_cached_total counter
+vllm:prompt_tokens_cached_total{model_name="qwen"} 250
+`))
+	if second.Source != "runtime-metrics-counter-rate" {
+		t.Fatalf("source = %q", second.Source)
+	}
+	if second.InputTokensPerSecondEstimate != 3 || second.OutputTokensPerSecondEstimate != 15 || second.TokensPerSecondEstimate != 18 {
+		t.Fatalf("token rates = %#v", second)
+	}
+	if second.ActiveRequests != 4 {
+		t.Fatalf("active requests = %d", second.ActiveRequests)
+	}
+	if second.PrefixCacheHitRatePercent != 50 || second.CachedPromptTokensPerSecond != 15 || second.CachedTokenReportingSupported {
+		t.Fatalf("cache metric deltas = %#v", second)
+	}
+}
+
+func TestBenchmarkRuntimeUsesOpenAIUsageTokens(t *testing.T) {
+	calls := 0
+	discovery := &kubernetesDiscovery{
+		namespace:                 "team-a",
+		benchmarkEnabled:          true,
+		benchmarkTimeout:          time.Second,
+		benchmarkMaxTokens:        8,
+		benchmarkMaxContextTokens: 0,
+		benchmarkMaxOutputTokens:  0,
+		benchmarkMaxConcurrency:   0,
+		metricsClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			calls++
+			body := `{"usage":{"prompt_tokens":128,"completion_tokens":1,"total_tokens":129}}`
+			if calls == 2 {
+				body = `{"usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}}`
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}, nil
+		})},
+		benchmarkSamples: map[string]runtimeMetricSnapshot{},
+	}
+	item := unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{
+			"name":       "qwen",
+			"namespace":  "team-a",
+			"generation": int64(1),
+		},
+		"spec": map[string]any{
+			"model":   map[string]any{"repo": "Qwen/Qwen2.5-7B-Instruct"},
+			"runtime": map[string]any{"ref": "vllm"},
+		},
+	}}
+
+	sample := discovery.benchmarkRuntime(context.Background(), item, "qwen-runtime", runtimeConfig{Port: 8000, MetricsPath: "/metrics"})
+	if sample.Source != "runtime-microbenchmark" {
+		t.Fatalf("benchmark source = %q", sample.Source)
+	}
+	if sample.InputTokens != 128 || sample.OutputTokens != 8 {
+		t.Fatalf("usage tokens = %#v", sample)
+	}
+	if sample.InputTokensPerSecondEstimate <= 0 || sample.OutputTokensPerSecondEstimate <= 0 {
+		t.Fatalf("token rates were not measured: %#v", sample)
+	}
+	if calls != 3 {
+		t.Fatalf("benchmark calls = %d, want 3", calls)
+	}
+	cached := discovery.benchmarkRuntime(context.Background(), item, "qwen-runtime", runtimeConfig{Port: 8000, MetricsPath: "/metrics"})
+	if cached.Source != "runtime-microbenchmark" || calls != 3 {
+		t.Fatalf("cached benchmark = %#v calls=%d", cached, calls)
+	}
+}
+
+func TestBenchmarkRuntimeBacksOffAfterFailure(t *testing.T) {
+	calls := 0
+	discovery := &kubernetesDiscovery{
+		namespace:                 "team-a",
+		benchmarkEnabled:          true,
+		benchmarkTimeout:          time.Second,
+		benchmarkMaxTokens:        8,
+		benchmarkMaxContextTokens: 0,
+		benchmarkMaxOutputTokens:  0,
+		benchmarkMaxConcurrency:   0,
+		metricsClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("unavailable")),
+			}, nil
+		})},
+		benchmarkAttempts: map[string]time.Time{},
+	}
+	item := unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{
+			"name":       "qwen",
+			"namespace":  "team-a",
+			"generation": int64(1),
+		},
+		"spec": map[string]any{
+			"model":   map[string]any{"repo": "Qwen/Qwen2.5-7B-Instruct"},
+			"runtime": map[string]any{"ref": "vllm"},
+		},
+	}}
+
+	first := discovery.benchmarkRuntime(context.Background(), item, "qwen-runtime", runtimeConfig{Port: 8000})
+	second := discovery.benchmarkRuntime(context.Background(), item, "qwen-runtime", runtimeConfig{Port: 8000})
+	if first.Source != "" || second.Source != "" {
+		t.Fatalf("failed benchmark should not produce samples: first=%#v second=%#v", first, second)
+	}
+	if calls != 1 {
+		t.Fatalf("benchmark calls = %d, want 1 because failure is backed off", calls)
+	}
+}
+
+func TestBenchmarkRuntimeMeasuresContextOutputAndConcurrency(t *testing.T) {
+	discovery := &kubernetesDiscovery{
+		namespace:                 "team-a",
+		benchmarkEnabled:          true,
+		benchmarkTimeout:          time.Second,
+		benchmarkMaxTokens:        8,
+		benchmarkMaxOutputTokens:  128,
+		benchmarkMaxContextTokens: 8192,
+		benchmarkMaxConcurrency:   4,
+		benchmarkLatencySLOMillis: 1000,
+		metricsClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			var body map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			if stream, _ := body["stream"].(bool); stream {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n")),
+				}, nil
+			}
+			maxTokens := intFromAny(body["max_tokens"])
+			promptTokens := 12
+			if messages, _ := body["messages"].([]any); len(messages) > 0 {
+				if message, _ := messages[0].(map[string]any); message != nil {
+					promptTokens = len(strings.Fields(fmt.Sprint(message["content"])))
+				}
+			}
+			response := fmt.Sprintf(`{"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`, promptTokens, maxTokens, promptTokens+maxTokens)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(response)),
+			}, nil
+		})},
+		benchmarkSamples: map[string]runtimeMetricSnapshot{},
+	}
+	item := unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{
+			"name":       "qwen",
+			"namespace":  "team-a",
+			"generation": int64(1),
+		},
+		"spec": map[string]any{
+			"model":   map[string]any{"repo": "Qwen/Qwen2.5-7B-Instruct"},
+			"runtime": map[string]any{"ref": "vllm"},
+		},
+	}}
+
+	sample := discovery.benchmarkRuntime(context.Background(), item, "qwen-runtime", runtimeConfig{Port: 8000})
+	if sample.ContextWindowTokens < 8192 {
+		t.Fatalf("context window was not probed: %#v", sample)
+	}
+	if sample.ContextWindowSource != "benchmark" {
+		t.Fatalf("context source = %q", sample.ContextWindowSource)
+	}
+	if sample.MaxOutputTokens != 128 {
+		t.Fatalf("max output tokens = %d", sample.MaxOutputTokens)
+	}
+	if sample.MaxOutputTokensSource != "benchmark" {
+		t.Fatalf("max output source = %q", sample.MaxOutputTokensSource)
+	}
+	if sample.MaxConcurrentRequests != 4 {
+		t.Fatalf("max concurrent requests = %d", sample.MaxConcurrentRequests)
+	}
+	if sample.MaxConcurrentRequestsSource != "benchmark" {
+		t.Fatalf("max concurrency source = %q", sample.MaxConcurrentRequestsSource)
+	}
+	if sample.P50FirstTokenLatencyMillis < 0 || sample.P95TotalLatencyMillis < 0 {
+		t.Fatalf("latencies were invalid: %#v", sample)
+	}
+}
+
+func TestBenchmarkRuntimeUsesDeclaredContextAndOutputLimitsWithoutLargeProbe(t *testing.T) {
+	var requests int
+	discovery := &kubernetesDiscovery{
+		namespace:                 "team-a",
+		benchmarkEnabled:          true,
+		benchmarkTimeout:          time.Second,
+		benchmarkMaxTokens:        8,
+		benchmarkMaxOutputTokens:  4096,
+		benchmarkMaxContextTokens: 32768,
+		benchmarkMaxConcurrency:   0,
+		benchmarkLatencySLOMillis: 1000,
+		metricsClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			requests++
+			var body map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			if stream, _ := body["stream"].(bool); stream {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")),
+				}, nil
+			}
+			if prompt := fmt.Sprint(body["messages"]); len(prompt) > 2500 {
+				t.Fatalf("declared context should not trigger a large context probe: %s", prompt[:120])
+			}
+			maxTokens := intFromAny(body["max_tokens"])
+			response := fmt.Sprintf(`{"usage":{"prompt_tokens":16,"completion_tokens":%d,"total_tokens":%d}}`, maxTokens, 16+maxTokens)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(response)),
+			}, nil
+		})},
+	}
+	item := unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "smollm", "namespace": "team-a", "generation": int64(1)},
+		"spec": map[string]any{
+			"model": map[string]any{"repo": "llama/smollm"},
+			"runtime": map[string]any{
+				"ref":         "llama-cpp",
+				"maxModelLen": int64(65536),
+			},
+		},
+	}}
+
+	sample := discovery.benchmarkRuntime(context.Background(), item, "smollm-runtime", runtimeConfig{
+		Port: 8000,
+		Env:  map[string]string{"MAX_OUTPUT_TOKENS": "128"},
+	})
+	if requests != 3 {
+		t.Fatalf("benchmark request count = %d, want 3 tiny probes", requests)
+	}
+	if sample.ContextWindowTokens != 65536 || sample.ContextWindowSource != "runtime-config" {
+		t.Fatalf("context limit = %#v", sample)
+	}
+	if sample.MaxOutputTokens != 128 || sample.MaxOutputTokensSource != "runtime-config" {
+		t.Fatalf("output limit = %#v", sample)
+	}
+}
+
+func TestBenchmarkRuntimeCachesPerDeployment(t *testing.T) {
+	var alphaCalls, betaCalls int
+	discovery := &kubernetesDiscovery{
+		namespace:                 "team-a",
+		benchmarkEnabled:          true,
+		benchmarkTimeout:          time.Second,
+		benchmarkMaxTokens:        4,
+		benchmarkMaxOutputTokens:  4,
+		benchmarkMaxContextTokens: 0,
+		benchmarkMaxConcurrency:   0,
+		benchmarkLatencySLOMillis: 1000,
+		metricsClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if strings.HasPrefix(request.URL.Host, "alpha-runtime.") {
+				alphaCalls++
+			}
+			if strings.HasPrefix(request.URL.Host, "beta-runtime.") {
+				betaCalls++
+			}
+			var body map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			if stream, _ := body["stream"].(bool); stream {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")),
+				}, nil
+			}
+			maxTokens := intFromAny(body["max_tokens"])
+			promptTokens := 10
+			if strings.HasPrefix(request.URL.Host, "beta-runtime.") {
+				promptTokens = 20
+			}
+			response := fmt.Sprintf(`{"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`, promptTokens, maxTokens, promptTokens+maxTokens)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(response)),
+			}, nil
+		})},
+		benchmarkSamples: map[string]runtimeMetricSnapshot{},
+	}
+	alpha := unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "alpha", "namespace": "team-a", "generation": int64(1)},
+		"spec":     map[string]any{"model": map[string]any{"repo": "Qwen/Qwen2.5-7B"}, "runtime": map[string]any{"ref": "vllm"}},
+	}}
+	beta := unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "beta", "namespace": "team-a", "generation": int64(1)},
+		"spec":     map[string]any{"model": map[string]any{"repo": "Qwen/Qwen2.5-7B"}, "runtime": map[string]any{"ref": "vllm"}},
+	}}
+
+	alphaSample := discovery.benchmarkRuntime(context.Background(), alpha, "alpha-runtime", runtimeConfig{Port: 8000})
+	betaSample := discovery.benchmarkRuntime(context.Background(), beta, "beta-runtime", runtimeConfig{Port: 8000})
+	alphaCached := discovery.benchmarkRuntime(context.Background(), alpha, "alpha-runtime", runtimeConfig{Port: 8000})
+	if alphaSample.Source == "" || betaSample.Source == "" || alphaCached.Source == "" {
+		t.Fatalf("expected benchmark samples: alpha=%#v beta=%#v cached=%#v", alphaSample, betaSample, alphaCached)
+	}
+	if len(discovery.benchmarkSamples) != 2 {
+		t.Fatalf("benchmark sample count = %d, want 2", len(discovery.benchmarkSamples))
+	}
+	if alphaCalls == 0 || betaCalls == 0 {
+		t.Fatalf("expected both deployments to be called: alpha=%d beta=%d", alphaCalls, betaCalls)
+	}
+	if alphaCached.InputTokens != alphaSample.InputTokens || betaSample.InputTokens == alphaSample.InputTokens {
+		t.Fatalf("cached/deployment-specific samples incorrect: alpha=%#v beta=%#v cached=%#v", alphaSample, betaSample, alphaCached)
+	}
+}
+
+func TestBenchmarkProbeLimitsPreferRuntimeConfiguration(t *testing.T) {
+	discovery := &kubernetesDiscovery{
+		benchmarkMaxTokens:        16,
+		benchmarkMaxOutputTokens:  4096,
+		benchmarkMaxContextTokens: 32768,
+		benchmarkMaxConcurrency:   64,
+		benchmarkLatencySLOMillis: 1000,
+	}
+	item := unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "small-ctx", "namespace": "team-a"},
+		"spec": map[string]any{
+			"model": map[string]any{"repo": "Qwen/Qwen2.5-7B-Instruct"},
+			"runtime": map[string]any{
+				"ref":         "llama-cpp",
+				"maxModelLen": int64(512),
+			},
+		},
+	}}
+
+	limits := discovery.benchmarkProbeLimits(item, runtimeConfig{
+		Env: map[string]string{
+			"MAX_MODEL_LEN":     "8192",
+			"MAX_NUM_SEQS":      "32",
+			"MAX_OUTPUT_TOKENS": "1024",
+		},
+	})
+	if limits.ContextTokens != 512 || limits.ContextSource != "runtime-config" {
+		t.Fatalf("context limit = %#v", limits)
+	}
+	if limits.OutputTokens != 512 || limits.OutputSource != "runtime-config-capped" {
+		t.Fatalf("output limit should be capped by context window: %#v", limits)
+	}
+	if limits.Concurrency != 32 || limits.ConcurrencySource != "runtime-config" {
+		t.Fatalf("concurrency limit = %#v", limits)
+	}
+}
+
+func TestAutomaticCapacityPreservesConfiguredSmallContextWindow(t *testing.T) {
+	estimate := estimateAutomaticCapacity(
+		"jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF",
+		"llama-cpp",
+		gpuSnapshot{Vendor: "unknown", Type: "cpu", Count: 1, MemoryGB: 1},
+		map[string]any{"maxModelLen": int64(512)},
+	)
+	if estimate.ContextWindowTokens != 512 {
+		t.Fatalf("context window = %d, want 512", estimate.ContextWindowTokens)
+	}
+}
+
+func TestAutomaticCapacityDoesNotPublishUnknownContextWindow(t *testing.T) {
+	estimate := estimateAutomaticCapacity(
+		"unknown-model",
+		"vllm",
+		gpuSnapshot{Vendor: "NVIDIA", Type: "H100", Count: 1, MemoryGB: 80},
+		map[string]any{},
+	)
+	if estimate.ContextWindowTokens != 0 {
+		t.Fatalf("context window = %d, want unknown/0", estimate.ContextWindowTokens)
+	}
+	if estimate.TokensPerSecond <= 0 || estimate.MaxConcurrentRequests <= 0 {
+		t.Fatalf("capacity estimate should still calculate internal throughput: %#v", estimate)
+	}
+}
+
+func TestModelOfferingPrefersRuntimeMeasurementsOverStatusDefaults(t *testing.T) {
+	item := unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "qwen"},
+		"spec": map[string]any{
+			"model":   map[string]any{"repo": "Qwen/Qwen2.5-7B-Instruct"},
+			"runtime": map[string]any{"ref": "vllm", "maxModelLen": int64(4096)},
+		},
+		"status": map[string]any{
+			"phase":        "Active",
+			"endpointPath": "/v1",
+			"capacity": map[string]any{
+				"tokensPerSecondEstimate": int64(1),
+				"tokensPerMinuteEstimate": int64(60),
+				"maxConcurrentRequests":   int64(1),
+			},
+			"rateLimits": map[string]any{
+				"maxTokensPerMinute": int64(1),
+			},
+		},
+	}}
+	offering, ok := modelDeploymentOfferingWithMetrics(item, "team-a", "us-test-1", gpuSnapshot{
+		Vendor:   "NVIDIA",
+		Type:     "H100",
+		Count:    1,
+		MemoryGB: 80,
+	}, nil, runtimeMetricSnapshot{
+		InputTokensPerSecondEstimate:  900,
+		OutputTokensPerSecondEstimate: 300,
+		TokensPerSecondEstimate:       1200,
+		MaxConcurrentRequests:         8,
+		MaxConcurrentRequestsSource:   "benchmark",
+		Source:                        "runtime-microbenchmark",
+	})
+	if !ok {
+		t.Fatal("expected offering")
+	}
+	if offering.ObservedCapacity.TokensPerSecondEstimate != 1200 || offering.ObservedCapacity.TokensPerMinuteEstimate != 72000 {
+		t.Fatalf("runtime token throughput did not override status defaults: %#v", offering.ObservedCapacity)
+	}
+	if offering.ObservedCapacity.MaxConcurrentRequests != 8 {
+		t.Fatalf("runtime concurrency did not override status default: %#v", offering.ObservedCapacity)
+	}
+	if offering.RateLimits.MaxTokensPerMinute != 72000 {
+		t.Fatalf("rate limit TPM did not move off default: %#v", offering.RateLimits)
+	}
+	if offering.ObservedCapacity.CapacitySource != "runtime-microbenchmark" {
+		t.Fatalf("capacity source = %q", offering.ObservedCapacity.CapacitySource)
+	}
+}
+
+func TestModelOfferingIgnoresPlaceholderStatusThroughput(t *testing.T) {
+	item := unstructured.Unstructured{Object: map[string]any{
+		"metadata": map[string]any{"name": "qwen"},
+		"spec": map[string]any{
+			"model":   map[string]any{"repo": "Qwen/Qwen2.5-7B-Instruct"},
+			"runtime": map[string]any{"ref": "vllm", "maxModelLen": int64(4096)},
+		},
+		"status": map[string]any{
+			"phase":        "Active",
+			"endpointPath": "/v1",
+			"capacity": map[string]any{
+				"tokensPerSecondEstimate": int64(1),
+				"tokensPerMinuteEstimate": int64(60),
+				"maxConcurrentRequests":   int64(1),
+			},
+			"rateLimits": map[string]any{
+				"maxTokensPerMinute": int64(1),
+			},
+		},
+	}}
+	offering, ok := modelDeploymentOfferingWithMetrics(item, "team-a", "us-test-1", gpuSnapshot{
+		Vendor:   "NVIDIA",
+		Type:     "H100",
+		Count:    1,
+		MemoryGB: 80,
+	}, nil, runtimeMetricSnapshot{})
+	if !ok {
+		t.Fatal("expected offering")
+	}
+	if offering.ObservedCapacity.TokensPerSecondEstimate <= 1 || offering.ObservedCapacity.TokensPerMinuteEstimate <= 60 {
+		t.Fatalf("placeholder status throughput should not be preserved: %#v", offering.ObservedCapacity)
+	}
+	if offering.ObservedCapacity.MaxConcurrentRequests <= 1 {
+		t.Fatalf("placeholder status concurrency should not beat automatic capacity: %#v", offering.ObservedCapacity)
+	}
+	if offering.ObservedCapacity.CapacitySource != "hardware-model-estimate" {
+		t.Fatalf("capacity source = %q", offering.ObservedCapacity.CapacitySource)
+	}
+	if offering.RateLimits.MaxTokensPerMinute <= 60 {
+		t.Fatalf("rate limit TPM should move off placeholder: %#v", offering.RateLimits)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+func parseMetricFamilies(t *testing.T, text string) map[string]*dto.MetricFamily {
+	t.Helper()
+	parser := expfmt.TextParser{}
+	families, err := parser.TextToMetricFamilies(bytes.NewBufferString(text))
+	if err != nil {
+		t.Fatalf("parse metrics: %v", err)
+	}
+	return families
 }
 
 func containsString(value any, want string) bool {

@@ -6,8 +6,36 @@
 {{- $meshEndpointURL := required "cloud.meshEndpointUrl is required" .Values.cloud.meshEndpointUrl }}
 {{- $credentialSecretName := required "cloud.credentialSecretName is required" .Values.cloud.credentialSecretName }}
 {{- $gatewayAuthSecretName := required "cloud.gatewayAuthSecretName is required" .Values.cloud.gatewayAuthSecretName }}
+{{- $benchmarkTimeoutSeconds := int (dig "benchmark" "timeoutSeconds" 10 .Values.cloud) }}
+{{- $benchmarkMaxTokens := int (dig "benchmark" "maxTokens" 16 .Values.cloud) }}
+{{- $benchmarkMaxOutputTokens := int (dig "benchmark" "maxOutputTokens" 256 .Values.cloud) }}
+{{- $benchmarkMaxContextTokens := int (dig "benchmark" "maxContextTokens" 32768 .Values.cloud) }}
+{{- $benchmarkMaxConcurrency := int (dig "benchmark" "maxConcurrency" 8 .Values.cloud) }}
+{{- $benchmarkLatencySLOMillis := int (dig "benchmark" "latencySLOMillis" 10000 .Values.cloud) }}
+{{- $benchmarkTotalTimeoutSeconds := int (dig "benchmark" "totalTimeoutSeconds" 120 .Values.cloud) }}
 {{- if lt (int .Values.cloud.heartbeatIntervalSeconds) 5 }}
 {{- fail "cloud.heartbeatIntervalSeconds must be at least 5" }}
+{{- end }}
+{{- if or (lt $benchmarkTimeoutSeconds 1) (gt $benchmarkTimeoutSeconds 60) }}
+{{- fail "cloud.benchmark.timeoutSeconds must be between 1 and 60" }}
+{{- end }}
+{{- if or (lt $benchmarkMaxTokens 1) (gt $benchmarkMaxTokens 128) }}
+{{- fail "cloud.benchmark.maxTokens must be between 1 and 128" }}
+{{- end }}
+{{- if or (lt $benchmarkMaxOutputTokens 1) (gt $benchmarkMaxOutputTokens 4096) }}
+{{- fail "cloud.benchmark.maxOutputTokens must be between 1 and 4096" }}
+{{- end }}
+{{- if or (lt $benchmarkMaxContextTokens 1024) (gt $benchmarkMaxContextTokens 262144) }}
+{{- fail "cloud.benchmark.maxContextTokens must be between 1024 and 262144" }}
+{{- end }}
+{{- if or (lt $benchmarkMaxConcurrency 1) (gt $benchmarkMaxConcurrency 64) }}
+{{- fail "cloud.benchmark.maxConcurrency must be between 1 and 64" }}
+{{- end }}
+{{- if or (lt $benchmarkLatencySLOMillis 100) (gt $benchmarkLatencySLOMillis 60000) }}
+{{- fail "cloud.benchmark.latencySLOMillis must be between 100 and 60000" }}
+{{- end }}
+{{- if or (lt $benchmarkTotalTimeoutSeconds 5) (gt $benchmarkTotalTimeoutSeconds 600) }}
+{{- fail "cloud.benchmark.totalTimeoutSeconds must be between 5 and 600" }}
 {{- end }}
 apiVersion: apps/v1
 kind: Deployment
@@ -68,6 +96,22 @@ spec:
               value: {{ .Values.cloud.heartbeatIntervalSeconds | quote }}
             - name: INFEROPS_CLOUD_DISCOVERY_REQUIRED
               value: {{ .Values.cloud.discoveryRequired | quote }}
+            - name: INFEROPS_CLOUD_BENCHMARK_ENABLED
+              value: {{ dig "benchmark" "enabled" false .Values.cloud | quote }}
+            - name: INFEROPS_CLOUD_BENCHMARK_TIMEOUT_SECONDS
+              value: {{ $benchmarkTimeoutSeconds | quote }}
+            - name: INFEROPS_CLOUD_BENCHMARK_MAX_TOKENS
+              value: {{ $benchmarkMaxTokens | quote }}
+            - name: INFEROPS_CLOUD_BENCHMARK_MAX_OUTPUT_TOKENS
+              value: {{ $benchmarkMaxOutputTokens | quote }}
+            - name: INFEROPS_CLOUD_BENCHMARK_MAX_CONTEXT_TOKENS
+              value: {{ $benchmarkMaxContextTokens | quote }}
+            - name: INFEROPS_CLOUD_BENCHMARK_MAX_CONCURRENCY
+              value: {{ $benchmarkMaxConcurrency | quote }}
+            - name: INFEROPS_CLOUD_BENCHMARK_LATENCY_SLO_MILLIS
+              value: {{ $benchmarkLatencySLOMillis | quote }}
+            - name: INFEROPS_CLOUD_BENCHMARK_TOTAL_TIMEOUT_SECONDS
+              value: {{ $benchmarkTotalTimeoutSeconds | quote }}
             - name: INFEROPS_CLOUD_AGENT_CREDENTIAL_FILE
               value: /var/run/secrets/inferops-cloud/agentCredential
             - name: INFEROPS_GATEWAY_AUTH_TOKEN_FILE

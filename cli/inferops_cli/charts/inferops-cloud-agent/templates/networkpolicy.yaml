@@ -35,4 +35,14 @@ spec:
         - port: 443
           protocol: TCP
     {{- end }}
+    {{- if .Values.networkPolicy.egress.allowRuntimeHTTP }}
+    - to:
+        - podSelector:
+            {{- toYaml .Values.networkPolicy.runtime.podSelector | nindent 12 }}
+      ports:
+        {{- range .Values.networkPolicy.egress.runtimePorts }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+    {{- end }}
 {{- end }}

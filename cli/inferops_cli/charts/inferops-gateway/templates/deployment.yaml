@@ -103,8 +103,12 @@ spec:
               value: {{ .Values.tailscale.userspace | quote }}
             - name: TS_AUTH_ONCE
               value: {{ .Values.tailscale.authOnce | quote }}
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             - name: TS_DEST_IP
-              value: "127.0.0.1"
+              value: {{ default "$(POD_IP)" .Values.tailscale.destIP | quote }}
             - name: TS_EXTRA_ARGS
               value: {{ printf "--login-server=%s %s" (required "tailscale.loginServer is required when tailscale.mode=headscale" .Values.tailscale.loginServer) .Values.tailscale.extraArgs | quote }}
           volumeMounts:

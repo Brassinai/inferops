@@ -1140,6 +1140,7 @@ class HelmInstallerTest(unittest.TestCase):
                 mesh_provider="tailscale",
                 mesh_mode="headscale",
                 mesh_hostname="provider-inferops-dev",
+                mesh_ip="",
                 mesh_endpoint_url="http://provider-inferops-dev:8080",
                 mesh_login_server="http://host.docker.internal:18080",
                 heartbeat_interval_seconds=10,
@@ -1159,6 +1160,48 @@ class HelmInstallerTest(unittest.TestCase):
         self.assertIn("tailscale.userspace=false", gateway_command)
         self.assertIn("tailscale.authOnce=true", gateway_command)
         self.assertIn("tailscale.kubeSecret=", gateway_command)
+
+    def test_cloud_connect_can_enable_offering_benchmark(self) -> None:
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            charts_dir = Path(directory)
+            for chart in ("inferops-gateway", "inferops-cloud-agent"):
+                chart_dir = charts_dir / chart
+                chart_dir.mkdir()
+                (chart_dir / "Chart.yaml").write_text(
+                    "apiVersion: v2\nname: test\nversion: 0.0.0\n"
+                )
+
+            HelmInstaller(runner=run).cloud_connect(
+                CloudConnectRequest(
+                    cluster=ClusterTarget(namespace="default"),
+                    token="token",
+                    charts_dir=str(charts_dir),
+                    benchmark_offerings=True,
+                ),
+                cloud_api_url="https://cloud.example.test",
+                provider_account_id="provider",
+                provider_cluster_id="cluster",
+                mesh_provider="tailscale",
+                mesh_mode="operator",
+                mesh_hostname="provider-inferops",
+                mesh_ip="",
+                mesh_endpoint_url="https://provider-inferops",
+                mesh_login_server="",
+                heartbeat_interval_seconds=10,
+                credential_secret_name="inferops-cloud-connection",
+                gateway_auth_secret_name="inferops-gateway-auth",
+            )
+
+        cloud_agent_command = next(
+            command for command in commands if command[3] == "inferops-cloud-agent"
+        )
+        self.assertIn("cloud.benchmark.enabled=true", cloud_agent_command)
 
     @staticmethod
     def _node(

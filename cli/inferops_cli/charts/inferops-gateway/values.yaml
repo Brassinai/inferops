@@ -157,6 +157,9 @@ tailscale:
   kubeSecret: ""
   userspace: false
   authOnce: true
+  # Empty targets the gateway container through the Pod IP. Use 127.0.0.1 only
+  # in environments where loopback DNAT is explicitly enabled.
+  destIP: ""
   extraArgs: "--accept-dns=false"
 
 probes:

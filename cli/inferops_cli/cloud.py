@@ -71,6 +71,14 @@ def register(subcommands) -> None:
         ),
     )
     connect_parser.add_argument(
+        "--benchmark-offerings",
+        action="store_true",
+        help=(
+            "Let the cloud agent run a tiny one-time OpenAI-compatible benchmark "
+            "against newly discovered runtime Services to infer token throughput."
+        ),
+    )
+    connect_parser.add_argument(
         "--no-wait",
         action="store_true",
         help="Do not wait for Helm rollouts to finish.",
@@ -127,6 +135,7 @@ def run_connect(args, client=None) -> int:
                 cloud_agent_image_pull_policy=getattr(
                     args, "cloud_agent_image_pull_policy", None
                 ),
+                benchmark_offerings=getattr(args, "benchmark_offerings", False),
                 wait=not getattr(args, "no_wait", False),
                 timeout_seconds=getattr(args, "timeout", 300),
             )

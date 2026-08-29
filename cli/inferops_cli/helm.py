@@ -1054,6 +1054,8 @@ def _build_cloud_agent_upgrade_command(
         f"cloud.credentialSecretName={_escape_helm_string(credential_secret_name)}",
         "--set-string",
         f"cloud.gatewayAuthSecretName={_escape_helm_string(gateway_auth_secret_name)}",
+        "--set",
+        f"cloud.benchmark.enabled={str(bool(request.benchmark_offerings)).lower()}",
     ]
     image_repository, image_tag = _split_image_reference(request.cloud_agent_image)
     if image_repository:

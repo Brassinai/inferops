@@ -23,6 +23,18 @@ cloud:
   meshEndpointUrl: ""
   heartbeatIntervalSeconds: 30
   discoveryRequired: true
+  benchmark:
+    enabled: false
+    timeoutSeconds: 10
+    maxTokens: 16
+    # Safety ceilings for the benchmark probes, not provider-entered capacity.
+    # The agent derives actual values from deployment/runtime config and
+    # accepted inference requests.
+    maxOutputTokens: 256
+    maxContextTokens: 32768
+    maxConcurrency: 8
+    latencySLOMillis: 10000
+    totalTimeoutSeconds: 120
   credentialSecretName: inferops-cloud-connection
   gatewayAuthSecretName: inferops-gateway-auth
 
@@ -32,6 +44,9 @@ networkPolicy:
     # Allow DNS and HTTPS by default because cloud API endpoints are external.
     allowDNS: true
     allowHTTPS: true
+    allowRuntimeHTTP: true
+    runtimePorts:
+      - 8000
   dns:
     namespaceSelector:
       matchLabels:
@@ -39,6 +54,12 @@ networkPolicy:
     podSelector:
       matchLabels:
         k8s-app: kube-dns
+  runtime:
+    podSelector:
+      matchLabels:
+        app.kubernetes.io/managed-by: inferops-operator
+        app.kubernetes.io/part-of: inferops
+        app.kubernetes.io/component: model-runtime
 
 serviceMonitor:
   enabled: false

@@ -96,6 +96,22 @@ agent runs in-cluster and:
 - reads the gateway bearer token from the gateway auth Secret,
 - sends authenticated heartbeats to the cloud API with mesh identity, gateway
   credential, deployment counts, offerings, and node capacity evidence,
+- scrapes managed runtime metrics when available to report active requests,
+  queue depth, input/output tokens per second, an automatic tokens-per-minute
+  limit, KV-cache pressure, prefix-cache hit rate, and cached prompt-token
+  rate for each offering,
+- can run an opt-in OpenAI-compatible benchmark for newly discovered active
+  `/v1` runtimes when connected with `--benchmark-offerings`; it measures
+  input/output token throughput, streaming first-token latency, accepted context
+  window, accepted output token limit, and stable concurrent request capacity
+  within the configured latency SLO; context and concurrency probes first use
+  deployment/runtime settings such as `runtime.maxModelLen`, `MAX_MODEL_LEN`,
+  and `MAX_NUM_SEQS`, while Helm benchmark values are only safety ceilings;
+  failed benchmark attempts are backed off,
+- bounds benchmark work with `cloud.benchmark.timeoutSeconds` per request and
+  `cloud.benchmark.totalTimeoutSeconds` for the whole probe suite,
+- falls back to a deterministic hardware/model/runtime estimate before enough
+  runtime token-counter history is available,
 - exposes `/healthz`, `/readyz`, and `/metrics`,
 - uses minimal namespace list RBAC plus node list access for capacity reporting.
 
