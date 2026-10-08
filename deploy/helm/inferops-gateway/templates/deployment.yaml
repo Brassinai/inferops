@@ -83,7 +83,7 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-        {{- if and .Values.tailscale.enabled (eq .Values.tailscale.mode "headscale") }}
+        {{- if and .Values.tailscale.enabled (or (eq .Values.tailscale.mode "headscale") (eq .Values.tailscale.mode "managed-sidecar")) }}
         - name: tailscale
           image: "{{ .Values.tailscale.image.repository }}:{{ .Values.tailscale.image.tag }}"
           imagePullPolicy: {{ .Values.tailscale.image.pullPolicy }}
@@ -91,8 +91,8 @@ spec:
             - name: TS_AUTHKEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ required "tailscale.authKeySecretName is required when tailscale.mode=headscale" .Values.tailscale.authKeySecretName | quote }}
-                  key: {{ required "tailscale.authKeySecretKey is required when tailscale.mode=headscale" .Values.tailscale.authKeySecretKey | quote }}
+                  name: {{ required "tailscale.authKeySecretName is required when tailscale sidecar mode is enabled" .Values.tailscale.authKeySecretName | quote }}
+                  key: {{ required "tailscale.authKeySecretKey is required when tailscale sidecar mode is enabled" .Values.tailscale.authKeySecretKey | quote }}
             - name: TS_HOSTNAME
               value: {{ .Values.tailscale.hostname | quote }}
             - name: TS_STATE_DIR
@@ -103,14 +103,20 @@ spec:
               value: {{ .Values.tailscale.userspace | quote }}
             - name: TS_AUTH_ONCE
               value: {{ .Values.tailscale.authOnce | quote }}
+            {{- if not .Values.tailscale.userspace }}
             - name: POD_IP
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
             - name: TS_DEST_IP
               value: {{ default "$(POD_IP)" .Values.tailscale.destIP | quote }}
+            {{- end }}
             - name: TS_EXTRA_ARGS
+              {{- if eq .Values.tailscale.mode "headscale" }}
               value: {{ printf "--login-server=%s %s" (required "tailscale.loginServer is required when tailscale.mode=headscale" .Values.tailscale.loginServer) .Values.tailscale.extraArgs | quote }}
+              {{- else }}
+              value: {{ .Values.tailscale.extraArgs | quote }}
+              {{- end }}
           volumeMounts:
             - name: tailscale-state
               mountPath: {{ .Values.tailscale.stateDir | quote }}
@@ -133,7 +139,7 @@ spec:
                 - SYS_MODULE
               {{- end }}
         {{- end }}
-      {{- if or .Values.auth.enabled (and .Values.tailscale.enabled (eq .Values.tailscale.mode "headscale")) }}
+      {{- if or .Values.auth.enabled (and .Values.tailscale.enabled (or (eq .Values.tailscale.mode "headscale") (eq .Values.tailscale.mode "managed-sidecar"))) }}
       volumes:
         {{- if .Values.auth.enabled }}
         - name: gateway-auth
@@ -144,7 +150,7 @@ spec:
               - key: {{ required "auth.secretKey is required when auth.enabled is true" .Values.auth.secretKey | quote }}
                 path: {{ .Values.auth.secretKey | quote }}
         {{- end }}
-        {{- if and .Values.tailscale.enabled (eq .Values.tailscale.mode "headscale") }}
+        {{- if and .Values.tailscale.enabled (or (eq .Values.tailscale.mode "headscale") (eq .Values.tailscale.mode "managed-sidecar")) }}
         - name: tailscale-state
           emptyDir: {}
         {{- if not .Values.tailscale.userspace }}

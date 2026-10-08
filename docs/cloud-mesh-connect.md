@@ -24,11 +24,24 @@ printf '%s' "$INFEROPS_CLOUD_TOKEN" | \
 
 `connect` verifies that InferOps is already installed, redeems the bootstrap
 token, writes persistent connection state to Kubernetes, enables authenticated
-Tailscale gateway exposure, and installs the persistent cloud agent.
+mesh gateway exposure, and installs the persistent cloud agent.
 
-The first supported mesh mode is the Tailscale Kubernetes Operator Ingress
-path. The command does not install the Tailscale operator or manage a host
-`tailscaled` daemon.
+The default hosted mesh mode is an InferCloud-managed Tailscale sidecar. The
+cloud API returns a short-lived auth key during token redemption, and the CLI
+installs the sidecar in the InferOps gateway Pod. Providers do not need a
+Tailscale account for this path.
+
+The Tailscale Kubernetes Operator Ingress path remains available for providers
+who intentionally want to expose the gateway through their own tailnet. In that
+advanced mode, the provider is responsible for installing and configuring the
+operator and tailnet credentials, then connecting with:
+
+```bash
+inferops cloud connect --token <bootstrap-token> \
+  --namespace inferops-system \
+  --cluster-name homelab-a \
+  --mesh-mode operator
+```
 
 ## Token Contract
 
@@ -47,7 +60,9 @@ The cloud API returns the durable connection payload:
   "providerClusterId": "cluster_123",
   "agentCredential": "...",
   "meshProvider": "tailscale",
+  "meshMode": "managed-sidecar",
   "meshHostname": "inferops-homelab-a",
+  "meshAuthKey": "...",
   "meshTags": ["tag:provider-agent", "tag:provider-endpoint"],
   "expectedEndpointPath": "/",
   "agentConfig": {

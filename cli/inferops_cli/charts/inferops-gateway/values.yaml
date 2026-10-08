@@ -25,6 +25,9 @@ networkPolicy:
       - 10.96.0.1/32
       - 10.43.0.1/32
       - 10.0.0.1/32
+    # Allows the Tailscale sidecar to reach control/DERP over HTTPS and direct
+    # WireGuard peers over UDP without disabling the rest of the policy.
+    tailscaleEgress: false
   runtime:
     # Add monitoring peers when Prometheus scrapes runtime metrics directly.
     additionalIngressFrom: []
@@ -143,6 +146,7 @@ tailscale:
   enabled: false
   # operator creates a Tailscale Ingress through the Kubernetes operator.
   # headscale runs a local-dev Tailscale sidecar in the gateway Pod.
+  # managed-sidecar runs a Tailscale sidecar with an InferCloud-issued auth key.
   mode: operator
   hostname: inferops
   annotations: {}

@@ -52,6 +52,15 @@ def register(subcommands) -> None:
         help="Optional provider cluster display name sent during token redemption.",
     )
     connect_parser.add_argument(
+        "--mesh-mode",
+        choices=("operator", "managed-sidecar"),
+        help=(
+            "Optional mesh exposure preference. Omit for the cloud default; use "
+            "operator only when this cluster already has a provider-owned "
+            "Tailscale Kubernetes Operator."
+        ),
+    )
+    connect_parser.add_argument(
         "--charts-dir",
         help="Path to InferOps Helm charts. Usually detected automatically.",
     )
@@ -130,6 +139,7 @@ def run_connect(args, client=None) -> int:
                 token=token,
                 cloud_api_url=getattr(args, "cloud_api_url", None),
                 cluster_name=getattr(args, "cluster_name", None),
+                mesh_mode=getattr(args, "mesh_mode", None),
                 charts_dir=getattr(args, "charts_dir", None),
                 cloud_agent_image=getattr(args, "cloud_agent_image", None),
                 cloud_agent_image_pull_policy=getattr(

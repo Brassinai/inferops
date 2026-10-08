@@ -955,8 +955,8 @@ def _build_cloud_gateway_upgrade_command(
     gateway_auth_secret_name: str,
 ) -> list[str]:
     _validate_tailscale_hostname(mesh_hostname)
-    if mesh_mode not in {"operator", "headscale"}:
-        raise CLIError("cloud mesh mode must be operator or headscale")
+    if mesh_mode not in {"operator", "headscale", "managed-sidecar"}:
+        raise CLIError("cloud mesh mode must be operator, headscale, or managed-sidecar")
     command = [
         "helm",
         "upgrade",
@@ -980,19 +980,35 @@ def _build_cloud_gateway_upgrade_command(
         "--set-string",
         f"auth.secretName={_escape_helm_string(gateway_auth_secret_name)}",
     ]
-    if mesh_mode == "headscale":
+    if mesh_mode in {"headscale", "managed-sidecar"}:
         command.extend(
             [
-                "--set-string",
-                f"tailscale.loginServer={_escape_helm_string(mesh_login_server)}",
                 "--set-string",
                 f"tailscale.authKeySecretName={_escape_helm_string(gateway_auth_secret_name)}",
                 "--set-string",
                 "tailscale.authKeySecretKey=meshAuthKey",
                 "--set",
-                "tailscale.userspace=false",
-                "--set",
                 "tailscale.authOnce=true",
+            ]
+        )
+    if mesh_mode == "managed-sidecar":
+        command.extend(
+            [
+                "--set-string",
+                "tailscale.kubeSecret=inferops-gateway-tailscale-state",
+                "--set",
+                "tailscale.userspace=true",
+                "--set",
+                "networkPolicy.gateway.tailscaleEgress=true",
+            ]
+        )
+    if mesh_mode == "headscale":
+        command.extend(
+            [
+                "--set-string",
+                f"tailscale.loginServer={_escape_helm_string(mesh_login_server)}",
+                "--set",
+                "tailscale.userspace=false",
                 "--set-string",
                 "tailscale.kubeSecret=",
                 "--set",

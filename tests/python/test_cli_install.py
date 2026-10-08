@@ -1203,6 +1203,54 @@ class HelmInstallerTest(unittest.TestCase):
         )
         self.assertIn("cloud.benchmark.enabled=true", cloud_agent_command)
 
+    def test_cloud_connect_configures_managed_sidecar_mesh(self) -> None:
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            charts_dir = Path(directory)
+            for chart in ("inferops-gateway", "inferops-cloud-agent"):
+                chart_dir = charts_dir / chart
+                chart_dir.mkdir()
+                (chart_dir / "Chart.yaml").write_text(
+                    "apiVersion: v2\nname: test\nversion: 0.0.0\n"
+                )
+
+            HelmInstaller(runner=run).cloud_connect(
+                CloudConnectRequest(
+                    cluster=ClusterTarget(namespace="default"),
+                    token="token",
+                    charts_dir=str(charts_dir),
+                ),
+                cloud_api_url="https://cloud.example.test",
+                provider_account_id="provider",
+                provider_cluster_id="cluster",
+                mesh_provider="tailscale",
+                mesh_mode="managed-sidecar",
+                mesh_hostname="provider-inferops",
+                mesh_ip="",
+                mesh_endpoint_url="http://provider-inferops:8080",
+                mesh_login_server="",
+                heartbeat_interval_seconds=10,
+                credential_secret_name="inferops-cloud-connection",
+                gateway_auth_secret_name="inferops-gateway-auth",
+            )
+
+        gateway_command = next(
+            command for command in commands if command[3] == "inferops-gateway"
+        )
+        self.assertIn("tailscale.mode=managed-sidecar", gateway_command)
+        self.assertIn("tailscale.authKeySecretName=inferops-gateway-auth", gateway_command)
+        self.assertIn("tailscale.authKeySecretKey=meshAuthKey", gateway_command)
+        self.assertIn("tailscale.kubeSecret=inferops-gateway-tailscale-state", gateway_command)
+        self.assertIn("tailscale.userspace=true", gateway_command)
+        self.assertIn("networkPolicy.gateway.tailscaleEgress=true", gateway_command)
+        self.assertNotIn("tailscale.loginServer=", gateway_command)
+        self.assertNotIn("networkPolicy.enabled=false", gateway_command)
+
     @staticmethod
     def _node(
         name: str,

@@ -50,6 +50,16 @@ spec:
       ports:
         - port: 443
           protocol: TCP
+    {{- if .Values.networkPolicy.gateway.tailscaleEgress }}
+    - to:
+        - ipBlock:
+            cidr: "0.0.0.0/0"
+      ports:
+        - port: 443
+          protocol: TCP
+        - port: 41641
+          protocol: UDP
+    {{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

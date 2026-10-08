@@ -1510,6 +1510,26 @@ class CLICommandHandlerTest(unittest.TestCase):
         self.assertEqual(payload["meshAuthKey"], "hskey:dev")
         self.assertEqual(payload["meshLoginServer"], "http://host.docker.internal:18080")
 
+    def test_cloud_payload_normalization_accepts_managed_sidecar_mesh_contract(self) -> None:
+        payload = _normalize_cloud_redeem_payload(
+            {
+                "cloudApiUrl": "https://cloud.example.test",
+                "providerAccountId": "provider",
+                "providerClusterId": "cluster",
+                "agentCredential": "agent-secret",
+                "meshProvider": "tailscale",
+                "meshMode": "managed-sidecar",
+                "meshHostname": "inferops",
+                "meshEndpointUrl": "http://inferops:8080",
+                "meshAuthKey": "tskey-auth-test",
+            },
+            fallback_cloud_api_url="https://cloud.example.test",
+        )
+
+        self.assertEqual(payload["meshMode"], "managed-sidecar")
+        self.assertEqual(payload["meshAuthKey"], "tskey-auth-test")
+        self.assertEqual(payload["meshEndpointUrl"], "http://inferops:8080")
+
     def test_cloud_payload_rejects_insecure_remote_cloud_api(self) -> None:
         with self.assertRaisesRegex(CLIError, "must use https"):
             _normalize_cloud_redeem_payload(

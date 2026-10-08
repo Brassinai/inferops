@@ -237,6 +237,7 @@ class CloudConnectRequest:
     token: str
     cloud_api_url: str | None = None
     cluster_name: str | None = None
+    mesh_mode: str | None = None
     charts_dir: str | None = None
     cloud_agent_image: str | None = None
     cloud_agent_image_pull_policy: str | None = None

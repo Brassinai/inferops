@@ -833,6 +833,7 @@ class LiveKubernetesClient(KubernetesClient):
                 token=request.token,
                 cluster=request.cluster,
                 cluster_name=request.cluster_name,
+                mesh_mode=request.mesh_mode,
             ),
             fallback_cloud_api_url=cloud_api_url,
         )
@@ -967,8 +968,8 @@ class LiveKubernetesClient(KubernetesClient):
 
         gateway = self._check_gateway()
         checks.append(_doctor_to_cloud_check("gateway", gateway))
-        if config.get("meshMode") == "headscale":
-            checks.append(_headscale_mesh_check(config, gateway_secret))
+        if config.get("meshMode") in {"headscale", "managed-sidecar"}:
+            checks.append(_sidecar_mesh_check(config, gateway_secret))
         else:
             tailscale = self._check_tailscale()
             if config.get("meshProvider") == "tailscale" and "not configured" in tailscale.message:
@@ -3386,10 +3387,12 @@ def _redeem_cloud_token(
     token: str,
     cluster: ClusterTarget,
     cluster_name: str | None,
+    mesh_mode: str | None,
 ) -> dict[str, Any]:
     body = {
         "clusterName": cluster_name,
         "namespace": cluster.namespace,
+        "meshMode": mesh_mode,
     }
     try:
         response = _cloud_json_request(
@@ -3505,11 +3508,16 @@ def _normalize_cloud_redeem_payload(
         raise CLIError("cloud heartbeat interval must be at least 5 seconds")
     if not normalized["expectedEndpointPath"].startswith("/"):
         raise CLIError("cloud expected endpoint path must start with /")
-    if normalized["meshMode"] not in {"operator", "headscale"}:
-        raise CLIError("cloud token redemption response field meshMode must be operator or headscale")
-    if normalized["meshMode"] == "headscale":
+    if normalized["meshMode"] not in {"operator", "headscale", "managed-sidecar"}:
+        raise CLIError(
+            "cloud token redemption response field meshMode must be operator, headscale, or managed-sidecar"
+        )
+    if normalized["meshMode"] in {"headscale", "managed-sidecar"}:
         if not normalized["meshAuthKey"]:
-            raise CLIError("cloud token redemption response is missing meshAuthKey for headscale mode")
+            raise CLIError(
+                f"cloud token redemption response is missing meshAuthKey for {normalized['meshMode']} mode"
+            )
+    if normalized["meshMode"] == "headscale":
         if not normalized["meshLoginServer"]:
             raise CLIError("cloud token redemption response is missing meshLoginServer for headscale mode")
         _normalize_url(
@@ -3726,7 +3734,7 @@ def _doctor_to_cloud_check(check_id: str, check: DoctorCheck) -> dict[str, str]:
     return _cloud_check(check_id, check.status, check.message)
 
 
-def _headscale_mesh_check(
+def _sidecar_mesh_check(
     config: dict[str, str],
     gateway_secret: dict[str, str],
 ) -> dict[str, str]:
@@ -3735,7 +3743,7 @@ def _headscale_mesh_check(
         missing.append("meshHostname")
     if not config.get("meshEndpointUrl"):
         missing.append("meshEndpointUrl")
-    if not config.get("meshLoginServer"):
+    if config.get("meshMode") == "headscale" and not config.get("meshLoginServer"):
         missing.append("meshLoginServer")
     if not gateway_secret.get("meshAuthKey"):
         missing.append("meshAuthKey secret")
@@ -3743,7 +3751,14 @@ def _headscale_mesh_check(
         return _cloud_check(
             "mesh-exposure",
             "FAIL",
-            "Headscale sidecar mesh configuration is missing: " + ", ".join(missing),
+            f"{config.get('meshMode', 'sidecar')} mesh configuration is missing: "
+            + ", ".join(missing),
+        )
+    if config.get("meshMode") == "managed-sidecar":
+        return _cloud_check(
+            "mesh-exposure",
+            "PASS",
+            f"InferCloud-managed sidecar mesh configured for {config['meshHostname']}",
         )
     return _cloud_check(
         "mesh-exposure",

@@ -324,12 +324,16 @@ class LiveClientSafetyTest(unittest.TestCase):
                 token="bootstrap",
                 cluster=ClusterTarget(namespace="team-a", context="prod-admin"),
                 cluster_name="prod",
+                mesh_mode=None,
             )
         finally:
             k8s_client._cloud_json_request = original
 
         self.assertEqual(response, {"ok": True})
-        self.assertEqual(captured, {"clusterName": "prod", "namespace": "team-a"})
+        self.assertEqual(
+            captured,
+            {"clusterName": "prod", "namespace": "team-a", "meshMode": None},
+        )
 
     def test_gpu_list_reports_unknown_when_cluster_pod_list_is_forbidden(self) -> None:
         client = live_client()
