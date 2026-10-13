@@ -137,18 +137,37 @@ kubectl apply -f modeldeployment.yaml
 
 ## Documentation
 
+**Getting started**
+
 - [Quickstart](docs/quickstart.md)
 - [Homelab setup](docs/homelab.md)
-- [CLI reference](docs/cli.md)
-- [SDK reference](docs/sdk.md)
-- [CRD reference](docs/crds.md)
-- [Cluster and ingress support](docs/cluster-ingress.md)
-- [Cloud mesh connect](docs/cloud-mesh-connect.md)
-- [Self-hosted dashboard](docs/dashboard.md)
+- [Manual deployment walkthrough](docs/devops-engineering-guide.md)
+
+**Reference**
+
+- [CLI](docs/cli.md)
+- [SDK](docs/sdk.md)
+- [CRDs](docs/crds.md)
+- [Architecture](docs/architecture.md)
+- [Routing](docs/routing.md)
+- [GPU scheduling](docs/gpu-scheduling.md)
+- [Autoscaling](docs/autoscaling.md)
+- [Runtime conformance](docs/runtime-conformance.md)
+
+**Operations**
+
 - [Production notes](docs/production.md)
 - [Namespace tenancy](docs/tenancy.md)
+- [Cluster and ingress](docs/cluster-ingress.md)
+- [Observability](docs/observability.md)
+- [Self-hosted dashboard](docs/dashboard.md)
 - [Backup and disaster recovery](docs/disaster-recovery.md)
 - [Build and publish images](docs/build.md)
+- [Cloud mesh connect](docs/cloud-mesh-connect.md)
+
+**Development**
+
+- [Development setup](docs/development.md)
 - [Core platform gate](docs/core-platform-gate.md)
 
 ## Development

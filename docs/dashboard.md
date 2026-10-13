@@ -1,17 +1,11 @@
 # Self-Hosted Dashboard
 
-InferOps includes a self-hosted dashboard for operators who want an in-cluster
-view of model deployments, GPU allocation, caches, endpoints, recent Events,
-log selectors, activation state, and scaling state.
-
-The dashboard is deliberately not an InferOps-hosted control plane. It runs in
-the user's cluster, talks to the Kubernetes API with its own ServiceAccount, and
-is read-only in this MVP.
+Read-only, in-cluster web UI for deployments, GPUs, caches, endpoints, Events,
+and log selectors.
 
 ## Install
 
-Install the operator and gateway first, then install or upgrade the dashboard in
-the same namespace:
+Install operator and gateway first, then:
 
 ```bash
 helm upgrade --install inferops-dashboard deploy/helm/inferops-dashboard \
@@ -20,58 +14,49 @@ helm upgrade --install inferops-dashboard deploy/helm/inferops-dashboard \
   --set-string dashboard.prometheusURL=https://prometheus.example.com
 ```
 
-For local access, port-forward the Service:
+Local access:
 
 ```bash
 kubectl -n inferops-system port-forward svc/inferops-dashboard 8088:8080
 ```
 
-Then open `http://127.0.0.1:8088`.
+Open `http://127.0.0.1:8088`.
 
-## Security Model
+## Security
 
-The dashboard chart grants:
+The dashboard ServiceAccount can:
 
-- namespaced `get` and `list` on `ModelDeployment`, `ModelCache`,
-  `ModelRuntime`, Pods, Services, and Events;
-- cluster-scoped `get` and `list` on Nodes, only to report GPU capacity.
+- `get`/`list` `ModelDeployment`, `ModelCache`, `ModelRuntime`, Pods,
+  Services, Events in its namespace;
+- `get`/`list` Nodes cluster-wide for GPU capacity.
 
-It does not grant Secret reads, status writes, or custom-resource mutation. The
-generated YAML endpoint removes `spec.secrets`, status, live annotations, UIDs,
-and resource versions before returning manifests.
-
-The Service is `ClusterIP` by default. Put authentication in front of the
-dashboard before exposing it outside a trusted network, and narrow
-`networkPolicy.ingressFrom` and `networkPolicy.apiServerCIDRs` for the target
-cluster.
+It cannot read Secrets, write status, or mutate custom resources. Put
+authentication in front of the Service before exposing it externally.
 
 ## API
 
-- `GET /api/snapshot` returns deployments, caches, runtimes, GPU summaries,
-  endpoint summaries, recent Events, log selectors, and Prometheus query hints.
-- `GET /api/generated-yaml` returns sanitized `ModelDeployment` manifests for
-  currently visible deployments. This endpoint is kept for API consumers and is
-  not shown in the default dashboard UI.
-- `GET /healthz` and `GET /readyz` support Kubernetes probes.
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/snapshot` | Deployments, caches, GPUs, endpoints, Events |
+| `GET /api/generated-yaml` | Sanitized `ModelDeployment` manifests |
+| `GET /healthz` | Liveness |
+| `GET /readyz` | Readiness |
 
-## Metrics And Grafana
+## Grafana dashboards
 
-When `serviceMonitor.enabled=true` and `dashboards.enabled=true` are set on the
-operator chart, Grafana sidecar installations can discover:
+Enable packaged Grafana dashboards on the operator chart:
 
-- `InferOps / Platform` for runtime-independent cache, shared-cache reference,
-  activation, GPU, and gateway signals.
-- `InferOps / vLLM Runtime` for vLLM-native request, token, TTFT, and KV-cache
-  metrics.
-- `InferOps / llama.cpp Runtime` for llama.cpp-native token and request metrics.
+```bash
+helm upgrade --install inferops-operator deploy/helm/inferops-operator \
+  --set serviceMonitor.enabled=true \
+  --set dashboards.enabled=true
+```
 
-See `docs/observability.md` for the metric naming, label-cardinality, and
-runtime-dashboard standards.
+- `InferOps / Platform` — cache, GPU, gateway, activation signals.
+- `InferOps / vLLM Runtime` — vLLM request, token, KV-cache metrics.
+- `InferOps / llama.cpp Runtime` — llama.cpp token and request metrics.
 
 ## Limitations
 
-- The dashboard is read-only; activation and scaling changes remain explicit
-  `kubectl`, CLI, SDK, or GitOps updates.
-- Grafana and Prometheus remain the source of truth for time-series data.
-- GPU request totals are computed from pods visible in the dashboard namespace;
-  Node capacity is cluster-visible through the minimal Node read permission.
+- Read-only in this MVP.
+- Prometheus/Grafana remain the source for time-series data.

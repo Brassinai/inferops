@@ -4,14 +4,12 @@ Single-node k3s with one NVIDIA GPU. Verified on Ubuntu 22.04/24.04.
 
 ## Node requirements
 
-- NVIDIA GPU with compute capability 7.0+
+- NVIDIA GPU, compute capability 7.0+
 - 32GB+ RAM
 - 100GB+ NVMe for model cache
-- Docker or containerd already running
+- Docker or containerd running
 
-## 1. k3s with NVIDIA runtime
-
-Install k3s and tell it to use the NVIDIA container runtime:
+## 1. Install k3s with NVIDIA runtime
 
 ```bash
 curl -sfL https://get.k3s.io | sh -s - \
@@ -19,105 +17,56 @@ curl -sfL https://get.k3s.io | sh -s - \
   --default-runtime nvidia
 ```
 
-Verify:
+Check:
 
 ```bash
 kubectl get nodes -o wide
 kubectl describe node <node> | grep -i nvidia
 ```
 
-Docs: [k3s NVIDIA runtime](https://docs.k3s.io/advanced#nvidia-container-runtime-support)
-
-## 2. NVIDIA Container Toolkit
-
-If the runtime is not present:
+## 2. Install NVIDIA Container Toolkit (if missing)
 
 ```bash
-# Add the NVIDIA package repositories and install nvidia-container-toolkit
-# Follow the official install for your distro:
-# https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
-
+# Follow: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html
 sudo nvidia-ctk runtime configure --runtime=containerd
 sudo systemctl restart k3s
 ```
 
-Docs: [NVIDIA Container Toolkit install guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
-
-## 3. NVIDIA Device Plugin
+## 3. Install NVIDIA Device Plugin
 
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/v0.17.0/nvidia-device-plugin.yml
 ```
 
-Verify allocatable GPUs:
+Check allocatable GPUs:
 
 ```bash
 kubectl describe node <node> | grep nvidia.com/gpu
 ```
 
-Docs: [NVIDIA k8s-device-plugin](https://github.com/NVIDIA/k8s-device-plugin)
-
-## 4. Storage
-
-Model caches use `hostPath` under `/var/lib/inferops/models`. Ensure the path exists and has space:
+## 4. Create cache storage
 
 ```bash
 sudo install -d -o 65532 -g 65532 -m 0750 /var/lib/inferops/models
 df -h /var/lib/inferops/models
 ```
 
-The downloader runs as UID/GID `65532` and deliberately uses a
-`hostPath.type` of `Directory`; InferOps will not create a root-owned cache
-directory that its non-root downloader cannot write.
-
-Advertise the portion of that filesystem InferOps may reserve on each cache
-node during install:
+## 5. Install InferOps
 
 ```bash
-inferops install --profile homelab \
-  --cache-path /var/lib/inferops/models \
-  --cache-capacity 500Gi
-```
-
-This is declared capacity, not a live free-space reading. Set it below the
-filesystem's usable size to leave operating headroom. Live disk-pressure and
-eviction reporting belongs to MVP-503.
-
-No special StorageClass is required for the homelab path.
-
-## 5. (Optional) Tailscale private access
-
-If you want to reach the gateway remotely without public ingress, install and
-configure the Tailscale Kubernetes Operator by following its current official
-documentation. InferOps deliberately does not install the operator or tailnet
-credentials.
-
-Docs: [Tailscale Kubernetes Operator](https://tailscale.com/docs/kubernetes-operator)
-and [layer 7 Ingress](https://tailscale.com/docs/kubernetes-operator/ingress/expose-workload-to-tailnet-l7)
-
-## 6. Install InferOps
-
-The install command validates that the cache root is an absolute, clean path,
-then passes it to the operator chart:
-
-```bash
-inferops install --profile homelab \
-  --cache-path /var/lib/inferops/models \
-  --cache-capacity 500Gi
-```
-
-This default install is CPU-safe and works for the portable llama.cpp path. For
-an NVIDIA GPU homelab, require cache placement on GPU-capable nodes:
-
-```bash
+# GPU
 inferops install --profile homelab \
   --compute-profile nvidia-gpu \
   --cache-path /var/lib/inferops/models \
   --cache-capacity 500Gi
+
+# CPU-only
+inferops install --profile homelab \
+  --cache-path /var/lib/inferops/models \
+  --cache-capacity 500Gi
 ```
 
-To create a private Tailscale ingress for the gateway after the Tailscale
-operator is ready:
+Optional Tailscale hostname after installing the Tailscale operator:
 
 ```bash
 inferops install --profile homelab \
@@ -126,40 +75,16 @@ inferops install --profile homelab \
   --tailscale-hostname inferops
 ```
 
-Re-running either command performs an in-place Helm upgrade. It does not
-install k3s, host drivers, the NVIDIA Container Toolkit, the NVIDIA device
-plugin, or the Tailscale operator.
+Re-running performs an in-place upgrade.
 
-## 7. Verify the platform
-
-Run diagnostics after installation:
+## 6. Verify
 
 ```bash
 inferops doctor
-```
-
-The cache diagnostic uses temporary read-only probe Jobs on GPU, cache, or
-otherwise schedulable nodes. It reports free bytes but does not create the
-cache directory or repair host prerequisites. Jobs have an active deadline and
-TTL for cleanup after interruption. If Job or Pod inspection is forbidden,
-doctor reports a failed check with the required RBAC remediation.
-
-Check GPU inventory:
-
-```bash
 inferops gpu list
 ```
 
-## 8. Run the acceptance workflow
-
-After the host prerequisites and install checks pass, run the recorded
-single-node GPU acceptance workflow from the repository root. The script runs
-a preflight for `inferops`, `kubectl`, and Kubernetes API reachability; install;
-doctor; GPU inventory; deploy; cache inspection; activation; streaming
-OpenAI-compatible inference; deactivation; GPU release inspection;
-re-activation; and cache inspection. It writes timings, command output, and
-defects to a Markdown report. Pass `--context` and `--kubeconfig` when the
-target cluster is not the current kubeconfig context.
+## 7. Run acceptance workflow
 
 ```bash
 scripts/homelab_acceptance.py \
@@ -170,46 +95,10 @@ scripts/homelab_acceptance.py \
   --output homelab-acceptance.md
 ```
 
-If the platform is already installed, add `--skip-install`. To validate
-shared cache reuse with the paired CPU manifest, pass the peer deployment name:
+Use `--skip-install` if already installed. See the script for shared-cache and
+replacement variants.
 
-```bash
-scripts/homelab_acceptance.py \
-  --manifest examples/yaml-deploy/modeldeployment-cpu-shared.yaml \
-  --model-name cpu-smollm-a \
-  --shared-cache-peer cpu-smollm-b \
-  --gateway-url http://<gateway-host> \
-  --namespace inferops-system \
-  --context <cluster-context> \
-  --skip-install \
-  --output homelab-shared-cache-acceptance.md
-```
-
-That run validates that cache inspection shows one `mode=shared` cache
-referenced by both deployments, and that `inferops cache delete <cache>` refuses
-while either deployment still references it.
-
-To validate explicit single-GPU replacement, add a second manifest and name:
-
-```bash
-scripts/homelab_acceptance.py \
-  --manifest examples/yaml-deploy/modeldeployment.yaml \
-  --model-name qwen-chat \
-  --replacement-manifest <replacement-modeldeployment.yaml> \
-  --replacement-name <replacement-name> \
-  --gateway-url http://<gateway-host> \
-  --namespace inferops-system \
-  --skip-install \
-  --output homelab-acceptance.md
-```
-
-Keep the generated report with the release notes or issue evidence. A passing
-run proves that streaming traffic reaches the gateway, deactivation releases
-the GPU while preserving cache state, re-activation does not require another
-model download, and explicit replacement either succeeds or reports visible
-rollback status.
-
-## 9. Hugging Face token (gated models only)
+## 8. Hugging Face token (gated models only)
 
 ```bash
 kubectl create secret generic hf-token \
@@ -229,10 +118,10 @@ spec:
 
 | Symptom | Fix |
 | --- | --- |
-| `nvidia.com/gpu` not allocatable | Check device plugin pod logs; verify `nvidia-smi` on host |
-| Image pull errors | Check image registry credentials; verify image tag exists |
-| Cache download stuck | Check HF token; verify disk space and path permissions |
-| Activation stays `WaitingForGPU` | Another model may be active; deactivate or use `--when-full ReplaceOldest` |
-| Gateway 503 | Deployment not `Active`; check `inferops status` and operator logs |
-| Doctor reports missing namespace | Create the namespace or select the correct one with `--namespace` |
-| Doctor cannot list pods | Grant broader Pod list permissions or run with elevated RBAC |
+| `nvidia.com/gpu` not allocatable | Check device plugin pod logs; run `nvidia-smi` on host |
+| Image pull errors | Check registry credentials and image tag |
+| Cache download stuck | Check HF token, disk space, and path permissions |
+| Stuck `WaitingForGPU` | Deactivate another model or use `--when-full ReplaceOldest` |
+| Gateway 503 | Check `inferops status` and operator logs |
+| Doctor namespace error | Create the namespace or pass `--namespace` |
+| Doctor cannot list pods | Grant Pod list RBAC or run with elevated permissions |

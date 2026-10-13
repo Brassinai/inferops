@@ -1,183 +1,107 @@
 # Architecture
 
-InferOps is a self-hosted, Kubernetes-native orchestration platform for
-OpenAI-compatible inference runtimes. The runtime abstraction targets
-nano-vLLM, vLLM, SGLang, and llama.cpp. `nano-vllm` is the default runtime and
-first packaged integration, not a platform-wide restriction. Both the control
-plane and data plane remain inside the user's cluster.
+InferOps is a self-hosted, Kubernetes-native platform for OpenAI-compatible
+inference runtimes. Control plane and data plane stay inside your cluster.
 
-```txt
+## Data flow
+
+```
 Python SDK / CLI / YAML
-        -> Kubernetes API
-        -> ModelDeployment CRD
-        -> InferOps operator
-        -> ModelCache + runtime workload + stable Service
-        -> InferOps gateway
-        -> selected runtime's OpenAI-compatible API
+        |
+        v
+Kubernetes API  ->  ModelDeployment CRD
+        |
+        v
+InferOps operator  ->  ModelCache + runtime workload + Service
+        |
+        v
+InferOps gateway  ->  runtime OpenAI API
 ```
 
-## Month-One Ownership
+## Core objects
 
-- `ModelDeployment` is the user-facing declaration for one model endpoint. The
-  operator owns its cache preparation, activation lifecycle, workload, stable
-  Service, and status.
-- `ModelRuntime` is a reusable runtime definition. A deployment selects
-  `nano-vllm`, `vllm`, `sglang`, `llama-cpp`, or another conforming runtime by
-  reference. InferOps defaults to `nano-vllm`.
-- `ModelCache` records one persisted model revision and its node-local
-  location. Deactivating a model does not delete its cache. The controller
-  selects a compatible node, creates a retry-safe downloader Job, and marks the
-  cache `Ready` only after the Job completes with the expected input hash. A
-  directory without a valid `.inferops-cache.json` marker is never considered
-  ready. The downloader resolves mutable Hugging Face revisions to an
-  immutable provider revision and records both requested and resolved values
-  in that marker before atomic publication.
-  Deployment-created caches use a deterministic artifact identity made from
-  namespace, source, repository, revision, cache root, storage type, and
-  `secretRef`; deployment name is excluded so identical public artifacts share
-  one reusable cache record.
-- The gateway owns the stable client-facing endpoint and sends traffic only to
-  an `Active`, non-draining runtime.
-- The SDK and CLI produce and consume the same CRD shapes documented in
-  [crds.md](crds.md). They do not call a hosted InferOps API.
+| Object | Purpose |
+| --- | --- |
+| `ModelDeployment` | Your model endpoint declaration |
+| `ModelRuntime` | Reusable runtime definition (nano-vLLM, vLLM, SGLang, llama.cpp) |
+| `ModelCache` | Persisted model revision on a node |
+| Gateway | Stable client-facing route |
 
-Deployment and activation are separate:
+## Lifecycle
 
-```txt
-deploy     = declare model + prepare cache + create stable Service identity
-activate   = acquire compute + start runtime + wait for readiness + route
-deactivate = stop routing + drain + stop runtime + release compute + keep cache
+```
+deploy     -> declare model + prepare cache + create Service
+activate   -> acquire compute + start runtime + route traffic
+deactivate -> drain traffic + stop runtime + release compute + keep cache
 ```
 
-Creating a `ModelDeployment` defaults to `Inactive` and must never evict an
-active model. Replacement policies are explicit opt-ins.
-
-CPU-only workloads omit `spec.resources.gpu` and run without a GPU
-extended-resource request. GPU workloads explicitly include
-`spec.resources.gpu`. The selected `ModelRuntime` is responsible for providing
-an image and arguments compatible with the requested compute. CPU-only is a
-compute selection, not a reduced feature tier: caching, activation,
-deactivation, scaling, routing, health checks, metrics, draining, and stable
-endpoint behavior remain the same. GPU scheduling, GPU assignment status, and
-GPU-specific runtime settings apply only to GPU workloads.
-
-## Stable Names And Routes
+## Stable names
 
 For a `ModelDeployment` named `<name>` in namespace `<namespace>`:
 
-- The operator-managed runtime Service is always `<name>-runtime` in the same
-  namespace. Rollouts and pod replacements must not change this name.
-- The gateway route prefix defaults to `/models/<name>`.
-- OpenAI-compatible requests use `/models/<name>/v1/...`; the gateway removes
-  `/models/<name>` and forwards `/v1/...` to `<name>-runtime:8000`.
-- The gateway admits traffic only after the current deployment conditions,
-  Service contract, and at least one non-terminating ready EndpointSlice
-  endpoint agree.
-- `status.serviceName` and `status.endpoint` report the resolved names. The
-  endpoint remains stable while the model is inactive, waiting, or failed,
-  although requests may return an unavailable response.
+| Resource | Name |
+| --- | --- |
+| Runtime Service | `<name>-runtime` |
+| Gateway route | `/models/<name>/v1/...` |
 
-`spec.routing.path` may override the route prefix with a canonical,
-non-reserved path, but the default convention is the interoperability contract
-all lanes must support.
+The gateway strips `/models/<name>` and forwards `/v1/...` to the runtime
+Service on port `8000`.
 
-## Runtime Abstraction
+## Runtime contract
 
-The operator and gateway depend on the `ModelRuntime` contract rather than
-hard-coding an engine. A conforming runtime declares its image, protocol, port,
-health path, metrics path, command, arguments, and non-secret environment.
-Runtime-specific adapters translate a `ModelDeployment` into that container
-contract.
+A conforming runtime declares:
 
-Packaged adapters use the same stable Service, gateway route, readiness,
-drain, status, and lifecycle contracts while retaining engine-specific images,
-arguments, model formats, and environment. The CPU llama.cpp adapter consumes
-GGUF files prepared by ModelCache.
+- Image
+- Port (default `8000`)
+- Health path
+- Readiness path
+- Metrics path
+- Command, args, and non-secret env
 
-Runtime images are hardware-specific artifacts. The default vLLM and SGLang
-images are NVIDIA CUDA images. vLLM also publishes architecture-specific
-Linux CPU images, which the separate `runtimes/vllm/Dockerfile.cpu` adapter
-uses. llama.cpp provides the portable local CPU path. SGLang's CPU backend is
-Xeon AMX-specific and is not a portable CPU fallback for ARM64 machines.
-Selecting CPU resources does not make a GPU engine image CPU-compatible.
+The operator translates `ModelDeployment` into that container contract.
 
-## Default Nano-vLLM Contract
-
-When `spec.runtime.ref` is `nano-vllm`, the operator starts the default
-nano-vLLM container with:
+## nano-vLLM defaults
 
 | Contract | Value |
 | --- | --- |
 | Container name | `runtime` |
-| HTTP port | `8000`, named `http` |
+| Port | `8000` |
 | Readiness | `GET /health` |
 | Liveness | `GET /health` |
 | Metrics | `GET /metrics` |
-| OpenAI API | `/v1/chat/completions`, `/v1/completions` |
 
-Required environment:
+Environment variables passed to the pod:
 
 | Variable | Meaning |
 | --- | --- |
-| `MODEL_REPO` | Model name exposed by the OpenAI-compatible API |
-| `MODEL_PATH` | Prepared node-local model path |
-| `MAX_MODEL_LEN` | Maximum model context length |
-| `TENSOR_PARALLEL_SIZE` | Optional whole-GPU tensor parallel count; omitted for CPU-only workloads |
-| `GPU_MEMORY_UTILIZATION` | Optional runtime GPU memory target; omitted for CPU-only workloads |
-| `PORT` | HTTP listen port, always `8000` in month one |
+| `MODEL_REPO` | Model name for the OpenAI API |
+| `MODEL_PATH` | Node-local prepared model path |
+| `MAX_MODEL_LEN` | Max context length |
+| `TENSOR_PARALLEL_SIZE` | Whole-GPU tensor parallel count (GPU only) |
+| `GPU_MEMORY_UTILIZATION` | GPU memory target (GPU only) |
+| `PORT` | Listen port, always `8000` |
 
-Model source revisions and registry credentials belong to the `ModelCache`
-download workflow. Runtime pods receive the prepared local path and must not
-receive `HF_TOKEN` or download model weights themselves.
+## Scheduling rules
 
-The packaged engine owns its OpenAI API, health, metrics, and process
-lifecycle. InferOps does not wrap engine APIs or instantiate engine classes.
-During deactivation or replacement, the operator first marks the deployment
-`Draining`, the gateway stops new requests, and Kubernetes sends `SIGTERM` to
-the engine process. The pod termination grace period must be longer than the
-configured drain timeout. Runtime definitions may use stronger
-engine-specific readiness endpoints, such as SGLang's `/health_generate`.
+- GPU requests are whole devices. Requests equal limits.
+- Activation scheduler reads node allocatable GPUs and reservations from
+  `Activating`/`Active` workloads.
+- Node-local cache affinity is a hard constraint.
+- CPU-only workloads use normal Kubernetes CPU/memory scheduling.
 
-## Scheduling And Failure Rules
+## Full-capacity behavior
 
-- GPU requests, when present, are whole devices. Requests and limits must be equal.
-- The activation scheduler reads node allocatable vendor resources and
-  reservations held by `Activating`/`Active` InferOps workloads. It also
-  recovers reservations from managed runtime Deployments when status is stale.
-- Node-local cache affinity is a hard placement constraint. The scheduler
-  prefers the ready cache placement by restricting activation to that node.
-- Scheduling is serialized and deterministic: compatible Ready schedulable
-  nodes are ranked by cache locality, available slots, then node name.
-- CPU-only workloads rely on ordinary Kubernetes CPU and memory scheduling.
-- `Queue` is the default full-capacity behavior and produces `WaitingForGPU`.
-  `Reject` produces a terminal `InsufficientGPUCapacity` condition.
-  Replacement values are explicit permissions for a durable single-GPU
-  drain/activate transaction. A failed replacement activation frees the slot
-  and attempts to restore the prior runtime.
-- Kubernetes and the vendor device plugin choose physical devices. InferOps
-  records its node reservation but leaves `assignedGPUs` empty until a trusted
-  runtime/device-plugin integration can report physical UUIDs.
-- A request for `Active` may remain `WaitingForCapacity` or `WaitingForGPU`.
-- A runtime is routed only after readiness succeeds.
-- Cache and activation failures are visible through phase and conditions.
+| Policy | Behavior |
+| --- | --- |
+| `Queue` | Wait for a free slot (default) |
+| `Reject` | Fail immediately |
+| `ReplaceOldest` | Evict oldest active model |
+| `ReplaceLowestPriority` | Evict lowest-priority active model |
 
-The scheduler uses `vendor.com/gpu`, defaulting to `nvidia.com/gpu`.
-`resources.gpu.type`, when set, must match the operator-configured GPU type
-label (default `inferops.dev/gpu-type`). See
-[gpu-scheduling.md](gpu-scheduling.md).
+Single-GPU replacement has downtime. On failure, the operator tries to
+restore the previous runtime.
 
-## Explicit Non-Goals
+## Non-goals
 
-MVP-001 does not define or promise GPU slicing, a hosted InferOps control
-plane, automatic eviction without an explicit replacement policy, advanced
-autoscaling, or OpenTelemetry export. These non-goals do not exclude vLLM or
-SGLang; multi-runtime support is part of the platform direction, with nano-vLLM
-as the initial packaged implementation.
-
-## Contract Governance
-
-The files under `operator/api/v1alpha1`, checked-in CRDs, contract examples,
-and this documentation are shared contracts. Changes after MVP-001 require
-review from all three lane owners: control plane, runtime/gateway, and developer
-experience. `.github/CODEOWNERS` records the current owners; repository branch
-protection must require approvals from each owner for enforcement.
+MVP-001 does not include GPU slicing, a hosted control plane, automatic
+eviction, advanced autoscaling, or OpenTelemetry export.

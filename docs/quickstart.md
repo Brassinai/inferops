@@ -1,50 +1,28 @@
 # Quickstart
 
-Deploy an OpenAI-compatible model on a k3s homelab using either an NVIDIA GPU
-or the portable llama.cpp CPU path.
+Deploy an OpenAI-compatible model on a single k3s node. Use a GPU runtime
+(`nano-vllm`, `vllM`, `sglang`) or the CPU-only `llama-cpp` path.
 
-## Prerequisites
+## What you need
 
-- Linux node; an NVIDIA GPU is required only for nano-vLLM, vLLM, or SGLang
-- [k3s with NVIDIA container runtime](https://docs.k3s.io/advanced#nvidia-container-runtime-support)
-  and the [NVIDIA Device Plugin](https://github.com/NVIDIA/k8s-device-plugin)
-  for GPU deployments
-- `kubectl` and `helm` 3.15+
-- Hugging Face token as a Kubernetes Secret (if pulling gated models)
+- Linux node. GPU only required for GPU runtimes.
+- `kubectl` and Helm 3.15+.
+- k3s with NVIDIA container runtime and device plugin (GPU only).
+- Hugging Face token as a Kubernetes Secret for gated models.
 
 ## Install InferOps
 
-The homelab profile installs or upgrades both charts, the CRDs, and the
-packaged `nano-vllm`, `vllm`, `sglang`, and `llama-cpp` runtime definitions:
-
 ```bash
-inferops install --profile homelab \
-  --cache-path /var/lib/inferops/models \
-  --cache-capacity 500Gi
-```
-
-The default compute profile is CPU-safe for the llama.cpp path. For NVIDIA GPU
-runtime deployments, install with:
-
-```bash
+# GPU homelab
 inferops install --profile homelab \
   --compute-profile nvidia-gpu \
   --cache-path /var/lib/inferops/models \
   --cache-capacity 500Gi
-```
 
-The equivalent lower-level commands are:
-
-```bash
-kubectl apply --server-side -f ./deploy/manifests/crds
-
-helm upgrade --install inferops-operator ./deploy/helm/inferops-operator \
-  --namespace default \
-  --values ./deploy/helm/inferops-operator/values-homelab.yaml
-
-helm upgrade --install inferops-gateway ./deploy/helm/inferops-gateway \
-  --namespace default \
-  --values ./deploy/helm/inferops-gateway/values-homelab.yaml
+# CPU-only homelab
+inferops install --profile homelab \
+  --cache-path /var/lib/inferops/models \
+  --cache-capacity 500Gi
 ```
 
 Verify:
@@ -53,17 +31,11 @@ Verify:
 kubectl get pods
 kubectl get modelruntime
 inferops doctor
-inferops gpu list
 ```
-
-`inferops doctor` may create temporary read-only cache probe Jobs. It removes
-them after collecting disk-space results; active deadlines and TTL cleanup
-cover interrupted runs. Probe Jobs never create or modify the host cache
-directory.
 
 ## Deploy a model
 
-### Option A: raw YAML
+**Option A: YAML**
 
 ```yaml
 # qwen.yaml
@@ -94,8 +66,6 @@ spec:
     maxReplicas: 1
   routing:
     enabled: true
-    path: /models/qwen-chat
-    openAICompatible: true
   cache:
     enabled: true
     type: nodeLocal
@@ -107,10 +77,9 @@ spec:
 kubectl apply -f qwen.yaml
 ```
 
-### Option B: Python SDK
+**Option B: Python SDK**
 
 ```python
-# app.py
 import inferops
 
 app = inferops.App("quickstart")
@@ -124,16 +93,9 @@ class QwenChat:
 inferops deploy app.py
 ```
 
-### CPU-only option
-
-Select the installed `llama-cpp` runtime and omit the GPU request:
+**CPU-only**
 
 ```python
-# cpu_app.py
-import inferops
-
-app = inferops.App("cpu-quickstart")
-
 @app.model(
     name="cpu-smollm",
     engine="llama-cpp",
@@ -151,34 +113,22 @@ class CPUSmolLM:
 inferops deploy cpu_app.py
 ```
 
-The equivalent Kubernetes manifest is
-[`examples/yaml-deploy/modeldeployment-cpu.yaml`](../examples/yaml-deploy/modeldeployment-cpu.yaml).
-
-## Activate
+## Activate and watch
 
 ```bash
 inferops activate qwen-chat
-```
-
-Watch:
-
-```bash
 inferops status qwen-chat --watch
 ```
-
-Phases:
 
 | Phase | Meaning |
 | --- | --- |
 | `Cached` | Ready to activate, no GPU used |
-| `WaitingForGPU` | No free GPU slot; stays queued |
+| `WaitingForGPU` | No free GPU; queued |
 | `Activating` | Runtime pod starting |
 | `Active` | Ready for traffic |
 | `Failed` | Check `inferops logs qwen-chat` |
 
 ## Call the model
-
-Via gateway:
 
 ```bash
 curl -X POST http://<gateway-host>/models/qwen-chat/v1/chat/completions \
@@ -186,7 +136,7 @@ curl -X POST http://<gateway-host>/models/qwen-chat/v1/chat/completions \
   -d '{"model":"qwen-chat","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-Via Python SDK client:
+Or with the Python client:
 
 ```python
 client = inferops.Client(base_url="http://<gateway-host>")
@@ -196,28 +146,16 @@ resp = client.chat.completions.create(
 )
 ```
 
-## Deactivate
+## Deactivate or delete
 
 ```bash
+# Stop runtime, release GPU, keep cache
 inferops deactivate qwen-chat
-```
 
-GPU is released. Cache is preserved. Re-activation skips re-download.
-
-For the full single-node GPU acceptance workflow with recorded timings and
-defects, run
-[`scripts/homelab_acceptance.py`](../scripts/homelab_acceptance.py) as described
-in [Homelab setup details](homelab.md).
-
-## Delete
-
-```bash
+# Remove deployment
 inferops delete qwen-chat
-```
 
-Delete removes the deployment and Service. Cache remains until you run:
-
-```bash
+# Remove cache files when no deployment uses them
 inferops cache list
 inferops cache delete <cache-name>
 ```
@@ -227,4 +165,4 @@ inferops cache delete <cache-name>
 - [Homelab setup details](homelab.md)
 - [CLI reference](cli.md)
 - [SDK reference](sdk.md)
-- [CRD field reference](crds.md)
+- [CRD fields](crds.md)
