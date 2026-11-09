@@ -630,6 +630,7 @@ class FakeKubernetesClient:
             "tailscaleHostname": request.tailscale_hostname,
             "exposure": exposure,
             "authEnabled": bool(request.gateway_auth_secret),
+            "imageTag": request.tag,
             "resources": resources,
         }
         self._installs.append(install)

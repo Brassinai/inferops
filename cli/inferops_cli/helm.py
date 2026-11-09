@@ -108,6 +108,7 @@ class HelmInstaller:
         if request.tailscale_hostname:
             _validate_tailscale_hostname(request.tailscale_hostname)
         exposure = _validate_exposure(request)
+        _validate_install_image_overrides(request)
         charts_dir = _resolve_charts_dir(request.charts_dir)
         crds_dir = charts_dir / "inferops-operator" / "crds"
         if not crds_dir.is_dir() or not any(crds_dir.glob("*.yaml")):
@@ -192,6 +193,7 @@ class HelmInstaller:
                 "tailscaleHostname": request.tailscale_hostname,
                 "exposure": exposure,
                 "authEnabled": bool(request.gateway_auth_secret),
+                "imageTag": request.tag,
                 "cacheAnnotations": annotated_nodes,
                 "resources": resources,
                 "crds": {
@@ -828,9 +830,11 @@ def _build_upgrade_command(
             )
         )
         command.extend(_operator_compute_profile_values(request))
+        command.extend(_install_operator_image_values(request))
     else:
         command.extend(_gateway_exposure_values(request))
         command.extend(_gateway_auth_values(request))
+        command.extend(_install_gateway_image_values(request))
     return command
 
 
@@ -1470,6 +1474,81 @@ def _summarize_cache_purge_step(
         "status": "completed",
         "output": completed.stdout.strip(),
     }
+
+
+def _validate_install_image_overrides(request: InstallRequest) -> None:
+    if not request.tag:
+        return
+    _validate_image_tag(request.tag)
+    _validate_image_repository(
+        "operator image repository", request.operator_image_repository
+    )
+    _validate_image_repository(
+        "gateway image repository", request.gateway_image_repository
+    )
+    _validate_image_repository(
+        "model downloader image repository",
+        request.model_downloader_image_repository,
+    )
+    _validate_image_repository(
+        "nano-vLLM image repository", request.nano_vllm_image_repository
+    )
+    _validate_image_repository("vLLM image repository", request.vllm_image_repository)
+    _validate_image_repository(
+        "SGLang image repository", request.sglang_image_repository
+    )
+    _validate_image_repository(
+        "llama.cpp image repository", request.llama_cpp_image_repository
+    )
+
+
+def _install_operator_image_values(request: InstallRequest) -> list[str]:
+    if not request.tag:
+        return []
+    tag = _escape_helm_string(request.tag)
+    return [
+        "--set-string",
+        "image.repository="
+        + _escape_helm_string(request.operator_image_repository),
+        "--set-string",
+        "image.tag=" + tag,
+        "--set-string",
+        "cache.downloaderImage="
+        + _escape_helm_string(
+            f"{request.model_downloader_image_repository}:{request.tag}"
+        ),
+        "--set-string",
+        "modelRuntimes.nano-vllm.image.repository="
+        + _escape_helm_string(request.nano_vllm_image_repository),
+        "--set-string",
+        "modelRuntimes.nano-vllm.image.tag=" + tag,
+        "--set-string",
+        "modelRuntimes.vllm.image.repository="
+        + _escape_helm_string(request.vllm_image_repository),
+        "--set-string",
+        "modelRuntimes.vllm.image.tag=" + tag,
+        "--set-string",
+        "modelRuntimes.sglang.image.repository="
+        + _escape_helm_string(request.sglang_image_repository),
+        "--set-string",
+        "modelRuntimes.sglang.image.tag=" + tag,
+        "--set-string",
+        "modelRuntimes.llama-cpp.image.repository="
+        + _escape_helm_string(request.llama_cpp_image_repository),
+        "--set-string",
+        "modelRuntimes.llama-cpp.image.tag=" + tag,
+    ]
+
+
+def _install_gateway_image_values(request: InstallRequest) -> list[str]:
+    if not request.tag:
+        return []
+    return [
+        "--set-string",
+        "image.repository=" + _escape_helm_string(request.gateway_image_repository),
+        "--set-string",
+        "image.tag=" + _escape_helm_string(request.tag),
+    ]
 
 
 def _operator_compute_profile_values(request: InstallRequest) -> list[str]:

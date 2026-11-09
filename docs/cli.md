@@ -21,6 +21,13 @@ inferops install --profile homelab \
   --cache-path /var/lib/inferops/models \
   --cache-capacity 500Gi
 
+# Install a specific image tag for operator, gateway, downloader, and runtimes
+inferops install --profile homelab \
+  --compute-profile nvidia-gpu \
+  --cache-path /var/lib/inferops/models \
+  --cache-capacity 500Gi \
+  --tag cloud
+
 # Upgrade all components
 inferops upgrade --namespace inferops-system --tag v0.2.0
 

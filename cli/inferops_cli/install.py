@@ -118,6 +118,48 @@ def register(subcommands) -> None:
         ),
     )
     parser.add_argument(
+        "--tag",
+        help=(
+            "Image tag to install for the operator, gateway, model downloader, "
+            "and packaged runtime images. Omit to use chart defaults."
+        ),
+    )
+    parser.add_argument(
+        "--operator-image",
+        default="ghcr.io/brassinai/inferops-operator",
+        help="Operator image repository without a tag.",
+    )
+    parser.add_argument(
+        "--gateway-image",
+        default="ghcr.io/brassinai/inferops-gateway",
+        help="Gateway image repository without a tag.",
+    )
+    parser.add_argument(
+        "--model-downloader-image",
+        default="ghcr.io/brassinai/model-downloader",
+        help="Model downloader image repository without a tag.",
+    )
+    parser.add_argument(
+        "--nano-vllm-image",
+        default="ghcr.io/brassinai/nano-vllm",
+        help="nano-vLLM runtime image repository without a tag.",
+    )
+    parser.add_argument(
+        "--vllm-image",
+        default="ghcr.io/brassinai/vllm",
+        help="vLLM runtime image repository without a tag.",
+    )
+    parser.add_argument(
+        "--sglang-image",
+        default="ghcr.io/brassinai/sglang",
+        help="SGLang runtime image repository without a tag.",
+    )
+    parser.add_argument(
+        "--llama-cpp-image",
+        default="ghcr.io/brassinai/llama-cpp",
+        help="llama.cpp runtime image repository without a tag.",
+    )
+    parser.add_argument(
         "--charts-dir",
         help="Path to the InferOps Helm charts. Usually detected automatically.",
     )
@@ -154,6 +196,36 @@ def run(args, client=None) -> int:
                 gateway_auth_secret=getattr(args, "gateway_auth_secret", None),
                 allow_unauthenticated_exposure=getattr(
                     args, "allow_unauthenticated_exposure", False
+                ),
+                tag=getattr(args, "tag", None),
+                operator_image_repository=getattr(
+                    args,
+                    "operator_image",
+                    "ghcr.io/brassinai/inferops-operator",
+                ),
+                gateway_image_repository=getattr(
+                    args,
+                    "gateway_image",
+                    "ghcr.io/brassinai/inferops-gateway",
+                ),
+                model_downloader_image_repository=getattr(
+                    args,
+                    "model_downloader_image",
+                    "ghcr.io/brassinai/model-downloader",
+                ),
+                nano_vllm_image_repository=getattr(
+                    args,
+                    "nano_vllm_image",
+                    "ghcr.io/brassinai/nano-vllm",
+                ),
+                vllm_image_repository=getattr(
+                    args, "vllm_image", "ghcr.io/brassinai/vllm"
+                ),
+                sglang_image_repository=getattr(
+                    args, "sglang_image", "ghcr.io/brassinai/sglang"
+                ),
+                llama_cpp_image_repository=getattr(
+                    args, "llama_cpp_image", "ghcr.io/brassinai/llama-cpp"
                 ),
                 charts_dir=getattr(args, "charts_dir", None),
             )

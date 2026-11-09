@@ -79,6 +79,50 @@ class HelmInstallerTest(unittest.TestCase):
         self.assertEqual(response["install"]["tailscaleHostname"], "inferops")
         self.assertIn("modelruntime/llama-cpp", response["install"]["resources"])
 
+    def test_install_tag_overrides_control_plane_and_runtime_images(self) -> None:
+        commands: list[list[str]] = []
+
+        def run(command):
+            commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0, stdout="ok\n", stderr="")
+
+        with tempfile.TemporaryDirectory() as directory:
+            charts_dir = self._make_charts(Path(directory))
+            response = HelmInstaller(runner=run).install(
+                InstallRequest(
+                    cluster=ClusterTarget(namespace="inferops-system"),
+                    profile="homelab",
+                    tag="cloud",
+                    charts_dir=str(charts_dir),
+                )
+            )
+
+        operator_command = commands[1]
+        gateway_command = commands[2]
+        self.assertIn(
+            "image.repository=ghcr.io/brassinai/inferops-operator",
+            operator_command,
+        )
+        self.assertIn("image.tag=cloud", operator_command)
+        self.assertIn(
+            "cache.downloaderImage=ghcr.io/brassinai/model-downloader:cloud",
+            operator_command,
+        )
+        self.assertIn(
+            "modelRuntimes.vllm.image.repository=ghcr.io/brassinai/vllm",
+            operator_command,
+        )
+        self.assertIn("modelRuntimes.vllm.image.tag=cloud", operator_command)
+        self.assertIn(
+            "modelRuntimes.llama-cpp.image.tag=cloud", operator_command
+        )
+        self.assertIn(
+            "image.repository=ghcr.io/brassinai/inferops-gateway",
+            gateway_command,
+        )
+        self.assertIn("image.tag=cloud", gateway_command)
+        self.assertEqual(response["install"]["imageTag"], "cloud")
+
     def test_cache_capacity_annotates_single_eligible_node_after_path_probe(self) -> None:
         commands: list[list[str]] = []
         created_manifests: list[dict[str, object]] = []
@@ -1160,6 +1204,7 @@ class HelmInstallerTest(unittest.TestCase):
         self.assertIn("tailscale.userspace=false", gateway_command)
         self.assertIn("tailscale.authOnce=true", gateway_command)
         self.assertIn("tailscale.kubeSecret=", gateway_command)
+        self.assertIn("cloudUsage.enabled=false", gateway_command)
 
     def test_cloud_connect_can_enable_offering_benchmark(self) -> None:
         commands: list[list[str]] = []

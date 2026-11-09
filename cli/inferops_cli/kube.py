@@ -147,6 +147,14 @@ class InstallRequest:
     load_balancer_class: str | None = None
     gateway_auth_secret: str | None = None
     allow_unauthenticated_exposure: bool = False
+    tag: str | None = None
+    operator_image_repository: str = "ghcr.io/brassinai/inferops-operator"
+    gateway_image_repository: str = "ghcr.io/brassinai/inferops-gateway"
+    model_downloader_image_repository: str = "ghcr.io/brassinai/model-downloader"
+    nano_vllm_image_repository: str = "ghcr.io/brassinai/nano-vllm"
+    vllm_image_repository: str = "ghcr.io/brassinai/vllm"
+    sglang_image_repository: str = "ghcr.io/brassinai/sglang"
+    llama_cpp_image_repository: str = "ghcr.io/brassinai/llama-cpp"
     charts_dir: str | None = None
 
 

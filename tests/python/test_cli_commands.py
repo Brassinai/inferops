@@ -198,6 +198,14 @@ class CLICommandParserTest(unittest.TestCase):
             "--load-balancer-class",
             "--gateway-auth-secret",
             "--allow-unauthenticated-exposure",
+            "--tag",
+            "--operator-image",
+            "--gateway-image",
+            "--model-downloader-image",
+            "--nano-vllm-image",
+            "--vllm-image",
+            "--sglang-image",
+            "--llama-cpp-image",
             "--charts-dir",
         ):
             self.assertIn(option, install_help)
