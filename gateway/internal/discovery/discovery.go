@@ -224,6 +224,7 @@ func backendFor(
 	}
 	backend := routing.Backend{
 		Name:        deployment.Name,
+		ModelID:     deployment.Spec.Model.Repo,
 		Namespace:   deployment.Namespace,
 		RoutePrefix: routePrefix,
 		State:       routing.StateUnavailable,

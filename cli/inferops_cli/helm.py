@@ -981,6 +981,8 @@ def _build_cloud_gateway_upgrade_command(
         f"tailscale.hostname={_escape_helm_string(mesh_hostname)}",
         "--set",
         "auth.enabled=true",
+        "--set",
+        "cloudUsage.enabled=false",
         "--set-string",
         f"auth.secretName={_escape_helm_string(gateway_auth_secret_name)}",
     ]
@@ -1168,6 +1170,8 @@ def _build_cloud_gateway_disconnect_command(
         DEFAULT_TIMEOUT,
         "--set",
         "tailscale.enabled=false",
+        "--set",
+        "cloudUsage.enabled=false",
     ]
     _helm_cluster_options(command, request.cluster)
     return command

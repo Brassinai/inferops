@@ -266,6 +266,17 @@ helm-lint:
 		exit 1; \
 	fi
 	@if $(HELM) template invalid deploy/helm/inferops-gateway \
+		--set cloudUsage.enabled=true >/dev/null 2>&1; then \
+		echo "error: cloud usage receipts require authenticated gateway access"; \
+		exit 1; \
+	fi
+	@if $(HELM) template invalid deploy/helm/inferops-gateway \
+		--set cloudUsage.enabled=true --set auth.enabled=true --set auth.secretName=test-key \
+		--set replicaCount=2 >/dev/null 2>&1; then \
+		echo "error: multiple cloud gateways require shared durable storage"; \
+		exit 1; \
+	fi
+	@if $(HELM) template invalid deploy/helm/inferops-gateway \
 		--set ingress.enabled=true --set-string ingress.path=/inferops >/dev/null 2>&1; then \
 		echo "error: gateway chart accepted an ingress path that changes model routes"; \
 		exit 1; \
@@ -343,6 +354,13 @@ helm-template:
 		--set auth.enabled=true \
 		--set-string auth.secretName=inferops-gateway-token \
 		> .verify/helm/inferops-gateway-auth.yaml
+	@$(HELM) template inferops-gateway-cloud-usage deploy/helm/inferops-gateway \
+		--set auth.enabled=true --set auth.secretName=test-key --set cloudUsage.enabled=true \
+		> .verify/helm/inferops-gateway-cloud-usage.yaml
+	@$(HELM) template inferops-gateway-cloud-usage-ha deploy/helm/inferops-gateway \
+		--set auth.enabled=true --set auth.secretName=test-key --set cloudUsage.enabled=true \
+		--set replicaCount=2 --set 'cloudUsage.persistence.accessModes[0]=ReadWriteMany' \
+		> .verify/helm/inferops-gateway-cloud-usage-ha.yaml
 	@$(HELM) template inferops-cloud-agent deploy/helm/inferops-cloud-agent \
 		--namespace inferops-system \
 		--set-string cloud.apiUrl=https://cloud.example.test \

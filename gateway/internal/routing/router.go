@@ -26,6 +26,7 @@ const (
 // Backend is an immutable registry record for one externally addressable model.
 type Backend struct {
 	Name        string
+	ModelID     string
 	Namespace   string
 	RoutePrefix string
 	Endpoint    *url.URL

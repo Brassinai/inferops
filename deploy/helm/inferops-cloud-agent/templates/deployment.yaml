@@ -78,6 +78,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            {{- if dig "usageReporting" "enabled" false .Values.cloud }}
+            - name: INFEROPS_CLOUD_USAGE_GATEWAY_URL
+              value: {{ default (printf "http://inferops-gateway.%s.svc.cluster.local" .Release.Namespace) (dig "usageReporting" "gatewayUrl" "" .Values.cloud) | quote }}
+            {{- end }}
             - name: INFEROPS_CLOUD_API_URL
               value: {{ $cloudAPIURL | quote }}
             - name: INFEROPS_PROVIDER_ACCOUNT_ID

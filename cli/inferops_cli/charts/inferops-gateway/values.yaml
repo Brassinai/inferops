@@ -100,6 +100,18 @@ auth:
   secretKey: token
   mountPath: /var/run/secrets/inferops-gateway-auth
 
+# Cloud receipts require durable storage; local-only gateways leave this disabled.
+# Multiple gateway replicas require a filesystem with shared RWX access and locks.
+cloudUsage:
+  enabled: false
+  queueLimit: 10000
+  persistence:
+    existingClaim: ""
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 1Gi
+
 podDisruptionBudget:
   enabled: true
   minAvailable: 1

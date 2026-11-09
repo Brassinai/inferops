@@ -21,6 +21,15 @@ spec:
       ports:
         - port: http
           protocol: TCP
+    {{- if dig "enabled" false (.Values.cloudUsage | default dict) }}
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: inferops-cloud-agent
+      ports:
+        - port: http
+          protocol: TCP
+    {{- end }}
   egress:
     - to:
         - podSelector:

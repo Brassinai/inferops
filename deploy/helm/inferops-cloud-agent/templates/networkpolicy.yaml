@@ -35,6 +35,15 @@ spec:
         - port: 443
           protocol: TCP
     {{- end }}
+    {{- if dig "usageReporting" "enabled" false .Values.cloud }}
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: inferops-gateway
+      ports:
+        - port: 8080
+          protocol: TCP
+    {{- end }}
     {{- if .Values.networkPolicy.egress.allowRuntimeHTTP }}
     - to:
         - podSelector:

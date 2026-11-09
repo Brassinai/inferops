@@ -1,0 +1,6 @@
+{
+  "key": "example-mesh-key-for-tests",
+  "canonical": "[\"infercloud-provider-usage-v1\",\"provider\",\"cluster\",\"offering\",\"request\",\"gateway\",\"chat_completions\",\"org/model\",\"Succeeded\",11,7,0,1000,\"\",1767225600123456,1767225601123456,{\"usageSource\":\"runtime\"}]",
+  "keyId": "mesh-hmac-sha256-v1:63ee00f808d6966aef9bd8252fc94ebb7cc544955a50924a784218c2b83ec700",
+  "signature": "89bcc33a4382dbf3f0cfe3c199efa0839a5fd615c0f3047f2b40e55cb031e1c1"
+}

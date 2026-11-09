@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/brassinai/inferops/gateway/internal/routing"
+	"github.com/brassinai/inferops/internal/cloudusage"
 )
 
 const retryAfterSeconds = 5
@@ -38,6 +39,7 @@ type Proxy struct {
 
 // Options configures gateway policies that may be overridden per backend.
 type Options struct {
+	UsageQueue            *cloudusage.Queue
 	DefaultRateLimit      *routing.RateLimitPolicy
 	RequestLoggingEnabled *bool
 	RequestLogger         *log.Logger
@@ -111,6 +113,15 @@ func (p *Proxy) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 		defer p.logRequest(writer, request, backend, started)
 		response = writer
 	}
+	if p.options.UsageQueue != nil {
+		observed, finish, err := p.observeCloudUsage(response, request, backend, upstreamPath)
+		if err != nil {
+			writeError(response, http.StatusServiceUnavailable, "cloud_usage_unavailable", "api_error", "cloud usage receipt could not be reserved; retry after report delivery recovers")
+			return
+		}
+		response = observed
+		defer finish()
+	}
 
 	switch backend.State {
 	case routing.StateReady:
@@ -176,11 +187,19 @@ func (p *Proxy) forward(
 			proxyRequest.SetXForwarded()
 			proxyRequest.Out.URL.Path = joinURLPath(backend.Endpoint, upstreamPath)
 			proxyRequest.Out.URL.RawPath = ""
+			for key := range proxyRequest.Out.Header {
+				if strings.HasPrefix(strings.ToLower(key), "x-infercloud-") {
+					proxyRequest.Out.Header.Del(key)
+				}
+			}
 		},
 		Transport:     p.transport,
 		FlushInterval: -1,
 		ErrorLog:      p.errorLog,
 		ModifyResponse: func(upstreamResponse *http.Response) error {
+			if writer, ok := response.(*usageResponseWriter); ok {
+				upstreamResponse.Body = &observedResponseBody{ReadCloser: upstreamResponse.Body, writer: writer}
+			}
 			upstreamResponse.Header.Set("X-Accel-Buffering", "no")
 			if upstreamResponse.StatusCode >= http.StatusInternalServerError && p.metrics != nil {
 				p.metrics.ObserveUpstreamError("response_5xx")

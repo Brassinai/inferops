@@ -35,6 +35,11 @@ cloud:
     maxConcurrency: 8
     latencySLOMillis: 10000
     totalTimeoutSeconds: 120
+  # Optional diagnostics; InferCloud meters provider earnings at its gateway.
+  usageReporting:
+    enabled: false
+    # Empty selects http://inferops-gateway.<namespace>.svc.cluster.local.
+    gatewayUrl: ""
   credentialSecretName: inferops-cloud-connection
   gatewayAuthSecretName: inferops-gateway-auth
 

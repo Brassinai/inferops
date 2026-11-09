@@ -1,0 +1,22 @@
+{{- $usage := .Values.cloudUsage | default dict }}
+{{- $persistence := dig "persistence" dict $usage }}
+{{- if and (dig "enabled" false $usage) (not (dig "existingClaim" "" $persistence)) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "inferops-gateway.fullname" . }}-usage
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "inferops-gateway.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    {{- toYaml (dig "accessModes" (list "ReadWriteOnce") $persistence) | nindent 4 }}
+  {{- if dig "storageClass" "" $persistence }}
+  storageClassName: {{ dig "storageClass" "" $persistence | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ dig "size" "1Gi" $persistence | quote }}
+{{- end }}

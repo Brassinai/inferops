@@ -1,3 +1,16 @@
+{{- $usage := .Values.cloudUsage | default dict }}
+{{- $usageEnabled := dig "enabled" false $usage }}
+{{- $persistence := dig "persistence" dict $usage }}
+{{- $accessModes := dig "accessModes" (list "ReadWriteOnce") $persistence }}
+{{- if and $usageEnabled (not .Values.auth.enabled) }}
+{{- fail "cloudUsage.enabled requires gateway auth.enabled" }}
+{{- end }}
+{{- if and $usageEnabled (gt (int .Values.replicaCount) 1) (not (has "ReadWriteMany" $accessModes)) }}
+{{- fail "multiple cloud gateways require cloudUsage.persistence.accessModes=[ReadWriteMany] and shared storage" }}
+{{- end }}
+{{- if and $usageEnabled (lt (int (dig "queueLimit" 10000 $usage)) 1) }}
+{{- fail "cloudUsage.queueLimit must be positive" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -9,10 +22,14 @@ spec:
   revisionHistoryLimit: 3
   progressDeadlineSeconds: 600
   strategy:
+    {{- if and $usageEnabled (not (has "ReadWriteMany" $accessModes)) }}
+    type: Recreate
+    {{- else }}
     type: RollingUpdate
     rollingUpdate:
       maxUnavailable: 0
       maxSurge: 1
+    {{- end }}
   selector:
     matchLabels:
       {{- include "inferops-gateway.selectorLabels" . | nindent 6 }}
@@ -30,6 +47,9 @@ spec:
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        {{- if and $usageEnabled (not (hasKey .Values.podSecurityContext "fsGroup")) }}
+        fsGroup: 65532
+        {{- end }}
       containers:
         - name: gateway
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -53,6 +73,12 @@ spec:
               value: {{ .Values.trafficPolicy.defaultRateLimit.burst | quote }}
             - name: INFEROPS_GATEWAY_REQUEST_LOGGING
               value: {{ .Values.trafficPolicy.requestLogging.enabled | quote }}
+            {{- if $usageEnabled }}
+            - name: INFEROPS_CLOUD_USAGE_QUEUE_DIR
+              value: /var/lib/inferops/cloud-usage
+            - name: INFEROPS_CLOUD_USAGE_QUEUE_LIMIT
+              value: {{ dig "queueLimit" 10000 $usage | quote }}
+            {{- end }}
             {{- if .Values.auth.enabled }}
             - name: INFEROPS_GATEWAY_AUTH_TOKEN_FILE
               value: {{ printf "%s/%s" .Values.auth.mountPath .Values.auth.secretKey | quote }}
@@ -62,6 +88,10 @@ spec:
             - name: gateway-auth
               mountPath: {{ .Values.auth.mountPath | quote }}
               readOnly: true
+            {{- if $usageEnabled }}
+            - name: cloud-usage
+              mountPath: /var/lib/inferops/cloud-usage
+            {{- end }}
           {{- end }}
           livenessProbe:
             httpGet:
@@ -139,8 +169,13 @@ spec:
                 - SYS_MODULE
               {{- end }}
         {{- end }}
-      {{- if or .Values.auth.enabled (and .Values.tailscale.enabled (or (eq .Values.tailscale.mode "headscale") (eq .Values.tailscale.mode "managed-sidecar"))) }}
+      {{- if or $usageEnabled .Values.auth.enabled (and .Values.tailscale.enabled (or (eq .Values.tailscale.mode "headscale") (eq .Values.tailscale.mode "managed-sidecar"))) }}
       volumes:
+        {{- if $usageEnabled }}
+        - name: cloud-usage
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-usage" (include "inferops-gateway.fullname" .)) (dig "existingClaim" "" $persistence) | quote }}
+        {{- end }}
         {{- if .Values.auth.enabled }}
         - name: gateway-auth
           secret:

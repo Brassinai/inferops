@@ -69,6 +69,7 @@ type config struct {
 	meshEndpointURL           string
 	credentialFile            string
 	gatewayTokenFile          string
+	usageGatewayURL           string
 	heartbeatInterval         time.Duration
 	discoveryRequired         bool
 	benchmarkEnabled          bool
@@ -86,6 +87,8 @@ type agent struct {
 	client          *http.Client
 	discovery       clusterDiscovery
 	lastHeartbeatOK atomic.Bool
+	lastUsageOK     atomic.Bool
+	usageMetrics    *usageMetrics
 }
 
 type clusterDiscovery interface {
@@ -343,14 +346,17 @@ func run(ctx context.Context) error {
 		prometheus.NewGoCollector(),
 		prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}),
 	)
+	if cfg.usageGatewayURL != "" {
+		agent.usageMetrics = newUsageMetrics(metricsRegistry)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if !agent.lastHeartbeatOK.Load() {
-			http.Error(w, "cloud heartbeat has not succeeded", http.StatusServiceUnavailable)
+		if !agent.lastHeartbeatOK.Load() || (cfg.usageGatewayURL != "" && !agent.lastUsageOK.Load()) {
+			http.Error(w, "cloud heartbeat or usage delivery has not succeeded", http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -367,7 +373,12 @@ func run(ctx context.Context) error {
 	go func() {
 		errCh <- server.ListenAndServe()
 	}()
-	go agent.heartbeatLoop(ctx)
+	workerCtx, stopWorkers := context.WithCancel(ctx)
+	defer stopWorkers()
+	go agent.heartbeatLoop(workerCtx)
+	if cfg.usageGatewayURL != "" {
+		go agent.usageLoop(workerCtx)
+	}
 
 	select {
 	case <-ctx.Done():
@@ -487,7 +498,12 @@ func (a *agent) sendHeartbeat(ctx context.Context) error {
 }
 
 func configFromEnvironment() (config, error) {
+	usageURL, err := usageGatewayURLFromEnvironment(os.Getenv("INFEROPS_CLOUD_USAGE_GATEWAY_URL"))
+	if err != nil {
+		return config{}, err
+	}
 	cfg := config{
+		usageGatewayURL:           usageURL,
 		address:                   getenvDefault("INFEROPS_CLOUD_AGENT_ADDRESS", defaultAddress),
 		cloudAPIURL:               strings.TrimRight(os.Getenv("INFEROPS_CLOUD_API_URL"), "/"),
 		providerAccountID:         strings.TrimSpace(os.Getenv("INFEROPS_PROVIDER_ACCOUNT_ID")),

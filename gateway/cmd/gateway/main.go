@@ -18,6 +18,7 @@ import (
 	gatewaymetrics "github.com/brassinai/inferops/gateway/internal/metrics"
 	"github.com/brassinai/inferops/gateway/internal/proxy"
 	"github.com/brassinai/inferops/gateway/internal/routing"
+	"github.com/brassinai/inferops/internal/cloudusage"
 	"github.com/brassinai/inferops/internal/health"
 	v1alpha1 "github.com/brassinai/inferops/operator/api/v1alpha1"
 	"github.com/prometheus/client_golang/prometheus"
@@ -111,11 +112,37 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if directory := strings.TrimSpace(os.Getenv("INFEROPS_CLOUD_USAGE_QUEUE_DIR")); directory != "" {
+		if strings.TrimSpace(os.Getenv("INFEROPS_GATEWAY_AUTH_TOKEN_FILE")) == "" {
+			return errors.New("cloud usage reporting requires gateway authentication")
+		}
+		limit := 10000
+		if raw := strings.TrimSpace(os.Getenv("INFEROPS_CLOUD_USAGE_QUEUE_LIMIT")); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err != nil || parsed < 1 {
+				return errors.New("INFEROPS_CLOUD_USAGE_QUEUE_LIMIT must be positive")
+			}
+			limit = parsed
+		}
+		proxyOptions.UsageQueue, err = cloudusage.OpenQueue(directory, limit)
+		if err != nil {
+			return fmt.Errorf("open durable cloud usage queue: %w", err)
+		}
+	}
 	gatewayProxy, err := proxy.NewWithMetricsAndOptions(registry, metricsRecorder, proxyOptions)
 	if err != nil {
 		return fmt.Errorf("create gateway proxy: %w", err)
 	}
 	var proxyHandler http.Handler = gatewayProxy
+	if queue := proxyOptions.UsageQueue; queue != nil {
+		proxyHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/internal/cloud/usage-reports") {
+				queue.ServeHTTP(w, r)
+				return
+			}
+			gatewayProxy.ServeHTTP(w, r)
+		})
+	}
 	var drainHandler http.Handler = http.HandlerFunc(gatewayProxy.ServeDrainStatus)
 	tokenFile := strings.TrimSpace(os.Getenv("INFEROPS_GATEWAY_AUTH_TOKEN_FILE"))
 	if tokenFile != "" {
