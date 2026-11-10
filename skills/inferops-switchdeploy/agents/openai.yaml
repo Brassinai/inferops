@@ -1,0 +1,3 @@
+interface:
+  display_name: "InferOps Model Switching"
+  short_description: "Switch models with capacity and recovery checks"

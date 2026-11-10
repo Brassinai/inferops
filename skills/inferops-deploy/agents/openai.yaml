@@ -1,0 +1,3 @@
+interface:
+  display_name: "InferOps Model Deployment"
+  short_description: "Choose, deploy, activate, and test a model"

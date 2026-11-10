@@ -1,0 +1,3 @@
+interface:
+  display_name: "InferOps Status and Repair"
+  short_description: "Diagnose blockers and verify scoped repairs"

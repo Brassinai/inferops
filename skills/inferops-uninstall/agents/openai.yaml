@@ -1,0 +1,3 @@
+interface:
+  display_name: "InferOps Uninstallation"
+  short_description: "Remove InferOps with explicit cleanup scope"

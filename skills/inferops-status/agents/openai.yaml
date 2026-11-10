@@ -1,0 +1,3 @@
+interface:
+  display_name: "InferOps Cluster Status"
+  short_description: "Inspect cluster health and report blockers"

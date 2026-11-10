@@ -1,0 +1,3 @@
+interface:
+  display_name: "InferOps Gateway Access"
+  short_description: "Forward the gateway and call a model"

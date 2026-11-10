@@ -1,0 +1,3 @@
+interface:
+  display_name: "InferOps Model Deactivation"
+  short_description: "Stop a model safely while keeping its cache"

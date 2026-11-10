@@ -1,0 +1,3 @@
+interface:
+  display_name: "InferOps Observability"
+  short_description: "Set up monitoring and explore model metrics"

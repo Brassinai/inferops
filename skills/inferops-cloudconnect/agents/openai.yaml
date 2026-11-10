@@ -1,0 +1,3 @@
+interface:
+  display_name: "InferOps Cloud Connection"
+  short_description: "Connect and verify an InferCloud provider"
