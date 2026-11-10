@@ -1,7 +1,9 @@
 # CLI Reference
 
-All commands use the `default` namespace unless you pass `--namespace`,
-`--context`, or `--kubeconfig`.
+Cluster commands use the `default` namespace unless you pass `--namespace`.
+Use `--context` and `--kubeconfig` to select the cluster explicitly. Pass these
+options after the relevant subcommand; `inferops generate` operates locally
+and does not accept cluster options.
 
 ## Global flags
 
@@ -37,9 +39,15 @@ inferops upgrade --component operator --tag v0.2.0
 # Uninstall (keeps CRDs and caches)
 inferops uninstall --namespace inferops-system
 
-# Uninstall everything including CRDs
+# Remove platform releases and cluster-wide CRDs/custom resources; retain model files
 inferops uninstall --namespace inferops-system --crds
 ```
+
+The [installation agent skill](../skills/inferops-install/SKILL.md) discovers a
+published stable version, verifies required images for the target architecture,
+and passes its concrete `--tag` during the initial installation. The CLI itself
+continues to use packaged chart defaults when `--tag` is omitted. A fresh skill
+installation does not need a second upgrade to reach the selected version.
 
 ## Lifecycle
 
@@ -74,6 +82,11 @@ inferops cache list
 inferops cache delete <cache-name>
 ```
 
+`cache delete` removes the ModelCache record and retains node-local files. It
+refuses referenced caches by default. Physical file purging is a separate,
+explicitly destructive uninstall option; inspect `inferops uninstall --help`.
+Deleting CRDs removes InferOps custom resources across every namespace.
+
 ## Gateway
 
 ```bash
@@ -104,11 +117,13 @@ inferops generate app.py > manifests.yaml
 ```bash
 inferops observability setup \
   --namespace inferops-system \
-  --monitoring-namespace monitoring \
-  --grafana-admin-password admin
+  --monitoring-namespace monitoring
 
 inferops observability open --namespace monitoring
 ```
+
+Use the chart-generated Grafana admin Secret for login rather than a shared
+example password. See the [observability guide](observability.md) for access.
 
 ## Cloud mesh
 

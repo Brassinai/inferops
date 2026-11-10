@@ -7,7 +7,7 @@ truth.
 ## Connect
 
 ```bash
-inferops cloud connect --token <bootstrap-token> \
+inferops cloud connect --token <provider-agent-credential> \
   --namespace inferops-system \
   --cluster-name homelab-a
 ```
@@ -22,6 +22,17 @@ printf '%s' "$INFEROPS_CLOUD_TOKEN" | \
 `connect` checks that InferOps is installed, redeems the token, writes state
 to Kubernetes, enables authenticated mesh gateway exposure, and installs the
 persistent cloud agent.
+
+Use a provider API key / agent credential for cluster setup, not a consumer
+inference API key. The CLI calls this credential a bootstrap token. Prefer
+`--token-stdin` or the `INFEROPS_CLOUD_TOKEN` environment variable over passing
+a secret in command arguments. Set `--cloud-api-url` when selecting a different
+InferCloud API origin.
+
+Add `--benchmark-offerings` to enable the agent's small one-time inference
+benchmark for discovered offerings. Connection success, benchmark results,
+offering health, and cloud routability are distinct states; only the default
+InferOps OpenAI-compatible endpoint is eligible for cloud publishing.
 
 Default mesh mode is InferCloud-managed Tailscale sidecar. To use your own
 Tailscale operator:

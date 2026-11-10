@@ -141,6 +141,7 @@ kubectl apply -f modeldeployment.yaml
 
 - [Quickstart](docs/quickstart.md)
 - [Homelab setup](docs/homelab.md)
+- [Agent skills for Claude Code, Codex, and other agents](skills/README.md)
 - [Manual deployment walkthrough](docs/devops-engineering-guide.md)
 
 **Reference**

@@ -155,7 +155,7 @@ inferops deactivate qwen-chat
 # Remove deployment
 inferops delete qwen-chat
 
-# Remove cache files when no deployment uses them
+# Remove an unused ModelCache record; node-local model files are retained
 inferops cache list
 inferops cache delete <cache-name>
 ```

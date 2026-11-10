@@ -13,7 +13,7 @@ Single-node k3s with one NVIDIA GPU. Verified on Ubuntu 22.04/24.04.
 
 ```bash
 curl -sfL https://get.k3s.io | sh -s - \
-  --kubeconfig-mode 644 \
+  --write-kubeconfig-mode 600 \
   --default-runtime nvidia
 ```
 
