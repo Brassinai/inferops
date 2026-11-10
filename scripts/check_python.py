@@ -13,6 +13,7 @@ ROOTS = (
     Path("examples"),
     Path("tests/python"),
     Path("scripts"),
+    Path("skills"),
 )
 
 

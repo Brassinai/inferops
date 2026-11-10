@@ -33,6 +33,7 @@ make helm-lint      # lint Helm charts
 make helm-template  # render Helm charts
 make yaml-check     # parse YAML and check CRD contracts
 make schema-check   # validate CRDs, manifests, examples
+make skills-check   # validate standalone skill bundles and CLI examples
 ```
 
 No virtualenv activation or `PATH` changes needed. Override defaults with

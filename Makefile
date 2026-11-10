@@ -32,7 +32,7 @@ CHARTS := $(filter-out deploy/helm/inferops-cloud-agent/,$(sort $(dir $(wildcard
 .PHONY: help setup tools-check fmt fmt-check test vet python-check python-test python-package runtime-conformance runtime-conformance-matrix \
 	operator-image gateway-image dashboard-image cloud-agent-image control-plane-images model-downloader-build model-downloader-test \
 	operator-image-push gateway-image-push dashboard-image-push cloud-agent-image-push control-plane-images-push model-downloader-push \
-	helm-lint helm-template yaml-check schema-check verify
+	helm-lint helm-template yaml-check schema-check skills-check verify
 
 help:
 	@printf '%s\n' \
@@ -61,6 +61,7 @@ help:
 		'  helm-template  Render all Helm charts' \
 		'  yaml-check     Parse checked-in YAML files' \
 		'  schema-check   Validate CRDs and manifests with kubeconform' \
+		'  skills-check   Validate portable skill bundles and CLI examples' \
 		'  verify         Run the same required checks as CI'
 
 setup:
@@ -498,4 +499,7 @@ schema-check: helm-template
 		-ignore-filename-pattern '(^|.*/)\.inferops/.*' \
 		deploy/manifests/examples examples .verify/helm
 
-verify: tools-check fmt-check test vet python-check python-test python-package helm-lint yaml-check schema-check
+skills-check:
+	$(PYTHON) scripts/check_skills.py
+
+verify: tools-check fmt-check test vet python-check python-test python-package helm-lint yaml-check schema-check skills-check
