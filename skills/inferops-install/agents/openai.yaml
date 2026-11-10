@@ -1,0 +1,3 @@
+interface:
+  display_name: "InferOps Installation"
+  short_description: "Set up Kubernetes, storage, and InferOps"
