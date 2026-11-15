@@ -257,6 +257,12 @@ import json
 import os
 import urllib.request
 
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 url = "http://127.0.0.1:8080/models/my-model/v1/chat/completions"
 model = "my-model"  # substitute the actual deployment name
 messages = [{"role": "user", "content": "Hello"}]
@@ -269,7 +275,7 @@ request = urllib.request.Request(
     data=json.dumps({"model": model, "messages": messages, "max_tokens": 64}).encode(),
     headers=headers,
 )
-with urllib.request.urlopen(request, timeout=60) as response:
+with urllib.request.build_opener(NoRedirect).open(request, timeout=60) as response:
     print(json.load(response)["choices"][0]["message"]["content"])
 ~~~
 

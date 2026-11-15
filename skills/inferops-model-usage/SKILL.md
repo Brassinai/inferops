@@ -99,6 +99,12 @@ from pathlib import Path
 import urllib.parse
 import urllib.request
 
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 model = os.environ["MODEL"]
 origin = os.environ["GATEWAY_URL"].rstrip("/")
 image_path = os.environ.get("IMAGE_PATH")
@@ -118,7 +124,7 @@ request = urllib.request.Request(
     data=json.dumps({"model": model, "messages": [{"role": "user", "content": content}], "max_tokens": 64}).encode(),
     headers=headers,
 )
-with urllib.request.urlopen(request, timeout=60) as response:
+with urllib.request.build_opener(NoRedirect).open(request, timeout=60) as response:
     print(json.load(response)["choices"][0]["message"]["content"])
 PY
 ~~~

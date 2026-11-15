@@ -7,6 +7,8 @@ import io
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+import os
+import re
 import shutil
 import struct
 import subprocess
@@ -428,6 +430,73 @@ class BenchmarkTests(unittest.TestCase):
                 server.shutdown()
                 thread.join()
         self.assertEqual(received, ["initial"] * len(self.modules))
+
+
+class UsageExampleTests(unittest.TestCase):
+    def test_documented_calls_preserve_auth_but_never_forward_it_on_redirect(self):
+        examples = []
+        for relative in ("inferops-model-usage/SKILL.md", "inferops-deploy/references/runbook.md",
+                         "inferops-switchdeploy/references/deployment.md"):
+            text = (SKILLS / relative).read_text()
+            blocks = re.findall(r"~~~python\n(.*?)~~~|python3 - <<'PY'\n(.*?)\nPY", text, re.DOTALL)
+            example = next(left or right for left, right in blocks if "INFEROPS_GATEWAY_TOKEN" in (left or right))
+            examples.append((relative, example))
+
+        received = []
+        redirected = []
+        reply = json.dumps({"choices": [{"message": {"content": "fixture answer"}}]}).encode()
+
+        class Destination(BaseHTTPRequestHandler):
+            def do_GET(self):
+                redirected.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(reply)
+
+            def log_message(self, *_args):
+                pass
+
+        class Gateway(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                received.append(self.headers.get("Authorization"))
+                self.send_response(302 if redirect else 200)
+                if redirect:
+                    self.send_header("Location", f"http://127.0.0.1:{destination.server_port}/untrusted")
+                self.end_headers()
+                if not redirect:
+                    self.wfile.write(reply)
+
+            def log_message(self, *_args):
+                pass
+
+        with HTTPServer(("127.0.0.1", 0), Destination) as destination, HTTPServer(("127.0.0.1", 0), Gateway) as gateway:
+            threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in (destination, gateway)]
+            for thread in threads:
+                thread.start()
+            try:
+                origin = f"http://127.0.0.1:{gateway.server_port}"
+                for redirect in (False, True):
+                    for relative, example in examples:
+                        with self.subTest(example=relative, redirect=redirect):
+                            source = example.replace("http://127.0.0.1:8080", origin)
+                            output = io.StringIO()
+                            with patch.dict(os.environ, {"MODEL": "chat", "GATEWAY_URL": origin,
+                                                        "INFEROPS_GATEWAY_TOKEN": "fixture-secret"}, clear=True), redirect_stdout(output):
+                                if redirect:
+                                    with self.assertRaises(urllib.error.HTTPError):
+                                        exec(compile(source, relative, "exec"), {})
+                                else:
+                                    exec(compile(source, relative, "exec"), {})
+                                    self.assertEqual(output.getvalue().strip(), "fixture answer")
+                            self.assertNotIn("fixture-secret", output.getvalue())
+            finally:
+                destination.shutdown()
+                gateway.shutdown()
+                for thread in threads:
+                    thread.join()
+        self.assertEqual(received, ["Bearer fixture-secret"] * len(examples) * 2)
+        self.assertEqual(redirected, [])
 
 
 class BundleIsolationTests(unittest.TestCase):
