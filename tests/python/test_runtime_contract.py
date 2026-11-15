@@ -133,6 +133,44 @@ class RuntimeContractTest(unittest.TestCase):
             ],
         )
 
+    def test_tool_calling_configuration_is_explicit_and_model_specific(self) -> None:
+        (self.model_path / "model.gguf").write_bytes(b"GGUF")
+        for runtime, options, expected in (
+            ("llama-cpp", {"TOOL_CALLING_ENABLED": "true"}, ["--jinja"]),
+            ("vllm", {"TOOL_CALLING_ENABLED": "true", "TOOL_CALL_PARSER": "hermes"},
+             ["--enable-auto-tool-choice", "--tool-call-parser", "hermes"]),
+        ):
+            with self.subTest(runtime=runtime):
+                result = self.run_entrypoint(
+                    runtime, model_path=str(self.model_path),
+                    extra_env={"LLAMA_SERVER_BIN": str(self.bin_path / "llama-server"), **options},
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.captured_args()[-len(expected):], expected)
+
+        for runtime in ("llama-cpp", "vllm"):
+            with self.subTest(runtime=runtime, invalid=True):
+                result = self.run_entrypoint(
+                    runtime, model_path=str(self.model_path),
+                    extra_env={"TOOL_CALLING_ENABLED": "not-a-boolean", "LLAMA_SERVER_BIN": str(self.bin_path / "llama-server")},
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("TOOL_CALLING_ENABLED", result.stderr)
+
+        result = self.run_entrypoint("vllm", model_path=str(self.model_path), extra_env={"TOOL_CALLING_ENABLED": "true"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("TOOL_CALL_PARSER", result.stderr)
+
+    def test_tooling_template_paths_are_preserved_as_one_argument(self) -> None:
+        (self.model_path / "model.gguf").write_bytes(b"GGUF")
+        for runtime, flag in (("llama-cpp", "--chat-template-file"), ("vllm", "--chat-template")):
+            result = self.run_entrypoint(
+                runtime, model_path=str(self.model_path),
+                extra_env={"CHAT_TEMPLATE_FILE": "/templates/tool template.jinja", "LLAMA_SERVER_BIN": str(self.bin_path / "llama-server")},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.captured_args()[-2:], [flag, "/templates/tool template.jinja"])
+
     def test_sglang_enables_metrics_and_maps_contract(self) -> None:
         result = self.run_entrypoint(
             "sglang",
@@ -238,6 +276,30 @@ class RuntimeContractTest(unittest.TestCase):
                 "8",
             ],
         )
+
+    def test_vision_runtime_arguments_survive_adapters(self) -> None:
+        (self.model_path / "model.gguf").touch()
+        (self.model_path / "mmproj.gguf").touch()
+        projector = str(self.model_path / "mmproj.gguf")
+        result = self.run_entrypoint(
+            "llama-cpp",
+            model_path=str(self.model_path),
+            extra_env={"MODEL_FILE": "model.gguf", "LLAMA_SERVER_BIN": str(self.bin_path / "llama-server")},
+            extra_args=("--mmproj", projector),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = self.captured_args()
+        self.assertEqual(args[args.index("--model") + 1], str(self.model_path / "model.gguf"))
+        self.assertEqual(args[args.index("--mmproj") + 1], projector)
+        result = self.run_entrypoint(
+            "vllm",
+            model_path=str(self.model_path),
+            extra_args=("--limit-mm-per-prompt", '{"image":4}', "--mm-processor-kwargs", '{"max_pixels":1048576}'),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = self.captured_args()
+        self.assertEqual(args[args.index("--limit-mm-per-prompt") + 1], '{"image":4}')
+        self.assertEqual(args[args.index("--mm-processor-kwargs") + 1], '{"max_pixels":1048576}')
 
     def test_llama_cpp_auto_detects_one_gguf_file(self) -> None:
         gguf_path = self.model_path / "model.gguf"

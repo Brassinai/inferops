@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from contextlib import redirect_stdout
+import base64
 import importlib.util
 import io
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -14,6 +16,7 @@ import threading
 import unittest
 from unittest.mock import patch
 import urllib.error
+import zlib
 
 ROOT = Path(__file__).resolve().parents[2]
 SKILLS = ROOT / "skills"
@@ -41,6 +44,14 @@ def metadata(files=None):
             {"rfilename": "model.safetensors", "size": 4 * GIB},
         ],
     }
+
+
+def test_png(color=(255, 0, 0), width=16, height=16):
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    pixels = (b"\x00" + bytes(color) * width) * height
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(pixels)) + chunk(b"IEND", b""))
 
 
 class CacheBudgetTests(unittest.TestCase):
@@ -93,8 +104,83 @@ class CacheBudgetTests(unittest.TestCase):
             path.write_text("MemTotal: 100 kB\nMemFree: 1 kB\nMemAvailable: 50 kB\n")
             self.assertEqual(inspector.read_memory(path)["available_bytes"], 50 * 1024)
 
+    def test_macos_memory_uses_vm_pages_and_real_page_size(self):
+        stats = ('Mach Virtual Memory Statistics: (page size of 16384 bytes)\n'
+                 'Pages free: 10.\nPages inactive: 20.\nPages speculative: 3.\nPages wired down: 99.\n')
+        with patch.object(inspector.platform, "system", return_value="Darwin"), patch.object(
+                inspector.subprocess, "check_output", side_effect=[str(16 * GIB), stats]):
+            report = inspector.read_memory()
+        self.assertEqual(report["total_bytes"], 16 * GIB)
+        self.assertEqual(report["available_bytes"], 33 * 16384)
+
+    def test_macos_missing_measurements_are_unknown(self):
+        with patch.object(inspector.platform, "system", return_value="Darwin"), patch.object(
+                inspector.subprocess, "check_output", side_effect=[str(16 * GIB), "incomplete"]):
+            self.assertIsNone(inspector.read_memory()["available_bytes"])
+
+    def test_memory_budget_keeps_platform_headroom_separate_from_disk(self):
+        plan = inspector.memory_budget(10 * GIB, 6 * GIB)
+        self.assertEqual(plan["reserve_bytes"], 2 * GIB)
+        self.assertEqual(plan["candidate_model_budget_bytes"], 4 * GIB)
+        self.assertEqual(inspector.memory_budget(2 * GIB, GIB)["candidate_model_budget_bytes"], 0)
+        self.assertIsNone(inspector.memory_budget(None, None))
+        with self.assertRaises(ValueError):
+            inspector.memory_budget(GIB, 2 * GIB)
+
 
 class ModelPlanTests(unittest.TestCase):
+    def test_selected_vision_pair_counts_full_snapshot_disk_but_only_selected_weights_for_ram(self):
+        value = metadata([
+            {"rfilename": "model.gguf", "size": GIB // 2},
+            {"rfilename": "mmproj.gguf", "size": GIB // 8},
+            {"rfilename": "other-quant.gguf", "size": 4 * GIB},
+        ])
+        report = planner.plan(value, "llama-cpp", 20, 2, None, 0.25,
+                              model_file="model.gguf", mmproj_file="mmproj.gguf",
+                              vision_workspace_gib=0.25, runtime_overhead_gib=0.25)
+        self.assertEqual(report["weight_bytes"], 5 * GIB // 8)
+        self.assertEqual(report["snapshot_bytes"], 37 * GIB // 8)
+        self.assertEqual(report["estimated_required_gib"]["disk_with_workspace"], 10)
+        self.assertEqual(report["estimated_required_gib"]["ram_with_headroom"], 2)
+        self.assertEqual(report["assessment"], "candidate_requires_inference_test")
+        self.assertTrue(report["requires_runtime_configuration"])
+        self.assertEqual(report["weight_files"], ["model.gguf", "mmproj.gguf"])
+        blocked = planner.plan(value, "llama-cpp", 5, 2, None, 0.25,
+                               model_file="model.gguf", mmproj_file="mmproj.gguf",
+                               vision_workspace_gib=0.25, runtime_overhead_gib=0.25)
+        self.assertEqual(blocked["assessment"], "insufficient")
+
+    def test_selected_vision_pair_requires_workspace_estimate(self):
+        value = metadata([{"rfilename": name, "size": GIB} for name in ["model.gguf", "mmproj.gguf"]])
+        report = planner.plan(value, "llama-cpp", 20, 16, None, 1,
+                              model_file="model.gguf", mmproj_file="mmproj.gguf")
+        self.assertEqual(report["assessment"], "unknown")
+        self.assertTrue(any("vision encoder" in b for b in report["blockers"]))
+
+    def test_explicit_gguf_selection_supports_multiple_quantizations_without_inventing_vision(self):
+        value = metadata([{"rfilename": name, "size": GIB} for name in ["q4.gguf", "q8.gguf"]])
+        report = planner.plan(value, "llama-cpp", 20, 16, None, 1, model_file="q4.gguf")
+        self.assertEqual(report["assessment"], "candidate_requires_inference_test")
+        self.assertEqual(report["weight_bytes"], GIB)
+        self.assertIsNone(report["mmproj_file"])
+
+    def test_invalid_or_unavailable_vision_artifacts_do_not_pass(self):
+        value = metadata([{"rfilename": name, "size": GIB} for name in ["model.gguf", "mmproj.gguf"]])
+        cases = [dict(mmproj_file="mmproj.gguf"), dict(model_file="missing.gguf"),
+                 dict(model_file="model.gguf", mmproj_file="model.gguf"), dict(model_file="../model.gguf"),
+                 dict(model_file="subdir/model.gguf"), dict(model_file="model.gguf", mmproj_file="projector.bin")]
+        for kwargs in cases:
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                planner.inventory(value, "llama-cpp", **kwargs)
+        with self.assertRaises(ValueError):
+            planner.inventory(value, "vllm", model_file="model.gguf")
+
+    def test_vision_workspace_and_runtime_overhead_must_be_valid(self):
+        for kwargs in [dict(vision_workspace_gib=-1), dict(vision_workspace_gib=float("nan")),
+                       dict(runtime_overhead_gib=0), dict(runtime_overhead_gib=float("inf"))]:
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                planner.plan(metadata(), "llama-cpp", 20, 16, None, 1, **kwargs)
+
     def test_storage_counts_full_snapshot_with_duplicate_weight_formats(self):
         value = metadata([
             {"rfilename": "model.safetensors", "size": 4 * GIB},
@@ -201,7 +287,7 @@ class BenchmarkTests(unittest.TestCase):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps(response).encode())
+                self.wfile.write(json.dumps(response(seen[-1]) if callable(response) else response).encode())
 
             def log_message(self, *_args):
                 pass
@@ -238,6 +324,52 @@ class BenchmarkTests(unittest.TestCase):
             self.assertIsNone(report["completion_tokens"])
             self.assertIsNone(report["sequential_completion_tokens_per_second"])
         self.run_server(reply, check)
+
+    def test_image_requests_check_contrasting_visual_answers_without_reporting_payloads(self):
+        samples = {test_png(): "red", test_png((0, 0, 255)): "blue"}
+        def respond(request):
+            content = request[2]["messages"][0]["content"]
+            self.assertEqual([part["type"] for part in content], ["text", "image_url"])
+            data_url = content[1]["image_url"]["url"]
+            self.assertTrue(data_url.startswith("data:image/png;base64,"))
+            color = samples[base64.b64decode(data_url.split(",", 1)[1])]
+            self.assertNotIn(color, content[0]["text"].lower())
+            return {"choices": [{"message": {"content": color}}], "usage": {"completion_tokens": 1}}
+        def check(origin, _seen):
+            with tempfile.TemporaryDirectory() as directory:
+                for module in self.modules:
+                    for data, color in samples.items():
+                        image = Path(directory) / "sample.png"; image.write_bytes(data)
+                        report = module.benchmark(origin, "chat", 1, 5, "fixture-secret",
+                                                  image_path=image, expected_text=color)
+                        self.assertTrue(report["visual_answer_checked"])
+                        self.assertEqual(report["input_type"], "image")
+                        self.assertNotIn("base64", json.dumps(report))
+                        self.assertNotIn("fixture-secret", json.dumps(report))
+                        self.assertNotIn(color, json.dumps(report))
+        self.run_server(respond, check)
+
+    def test_generic_text_reply_does_not_pass_an_expected_visual_answer(self):
+        def check(origin, _seen):
+            with tempfile.TemporaryDirectory() as directory:
+                image = Path(directory) / "sample.png"; image.write_bytes(test_png())
+                with self.assertRaisesRegex(ValueError, "expected visual answer"):
+                    self.modules[0].benchmark(origin, "chat", 1, 5, image_path=image, expected_text="red")
+        self.run_server({"choices": [{"message": {"content": "Hello there!"}}]}, check)
+
+    def test_image_byte_and_pixel_limits_are_checked_before_network_requests(self):
+        module = self.modules[0]
+        oversized_header = b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", 10000, 10000)
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "sample.png"
+            for data in [b"not a png", b"x" * (2 * 1024**2 + 1), oversized_header]:
+                image.write_bytes(data)
+                with self.subTest(size=len(data)), patch.object(module.urllib.request, "build_opener") as opener:
+                    with self.assertRaises(ValueError):
+                        module.benchmark("http://127.0.0.1:1", "chat", image_path=image)
+                    opener.assert_not_called()
+        with self.assertRaises(ValueError):
+            module.benchmark("http://127.0.0.1:1", "chat", expected_text="red")
 
     def test_empty_choices_rejected(self):
         def check(origin, _seen):

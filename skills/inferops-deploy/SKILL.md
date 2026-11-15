@@ -1,11 +1,27 @@
 ---
 name: inferops-deploy
-description: Assess hardware fit, select or validate a Hugging Face model, then deploy, activate, and test it. Use for new model deployment or model-fit assessment.
+description: Choose or validate a suitable model, deploy it, activate it, verify inference, and return working model-call examples, including llama.cpp vision requests. Explicit invocation includes completing deployment when asked to find the best model; honor explicit assessment-only requests.
 ---
 
 # Deploy an InferOps model
 
-Measure target capacity and model requirements, generate a supported configuration, prepare the cache, activate without implicit preemption, and verify real inference.
+An explicit invocation is an end-to-end deployment request, including wording
+such as "find the best llama.cpp model for this system that supports vision."
+Choose a suitable model, generate its supported configuration, prepare the cache,
+deploy, activate without implicit preemption, and verify real inference. Do not
+stop at a shortlist or ask the user to choose again when selection was delegated.
+Only stop at assessment when the user explicitly asks for recommendation only,
+comparison only, a plan, or no deployment. Do not turn an ordinary untagged
+recommendation question into permission to change a cluster.
+
+Honor required capabilities throughout selection. For llama.cpp vision, select a
+matching language-model/projector pair and create a dedicated runtime configuration.
+Vision requests require image-bearing inference verification; a text-only test
+does not satisfy them.
+Continue ordinary configuration and a bounded startup test within measured
+resource limits without seeking approval again. Stop for a concrete blocker when
+no candidate can safely meet the request, or when progress requires authority
+outside the requested deployment, such as stopping unrelated workloads.
 
 Read [targeting and command behavior](references/operations.md), then follow
 the [runbook](references/runbook.md). Resolve the installed skill directory
@@ -19,6 +35,12 @@ Read or execute only the supporting resources needed for the current step:
 - [create_hf_secret.py](scripts/create_hf_secret.py)
 - [smoke_inference.py](scripts/smoke_inference.py)
 
-Finish with observed results, verification performed, and any specific blocker.
+After successful deployment, return the actual gateway URL, model name, and
+copyable inference examples in the final answer; include an image request for
+vision models. Show authentication via a secure environment variable when needed,
+plus how to keep or restart the local forward. A smoke-test helper command alone
+is not a model-call example. Follow the runbook's model-call handoff instructions.
+For a blocked deployment, report the specific blocker and do not present an
+untested endpoint as working.
 Continue ordinary steps already authorized by the user; do not expand scope
 to unrelated workloads, destructive cleanup, or external exposure.

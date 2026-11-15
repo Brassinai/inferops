@@ -72,4 +72,14 @@ if [ -n "${CPU_THREADS_BATCH:-}" ]; then
     set -- "$@" --threads-batch "$CPU_THREADS_BATCH"
 fi
 
+# Explicit opt-in: a server's tool API does not establish model compatibility.
+case "${TOOL_CALLING_ENABLED:-}" in
+    true|1) set -- "$@" --jinja ;;
+    false|0|"") ;;
+    *) echo "error: TOOL_CALLING_ENABLED must be true or false" >&2; exit 1 ;;
+esac
+if [ -n "${CHAT_TEMPLATE_FILE:-}" ]; then
+    set -- "$@" --chat-template-file "$CHAT_TEMPLATE_FILE"
+fi
+
 exec "$server_bin" "$@"

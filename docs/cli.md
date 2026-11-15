@@ -43,11 +43,20 @@ inferops uninstall --namespace inferops-system
 inferops uninstall --namespace inferops-system --crds
 ```
 
-The [installation agent skill](../skills/inferops-install/SKILL.md) discovers a
-published stable version, verifies required images for the target architecture,
-and passes its concrete `--tag` during the initial installation. The CLI itself
-continues to use packaged chart defaults when `--tag` is omitted. A fresh skill
-installation does not need a second upgrade to reach the selected version.
+The [installation agent skill](../skills/inferops-install/SKILL.md) handles the
+whole environment: upstream SDK/CLI packages, Kubernetes prerequisites, persistent
+cache storage, CRDs, operator, gateway, and runtime definitions. By default it
+selects the newest published operator image using registry metadata and verifies
+its source and the companion versions declared by its packaged charts for the
+target node architecture. Package tags are independent: an operator commit tag
+does not imply the gateway, downloader, or runtime publishes that same tag. A GitHub release
+is not required; an explicitly requested stable release uses a separate stable
+channel. The default skill installs the verified chart defaults and upgrades only
+the operator to its selected tag, or upgrades an existing operator while
+preserving companion versions, settings and workloads. It measures disk
+cache and RAM/VRAM separately, configures cache-node capacity after reserves, and
+verifies rollout readiness. CLI commands still use explicit tags; omitting a tag
+from `inferops install` continues to use packaged chart defaults.
 
 ## Lifecycle
 

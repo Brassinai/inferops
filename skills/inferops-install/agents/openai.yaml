@@ -1,3 +1,3 @@
 interface:
   display_name: "InferOps Installation"
-  short_description: "Set up Kubernetes, storage, and InferOps"
+  short_description: "Install or upgrade InferOps and size system resources"

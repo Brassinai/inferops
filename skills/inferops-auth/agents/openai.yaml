@@ -1,0 +1,3 @@
+interface:
+  display_name: "InferOps Local Gateway Auth"
+  short_description: "Enable or disable local gateway authentication"

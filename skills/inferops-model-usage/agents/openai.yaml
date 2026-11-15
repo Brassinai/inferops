@@ -1,0 +1,3 @@
+interface:
+  display_name: "InferOps Local Model Usage"
+  short_description: "Show commands to list and call local models"

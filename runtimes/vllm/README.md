@@ -132,5 +132,43 @@ model acquisition remains the `ModelCache` controller's responsibility.
 | `GPU_MEMORY_UTILIZATION` | engine default | `--gpu-memory-utilization` |
 | `MAX_NUM_SEQS` | engine default | `--max-num-seqs` |
 | `ENFORCE_EAGER` | `false` | `--enforce-eager` |
+| `TOOL_CALLING_ENABLED` | unset | `true` adds `--enable-auto-tool-choice`; accepts `true`/`false` or `1`/`0` |
+| `TOOL_CALL_PARSER` | unset | required with tooling enabled; maps to `--tool-call-parser` |
+| `CHAT_TEMPLATE_FILE` | model metadata | `--chat-template` |
 
 Additional container arguments are forwarded to `vllm serve`.
+
+## Tool calling
+
+Select a parser and chat template compatible with the exact model and vLLM
+version. For example, a Hermes-compatible model can use
+`ModelRuntime.spec.args: ["--enable-auto-tool-choice", "--tool-call-parser", "hermes"]`.
+Do not select `hermes` for an arbitrary model. The environment mappings above
+are available in newly built adapter images; existing images can forward the
+equivalent engine arguments. Enabling tooling through the environment without a
+parser fails startup explicitly. False adds no flags and does not override
+explicit engine arguments.
+
+Per-runtime `command`, `args` and `env` are configurable through the operator
+chart's `modelRuntimes.<name>` values and the existing ModelRuntime CRD. Use
+dedicated runtimes for differing model/parser combinations. A running server
+does not establish tool-call correctness: validate streamed function arguments
+and a follow-up tool result, then retain evidence for InferCloud's operator
+verification workflow. These checks are separate from consumer login and the
+default cloud-connect workflow.
+
+## Vision models
+
+Use a compatible vision-language model and include its processor/tokenizer assets
+in ModelCache. Existing ModelRuntime `spec.args` can forward
+`--limit-mm-per-prompt '{"image":4}'` and model-specific processor options. There
+is no new InferOps deployment field or gateway upload API. The gateway preserves
+OpenAI-compatible image messages and records runtime `prompt_tokens` without
+trying to tokenize base64 data itself.
+
+The count limit alone does not bound image tokens. Configure and verify the
+processor's resolution/tiling limits for the selected model and pinned runtime.
+InferCloud vision publishing also requires an attestation that standard runtime
+usage includes visual tokens and fits its bounded image-input profile. Do not
+infer vision capability from the engine name. See
+[upstream multimodal input](https://docs.vllm.ai/en/stable/features/multimodal_inputs/).

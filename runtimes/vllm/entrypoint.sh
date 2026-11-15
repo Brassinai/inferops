@@ -44,4 +44,20 @@ case "${ENFORCE_EAGER:-false}" in
         ;;
 esac
 
+# Parser names are model-specific; never guess one from the engine name.
+case "${TOOL_CALLING_ENABLED:-}" in
+    true|1)
+        if [ -z "${TOOL_CALL_PARSER:-}" ]; then
+            echo "error: TOOL_CALL_PARSER is required when TOOL_CALLING_ENABLED is true" >&2
+            exit 1
+        fi
+        set -- "$@" --enable-auto-tool-choice --tool-call-parser "$TOOL_CALL_PARSER"
+        ;;
+    false|0|"") ;;
+    *) echo "error: TOOL_CALLING_ENABLED must be true or false" >&2; exit 1 ;;
+esac
+if [ -n "${CHAT_TEMPLATE_FILE:-}" ]; then
+    set -- "$@" --chat-template "$CHAT_TEMPLATE_FILE"
+fi
+
 exec vllm "$@"

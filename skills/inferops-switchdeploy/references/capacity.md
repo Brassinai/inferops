@@ -5,6 +5,11 @@ Desktop also measure the node-container backing filesystem and VM limits. WSL
 measurements are constrained by its VM, not the Windows machine's advertised RAM.
 Host inspection is not proof that a remote Kubernetes node has those resources.
 
+Disk cache, RAM, and VRAM are separate budgets. The installation configures a
+persistent disk cache and verifies compute headroom; the deployment workflow
+later chooses model-specific memory, context, and concurrency. A cache annotation
+neither allocates RAM nor enforces a filesystem quota.
+
 ## Storage
 
 Measure df -Pk at the actual cache path (or its existing parent), existing cache
@@ -21,6 +26,11 @@ artifacts do not count as free space. Round the declared capacity upward only
 if it remains within safe available space. Without a selected model it proposes
 at most 50Gi or half of safe additional space, with a minimum useful 1Gi budget.
 These are conservative policy defaults, not measurements or enforced quotas.
+Configure the measured recommendation explicitly through install's cache-node
+options, or update the selected node's cache-capacity annotation during an
+existing-platform upgrade. Respect retained artifact and reservation totals;
+never shrink below occupied/reserved capacity. Preserve a tighter explicit user
+budget, but do not inherit an old tutorial's 2Gi value as a system measurement.
 Respect a user's tighter budget and never allocate more than actual free space.
 
 The downloader fetches the entire Hugging Face repository snapshot. A repository
@@ -36,6 +46,14 @@ across nodes or annotate every node with one measured node's capacity.
 
 ## Compute
 
+The execution-host inspector reserves at least 2Gi or 20% of total RAM for the
+OS, Kubernetes and control plane before proposing a model planning ceiling.
+macOS memory measurements use sysctl and vm_stat's free/inactive/speculative
+pages; reclaimable memory is an estimate. Linux uses MemAvailable rather than
+MemFree. For container clusters, also enforce the actual VM/node allocatable
+limit after other workload requests. Unknown memory stays unknown; don't use the
+laptop's advertised RAM as the container's available budget.
+
 Use kubectl describe node for allocatable resources and allocated requests, all
 workloads on that node, quota, and scheduling restrictions. kubectl top is an
 optional usage observation, not a substitute for requests. GPU extended-resource
@@ -46,8 +64,11 @@ support independently. No GPU slicing or implicit preemption.
 
 Check the model architecture and quantization against the actual runtime image.
 For llama-cpp require a supported GGUF. The packaged default auto-selection needs
-one top-level GGUF; multiple files need a runtime definition configuring
-MODEL_FILE, which is not an App.model keyword. CUDA runtimes require supported
+one top-level GGUF; explicit model selection supports multi-GGUF snapshots through
+a dedicated runtime's MODEL_FILE, which is not an App.model keyword. Vision adds
+the matching projector through that runtime's --mmproj argument. With explicit
+--model-file/--mmproj-file, the planner counts only that pair as runtime weights,
+while the downloader/storage plan still counts every repository artifact. CUDA runtimes require supported
 NVIDIA hardware and compatible checkpoint/dtype. Apple Metal is not available
 inside the packaged Linux CPU container.
 
@@ -62,7 +83,11 @@ uncertainty. Do not manufacture model support, exact VRAM, or an optimal setting
 
 The deployment planner estimates RAM as weights plus 2Gi overhead (1.25x weights
 for CPU) plus supplied KV, and GPU VRAM as 1.2x weights plus 2Gi plus KV, rounded
-up. Pass free resources AFTER other reservations. These are cautious initial
+up. The 2Gi is default runtime overhead, separate from already-subtracted system
+reserves. --runtime-overhead-gib can replace it with a justified engine-specific
+estimate; an unknown or arbitrary smaller value is not proof of a fit. For a
+selected vision pair, add a positive --vision-workspace-gib estimate for encoder/
+processor working memory; the planner keeps preflight unknown when it is absent. Pass free resources AFTER other reservations. These are cautious initial
 estimates; they can overestimate or underestimate a particular engine. Multi-GPU
 sharding needs explicit runtime support and per-GPU checks; this planner does
 not certify it. Only a real readiness check and inference benchmark validate the

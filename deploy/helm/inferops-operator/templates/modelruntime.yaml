@@ -17,6 +17,18 @@ spec:
   healthPath: {{ required (printf "modelRuntimes.%s.healthPath is required" $name) $runtime.healthPath | quote }}
   readinessPath: {{ required (printf "modelRuntimes.%s.readinessPath is required" $name) $runtime.readinessPath | quote }}
   metricsPath: {{ required (printf "modelRuntimes.%s.metricsPath is required" $name) $runtime.metricsPath | quote }}
+  {{- with $runtime.command }}
+  command: {{ toJson . }}
+  {{- end }}
+  {{- with $runtime.args }}
+  args: {{ toJson . }}
+  {{- end }}
+  {{- with $runtime.env }}
+  env:
+    {{- range $key, $value := . }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end }}
+  {{- end }}
 {{- end -}}
 
 {{- range $name, $runtime := .Values.modelRuntimes }}

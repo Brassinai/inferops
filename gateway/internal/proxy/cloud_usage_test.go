@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -121,5 +122,45 @@ func TestFullUsageQueueRejectsBeforeRuntimeExecution(t *testing.T) {
 	p.ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("queue-full request was admitted: %d", response.Code)
+	}
+}
+
+func TestCloudImageMessagesPassThroughWithRuntimeTokenAccounting(t *testing.T) {
+	queue, err := cloudusage.OpenQueue(t.TempDir(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := routing.NewMemoryRegistry()
+	if err := registry.Replace([]routing.Backend{{Name: "server", ModelID: "model", Endpoint: parseURL(t, "http://runtime.test"), State: routing.StateReady}}); err != nil {
+		t.Fatal(err)
+	}
+	p, err := NewWithMetricsAndOptions(registry, nil, Options{UsageQueue: queue})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const payload = `{"model":"model","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":[{"type":"text","text":"Describe it."},{"type":"image_url","image_url":{"url":"data:image/png;base64,c3ludGhldGljLWltYWdlLWJ5dGVz"}}]}]}`
+	const runtimeResponse = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1536,\"completion_tokens\":7}}\n\ndata: [DONE]\n\n"
+	p.transport = usageRoundTrip(func(r *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil || string(body) != payload {
+			t.Fatal("provider gateway changed multimodal request bytes", err)
+		}
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(runtimeResponse))}, nil
+	})
+	request := correlatedRequest()
+	request.Body = io.NopCloser(strings.NewReader(payload))
+	request.ContentLength = int64(len(payload))
+	response := httptest.NewRecorder()
+	p.ServeHTTP(response, request)
+	batch, err := queue.Batch(10)
+	if response.Code != 200 || response.Body.String() != runtimeResponse || err != nil || len(batch.Reports) != 1 {
+		t.Fatal("vision request failed to retain its durable usage receipt", err)
+	}
+	report := batch.Reports[0].Report
+	if report.InputTokens != 1536 || report.OutputTokens != 7 || report.ReportPayload["usageSource"] != "runtime" {
+		t.Fatal("visual prompt usage was changed")
+	}
+	if strings.Contains(fmt.Sprint(batch.Reports[0]), "c3ludGhldGlj") {
+		t.Fatal("image content leaked into usage receipt")
 	}
 }

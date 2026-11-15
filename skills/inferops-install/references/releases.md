@@ -1,73 +1,116 @@
 # Resolve the installation version
 
-For a fresh installation, use the newest published stable InferOps version unless
-the user explicitly selected another version or an existing deployment is pinned.
-Resolve once and keep that tag and source commit fixed for the entire task.
-Do not install chart defaults and then run a second upgrade just to become current.
+## Default: newest published operator image
 
-The bundled resolver uses GitHub's latest non-draft, non-prerelease release. If
-there is no published release, it enumerates up to 1,000 Git tags and selects the
-highest stable numeric version (vMAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH). This
-fallback excludes prereleases, branches, latest, dev, and named development tags.
-A truncated inventory is not enough to establish the newest version.
-Fallback candidates are checked against their release metadata so that a numeric
-tag marked draft/prerelease is also excluded; discovery stops if twenty such
-publication checks still cannot establish an eligible version.
+The installation skill owns SDK/CLI setup, Kubernetes prerequisites, persistent
+cache preparation, and platform installation or upgrade. Its default version
+source is the published `ghcr.io/brassinai/inferops-operator` image inventory.
+A GitHub release or semantic Git tag is not a prerequisite for this path.
+Use `resolve_release.py --platform "$TARGET_PLATFORM" --runtime "$RUNTIME"`.
+The platform is the Linux Kubernetes NODE architecture, not the client host OS.
 
-The helper resolves the selected source ref to a full commit and returns SDK and
-CLI pip references at that same commit. This also obtains charts and CRDs from
-the selected source, rather than pairing new images with an old installed CLI.
-If matching approved InferOps-owned PyPI packages are used instead, verify that
-they contain compatible charts and contracts for the selected image release.
-Never infer their versions by stripping a v prefix; current package metadata can
-use a different version scheme.
+The helper reads the complete registry tag inventory up to 200 entries, examines
+image-config creation times, and selects the newest image. Registry tag order
+and lexical tag sorting do not establish recency. It prefers a commit/version
+alias over a floating alias of the same digest. Unknown timestamps, tied times
+for different digests, or an incomplete inventory require an explicit selection;
+the helper never silently chooses an older image to bypass a failure.
+An image build timestamp establishes newest build, not a stability guarantee.
 
-## Required image checks
+Resolve that image's source through its OCI revision metadata, an unambiguous
+commit-shaped tag, or a corresponding upstream version tag. Verify the resulting
+full commit through the upstream repository. Do not map an arbitrary label such
+as cloud to the current tip of a similarly named branch. If an image has no
+source mapping, use an explicitly verified --source-ref with --tag. Report the
+missing mapping instead of calling the whole problem a missing stable release.
 
-The helper queries GHCR metadata for operator, gateway, downloader, and the
-selected runtime, all at the chosen tag and target node platform. It verifies
-OCI/Docker manifest-list platform entries or a single-image config, records
-digests, and does not download image layers. CPU normally selects llama-cpp;
-a validated NVIDIA setup normally starts with nano-vllm unless another packaged
-runtime was requested. Pass the NODE's platform, not the agent laptop's platform.
+The returned sdk_spec and cli_spec install BOTH packages from that upstream
+commit, obtaining matching packaged charts and CRDs without requiring a local
+source checkout. Use an isolated environment and pip install --upgrade. Check
+that the selected CLI supports the install/cache/upgrade options needed by this
+workflow; an old image's matching source may lack newer contracts. Do not pair
+incompatible charts and images simply to bypass that limitation.
 
-An image check failure stops installation at the chosen version. Do not
-silently downgrade, omit --tag, build from an arbitrary branch, or substitute
-latest to make the command pass. Missing images may indicate incomplete release
-publication, missing registry access, or an unsupported target architecture.
-The helper verifies only the selected runtime: other ModelRuntime definitions
-registered by install still need image checks before being activated.
+Resolve once and keep the operator tag, source commit, chart defaults, and
+verified image digests fixed for the operation. The operator tag belongs to the
+operator package; it is not a universal tag for every InferOps image.
 
-Public metadata uses anonymous registry access. For an authorized private source,
-GH_TOKEN or GITHUB_TOKEN is used only for api.github.com. Private image metadata
-can use GHCR_USER and GHCR_TOKEN supplied through a secure environment. Those
-credentials go only to ghcr.io's token endpoint; short-lived pull tokens go to
-the registry. The helper never prints credentials, API error bodies, or signed
-blob redirect URLs. Registry verification does not configure Kubernetes pull
-credentials: provision authorized imagePullSecrets separately when needed and
-verify that Pods can actually pull images.
+For default operator-image selection, the helper reads the packaged operator and
+gateway chart defaults at the resolved upstream source commit. It returns
+chart_default_images and verifies those concrete gateway/downloader/runtime
+versions, the chart's initial operator image, and the selected latest operator.
+It does not look for inferops-gateway:<operator-commit-tag> unless that exact tag
+is actually declared by the upstream gateway chart. Preserve the chart-declared
+companion versions; do not infer their newest tag or downgrade them implicitly.
 
-## Explicit overrides and unavailable releases
+On a fresh cluster, install the verified packaged defaults using inferops install
+without --tag. If operator_upgrade_required is true, then upgrade only the
+operator to image_tag using inferops upgrade --component operator --tag. This is
+a deliberate component upgrade, not a second install of the whole platform.
+For an existing installation, upgrade only the operator while retaining its
+companion versions and release values. Verify custom retained images separately.
+An identical tag across every component is not a requirement for compatibility;
+the selected source charts declare the installation defaults.
+Installing the SDK/CLI alone does not install or upgrade the Kubernetes platform.
 
-An explicit --tag always takes precedence over automatic discovery. It normally
-maps to a Git tag of the same name. For a named image tag such as cloud with no
-matching Git tag, also provide an explicitly verified --source-ref containing its
-corresponding source commit/ref. Do not assume that a development branch is the
-source of an independently published image. Named mutable tags are a user choice,
-not a stable version discovered by this helper; record the source commit and
-verified digests and check deployed images.
+## Explicit tag or stable-only request
 
-If the repository has no stable release or version tag, report that publishing
-blocker. The user may supply a published image tag plus its verified source ref;
-do not invent a release. API errors, private-repository 404s, or rate limits also
-need resolution rather than being treated as proof that chart defaults are current.
+--tag selects the operator image tag and overrides automatic discovery on the
+default operator channel; companion versions still come from its source charts.
+For a named image tag with a different
+source ref, also pass --source-ref with the verified matching upstream commit.
+For example, an explicitly selected published cloud image can use its verified
+source commit; do not assume that today's cloud branch tip produced that image.
 
-For heterogeneous clusters, repeat checks at the SAME explicit image tag for
-each selected node/runtime platform pair before using those nodes. Preserve a
-user's installed version and configuration unless updating it is within scope.
-This fresh-install workflow does not implicitly authorize upgrading a live release.
+Use the source choice from the current request. A later explicit container
+package/tag selection supersedes an earlier stable-only selection.
+Only when the user explicitly requests a stable release, use --channel stable.
+That channel uses GitHub's latest non-draft, non-prerelease release, or the highest
+stable numeric Git tag (vMAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH) after publication
+checks. Prereleases and named development tags do not satisfy a stable-only
+request. No stable publication is a blocker for THAT channel, not for default
+operator-image discovery. The stable channel verifies a uniform release tag
+across the required packages before using install --tag.
+Preserve an explicit version, digest, or stable-only choice rather than silently replacing it with a development build.
+
+## Required image and source checks
+
+Verify GHCR metadata for the selected operator, gateway, downloader, and selected
+runtime at their resolved individual tags and target node platform. CPU normally
+selects llama-cpp; validated NVIDIA normally starts with nano-vllm. Record the manifest
+and platform digests. The helper reads metadata without downloading image layers.
+The default operator-only upgrade leaves the dashboard unchanged. Verify its own
+package/version separately if a dashboard upgrade is explicitly requested.
+
+Missing companion images, unsupported target architecture, invalid provenance,
+or inaccessible metadata remain specific blockers. Do not downgrade silently,
+substitute unverified chart defaults, assume a locally cached image is current,
+or build an arbitrary local checkout. Building and loading images from an upstream source
+commit is a separate explicitly selected development source path. Do not label
+it a published upgrade or push images to a registry as part of installation.
+
+A tag's presence does not prove compatibility or stability. Recheck the recorded
+digests before changing a cluster; mutable tags may move. Verify pulled imageIDs
+and rollout readiness afterward. Existing runtime definitions or model workloads
+must not be overwritten just to force every image onto one tag. Unused runtimes
+registered by fresh installation remain unverified until their images are checked.
+For heterogeneous nodes, repeat the same resolved per-component image checks
+for each required node/runtime platform. Respect existing custom images and documented compatibility.
+
+Source API errors, permission failures, and registry failures need specific fixes;
+do not interpret them as proof that no release or no image exists. A no-longer-
+available pinned image does not authorize resetting user state or losing cache.
+
+## Credential boundaries
+
+Public metadata uses anonymous access. GH_TOKEN or GITHUB_TOKEN goes only to
+api.github.com. Private image lookup can use GHCR_USER and GHCR_TOKEN through a
+secure environment; these go only to ghcr.io's token endpoint. Pull credentials
+go only to the registry. Helpers never print credentials, remote error bodies,
+or signed blob URLs. Metadata verification does not provision Kubernetes image
+pull credentials: configure authorized imagePullSecrets separately if required.
 
 Protocol references: [GitHub releases](https://docs.github.com/en/rest/releases/releases#get-the-latest-release),
-[repository tags](https://docs.github.com/en/rest/repos/repos#list-repository-tags),
+[registry tags](https://distribution.github.io/distribution/spec/api/#listing-image-tags),
 [registry authentication](https://distribution.github.io/distribution/spec/auth/token/),
-[OCI image index](https://github.com/opencontainers/image-spec/blob/main/image-index.md).
+[OCI image config](https://github.com/opencontainers/image-spec/blob/main/config.md).
