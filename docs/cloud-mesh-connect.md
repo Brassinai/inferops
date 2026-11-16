@@ -61,7 +61,21 @@ The `inferops-cloud-agent` Helm chart runs in-cluster and:
 - sends heartbeats to the cloud API;
 - reports deployment counts, offerings, and node capacity;
 - scrapes runtime metrics when available;
+- reports explicit tool configuration from owner-bound ready runtime pods, using
+  the referenced ModelRuntime's engine rather than its custom name;
 - exposes `/healthz`, `/readyz`, and `/metrics`.
+
+Tooling is provider-reported configuration, not a capability verification. The
+report includes only bounded parser identifiers and configuration hashes, never
+raw arguments, environment values, or template paths. Uninspectable settings
+remain `Unknown`; differing ready configurations report `Mixed`. New reports
+follow InferCloud's existing evidence approval and drift rules.
+When optional benchmarking is enabled, the agent also rebuilds missing output
+limit evidence after a restart, even if runtime throughput gauges are present.
+Existing benchmark deadlines, backoff, and cached results still apply.
+The native llama.cpp `LLAMA_ARG_N_PREDICT` setting supplies its configured output
+budget, and an explicit concurrency setting caps reported slots. These limits
+remain configuration evidence until the cloud operator verifies compatibility.
 
 ## Status and disconnect
 

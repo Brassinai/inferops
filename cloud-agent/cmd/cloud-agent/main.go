@@ -768,14 +768,16 @@ func (d *kubernetesDiscovery) Snapshot(ctx context.Context) (clusterSnapshot, er
 
 	runtimeConfigs := runtimeConfigsByName(runtimes.Items)
 	runtimeMetrics := d.runtimeMetricSnapshots(ctx, deployments.Items, runtimeConfigs)
+	boundPods := podsByModelDeployment(pods.Items, replicaSets.Items, workloadDeployments.Items)
 	snapshot := clusterSnapshot{
 		ModelDeployments: len(deployments.Items),
 		ModelRuntimes:    len(runtimes.Items),
 		ModelCaches:      len(caches.Items),
 		Region:           d.region,
-		Offerings:        modelOfferingsWithMetrics(deployments.Items, d.namespace, d.region, nodeGPU(nodes.Items), podsByModelDeployment(pods.Items, replicaSets.Items, workloadDeployments.Items), runtimeMetrics),
+		Offerings:        modelOfferingsWithMetrics(deployments.Items, d.namespace, d.region, nodeGPU(nodes.Items), boundPods, runtimeMetrics),
 		Nodes:            nodeCapacity(nodes.Items),
 	}
+	reportRuntimeTooling(snapshot.Offerings, runtimeConfigs, boundPods)
 	return snapshot, nil
 }
 
@@ -830,7 +832,9 @@ func (d *kubernetesDiscovery) runtimeMetricSnapshots(ctx context.Context, deploy
 			declared := declaredRuntimeLimitsForDeployment(item, cfg)
 			metrics = d.scrapeRuntimeMetrics(ctx, item.GetNamespace(), serviceName, cfg)
 			metrics = applyDeclaredRuntimeLimits(metrics, declared)
-			if metrics.TokensPerSecondEstimate <= 0 {
+			// Throughput gauges do not establish an output limit. After an agent
+			// restart, rebuild missing limit evidence even when traffic supplies TPS.
+			if metrics.TokensPerSecondEstimate <= 0 || metrics.MaxOutputTokens <= 0 {
 				if benchmark := d.benchmarkRuntime(ctx, item, serviceName, cfg); benchmark.Source != "" {
 					metrics = mergeRuntimeMetricSnapshots(benchmark, metrics)
 				}
@@ -853,6 +857,10 @@ func applyDeclaredRuntimeLimits(metrics runtimeMetricSnapshot, declared declared
 	if declared.OutputTokens > 0 {
 		metrics.MaxOutputTokens = declared.OutputTokens
 		metrics.MaxOutputTokensSource = declared.OutputSource
+	}
+	if declared.Concurrency > 0 && (metrics.MaxConcurrentRequests <= 0 || declared.Concurrency < metrics.MaxConcurrentRequests) {
+		metrics.MaxConcurrentRequests = declared.Concurrency
+		metrics.MaxConcurrentRequestsSource = declared.ConcurrencySource
 	}
 	return metrics
 }
@@ -1305,7 +1313,7 @@ func declaredRuntimeLimitsForDeployment(item unstructured.Unstructured, cfg runt
 		declared.ContextTokens = value
 		declared.ContextSource = "runtime-config"
 	}
-	if value := runtimeEnvInt(cfg.Env, "MAX_OUTPUT_TOKENS", "MAX_NEW_TOKENS", "MAX_TOKENS", "N_PREDICT"); value > 0 {
+	if value := runtimeEnvInt(cfg.Env, "MAX_OUTPUT_TOKENS", "MAX_NEW_TOKENS", "MAX_TOKENS", "N_PREDICT", "LLAMA_ARG_N_PREDICT"); value > 0 {
 		declared.OutputTokens = value
 		declared.OutputSource = "runtime-config"
 	}
