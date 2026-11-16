@@ -1,0 +1,36 @@
+- [x] Add `inferops install` options for declaring node-local cache capacity so homelab/OrbStack setup can annotate eligible cache nodes with `inferops.dev/cache-capacity` instead of requiring users to run `kubectl annotate node ...` manually.
+  - `--cache-capacity 10Gi`: annotate the only Ready schedulable node when the cluster has exactly one eligible cache node; fail with guidance when multiple nodes are eligible.
+  - `--cache-capacity 100Gi --cache-node node-a`: annotate one explicit node.
+  - `--cache-capacity 100Gi --cache-node-selector inferops.dev/cache=true`: annotate all matching nodes with the same declared capacity.
+  - `--cache-node-capacity node-a=100Gi --cache-node-capacity node-b=500Gi`: annotate multiple nodes with different declared capacities.
+  - Respect `--cache-path` by validating that the configured host path exists and is reachable on selected cache nodes; optionally add `--ensure-cache-path` for homelab/dev to create the directory with a helper Job/DaemonSet.
+  - Consider `--cache-capacity auto` for homelab/dev by probing free disk at `--cache-path` and reserving a conservative percentage, while keeping explicit capacity as the production-safe default.
+- [x] Add an `inferops observability` command group that wraps the common Prometheus/Grafana setup without making observability part of the default `inferops install` path.
+  - `inferops observability setup --context orbstack`: install or upgrade `kube-prometheus-stack`, enable Grafana dashboard sidecar discovery, and enable InferOps `ServiceMonitor`/dashboard ConfigMaps on the operator and gateway charts.
+  - `inferops observability install --namespace monitoring`: install or upgrade only the Prometheus/Grafana stack for users who want to manage InferOps chart settings separately.
+  - `inferops observability enable`: enable only InferOps observability resources against an existing Prometheus/Grafana installation.
+  - `inferops observability open`: discover the Grafana Service by labels, wait for a Ready Grafana Pod, find a free local port if `3000` is busy, start and keep a port-forward alive, reconnect if it drops, and print the local Grafana URL plus login instructions.
+  - Handle common port-forward issues with specific guidance: wrong Kubernetes context, missing `monitoring` namespace, different Helm release or Service name, Grafana Pod not Ready, missing RBAC for services/pods/secrets/port-forward, local port conflicts, WSL localhost confusion, and customized Grafana Secret/auth settings.
+  - For homelab/dev, allow an explicit easy credential such as `--grafana-admin-password admin`; for production/default profiles, generate a safer password or use the chart-created Secret rather than silently defaulting to `admin/admin`.
+  - Keep Helm as the advanced escape hatch and document the equivalent commands for users who already operate their own monitoring stack.
+- [x] Improve `inferops activate` so users get step-by-step progress and actionable errors without falling back to `kubectl` or Helm for normal debugging.
+  - Render activation as a step checklist with a spinner on the active step: spec validated, runtime resolved, cache placed/downloaded, GPU assigned, runtime Pod ready, model loaded, gateway route ready.
+  - On timeout or failure, print a structured error summary with the blocking resource, reason, relevant status conditions, last useful event, and short log tail from the cache download Pod or runtime Pod when available.
+  - Detect common cases and give InferOps-first remediation: missing/too-small cache capacity, missing cache path, cache download failure, Hugging Face auth failure, wrong compute profile, missing NVIDIA device plugin, zero GPU allocatable, runtime Pod Pending, image pull failure, CrashLoopBackOff, OOM while loading model, readiness timeout, and stale status/generation mismatch.
+  - Add `--verbose` or `--debug` to include deeper object details, while keeping default output concise and beginner-friendly.
+  - Return stable non-zero exit codes for rejected, failed, and timed-out activations so scripts can distinguish user/actionable failures from still-progressing work.
+- [x] Add `inferops diagnose <deployment>` as a read-only, deployment-specific investigation command for explaining why a model is not ready, stuck, failed, or behaving unexpectedly.
+  - Diagnose the live chain for one deployment: `ModelDeployment` -> `ModelCache` -> cache download Job/Pod -> runtime Deployment -> runtime Pod/events/logs -> Service/Gateway routing -> node GPU/cache capacity.
+  - Make it safe to run before activation, while `inferops activate` is still running, after timeout, after failure, or after redeploy/status mismatch.
+  - Default output should read like a focused incident report: status, blocking step, evidence, problem, and InferOps-first suggested fixes.
+  - Support `-o json` with the same structure for automation: deployment, phase, blockingStep, evidence, problem, suggestedFixes, and checked resources.
+  - Keep `inferops doctor` focused on cluster/install health, while `inferops diagnose <deployment>` focuses on one model deployment and its dependent resources.
+  - Reuse the diagnosis engine inside `inferops activate` when activation times out, fails, or stalls, so users get immediate next steps without manually running `kubectl describe` or `kubectl logs`.
+- [x] Add `inferops uninstall` for tearing down the InferOps platform without overloading `inferops delete`, which should remain scoped to one `ModelDeployment`.
+  - Default behavior: uninstall InferOps Helm releases such as operator, gateway, and optional dashboard while preserving CRDs, `ModelDeployment`/`ModelCache` records, and node-local cache files.
+  - `--crds`: also delete InferOps CRDs, which removes all InferOps custom resources from the cluster, but still does not delete node-local cache files.
+  - Add an explicit, high-friction cache cleanup path such as `inferops cache purge --all` or `inferops uninstall --purge-cache-files` for deleting actual on-disk model files.
+  - Consider wiring or renaming the existing `destroy` command sketch to `uninstall` so the CLI vocabulary is clearer: `delete <model>` removes one deployment, `uninstall` removes the platform.
+
+
+- [ ] ask of inferops is aware of kv cache and the likes
