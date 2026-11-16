@@ -1,0 +1,3 @@
+interface:
+  display_name: "InferOps Complete Setup"
+  short_description: "Install InferOps and launch a model with local access"

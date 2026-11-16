@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 import base64
 import importlib.util
 import io
@@ -276,7 +276,7 @@ class BenchmarkTests(unittest.TestCase):
     def setUpClass(cls):
         cls.modules = [
             load("skill_smoke_" + str(i), SKILLS / name / "scripts/smoke_inference.py")
-            for i, name in enumerate(("inferops-deploy", "inferops-gateway", "inferops-switchdeploy"))
+            for i, name in enumerate(("inferops-deploy", "inferops-gateway", "inferops-switchdeploy", "inferops-setup"))
         ]
 
     def run_server(self, response, test):
@@ -432,11 +432,126 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(received, ["initial"] * len(self.modules))
 
 
+class SetupChatVerificationTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.skill = Path(self.directory.name) / "inferops-setup"
+        shutil.copytree(SKILLS / "inferops-setup", self.skill)
+
+    @contextmanager
+    def gateway(self, respond):
+        seen = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                seen.append((self.path, self.headers.get("Authorization"), payload))
+                status, headers, body = respond(seen[-1])
+                self.send_response(status)
+                for name, value in headers.items():
+                    self.send_header(name, value)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                seen.append(("redirect-followed", None, None))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *_args):
+                pass
+
+        with HTTPServer(("127.0.0.1", 0), Handler) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                yield f"http://127.0.0.1:{server.server_port}", seen
+            finally:
+                server.shutdown()
+                thread.join()
+
+    def run_check(self, origin, **overrides):
+        environment = dict(os.environ, INFEROPS_GATEWAY_TOKEN="fixture-private-token", **overrides)
+        return subprocess.run([
+            sys.executable, str(self.skill / "scripts/verify_chat.py"),
+            "--gateway-url", origin, "--model", "chat", "--timeout", "5",
+        ], cwd=self.directory.name, env=environment, capture_output=True, text=True,
+            check=False, timeout=15)
+
+    @staticmethod
+    def reply(content, role="assistant", finish="stop"):
+        return {"choices": [{"message": {"role": role, "content": content}, "finish_reason": finish}]}
+
+    def test_isolated_bundle_checks_distinct_answers_without_auth_or_proxy(self):
+        def respond(request):
+            prompt = request[2]["messages"][0]["content"]
+            answer = "Hello!" if "hello" in prompt else "5"
+            return 200, {}, json.dumps(self.reply(answer)).encode()
+
+        with self.gateway(respond) as (origin, seen):
+            result = self.run_check(origin, HTTP_PROXY="http://127.0.0.1:1", NO_PROXY="")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["requests_succeeded"], 2)
+        self.assertEqual(report["checks_passed"], ["greeting", "simple_instruction"])
+        self.assertEqual(len(seen), 2)
+        self.assertTrue(all(item[0] == "/models/chat/v1/chat/completions" for item in seen))
+        self.assertTrue(all(item[1] is None for item in seen))
+        self.assertNotEqual(seen[0][2]["messages"], seen[1][2]["messages"])
+        self.assertTrue(all(item[2]["max_tokens"] <= 32 for item in seen))
+        self.assertNotIn("Hello", result.stdout)
+        self.assertNotIn("fixture-private-token", result.stdout + result.stderr)
+
+    def test_irrelevant_repetitive_and_canned_replies_fail(self):
+        for answer in ("Start a new business. " * 10, "Hello! Hello!", "hello", "5"):
+            with self.subTest(answer=answer), self.gateway(
+                lambda _request: (200, {}, json.dumps(self.reply(answer)).encode())
+            ) as (origin, _seen):
+                result = self.run_check(origin)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(json.loads(result.stdout)["error"], "chat check failed")
+                self.assertNotIn(answer, result.stdout + result.stderr)
+
+    def test_truncated_wrong_role_empty_and_malformed_responses_fail_privately(self):
+        for body in (
+            json.dumps(self.reply("hello", finish="length")).encode(),
+            json.dumps(self.reply("hello", role="user")).encode(),
+            json.dumps(self.reply("")).encode(),
+            b'{"choices":[]}', b'[]', b'private upstream error', b'x' * (64 * 1024 + 1),
+        ):
+            with self.subTest(body=body[:50]), self.gateway(
+                lambda _request: (200, {}, body)
+            ) as (origin, _seen):
+                result = self.run_check(origin)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertNotIn("private upstream error", result.stdout + result.stderr)
+                self.assertEqual(result.stderr, "")
+
+    def test_auth_failure_and_redirect_do_not_pass_or_print_error_body(self):
+        for status in (401, 302):
+            with self.subTest(status=status), self.gateway(
+                lambda _request: (status, {"Location": "/different-model"}, b"fixture-private-token")
+            ) as (origin, seen):
+                result = self.run_check(origin)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(json.loads(result.stdout)["http_status"], status)
+                self.assertEqual(len(seen), 1)
+                self.assertNotIn("fixture-private-token", result.stdout + result.stderr)
+
+    def test_external_origin_is_rejected_before_sending_inference(self):
+        result = self.run_check("https://example.com")
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stdout)["kind"], "ValueError")
+        self.assertEqual(result.stderr, "")
+
+
 class UsageExampleTests(unittest.TestCase):
     def test_documented_calls_preserve_auth_but_never_forward_it_on_redirect(self):
         examples = []
         for relative in ("inferops-model-usage/SKILL.md", "inferops-deploy/references/runbook.md",
-                         "inferops-switchdeploy/references/deployment.md"):
+                         "inferops-switchdeploy/references/deployment.md",
+                         "inferops-setup/references/deployment.md"):
             text = (SKILLS / relative).read_text()
             blocks = re.findall(r"~~~python\n(.*?)~~~|python3 - <<'PY'\n(.*?)\nPY", text, re.DOTALL)
             example = next(left or right for left, right in blocks if "INFEROPS_GATEWAY_TOKEN" in (left or right))
@@ -501,18 +616,19 @@ class UsageExampleTests(unittest.TestCase):
 
 class BundleIsolationTests(unittest.TestCase):
     def test_offline_model_planner_runs_without_repo_or_other_skills(self):
-        with tempfile.TemporaryDirectory() as directory:
-            skill = Path(directory) / "inferops-deploy"
-            shutil.copytree(SKILLS / "inferops-deploy", skill)
-            model = Path(directory) / "model.json"
-            model.write_text(json.dumps(metadata()))
-            result = subprocess.run([
-                sys.executable, str(skill / "scripts/model_plan.py"), "--metadata", str(model),
-                "--runtime", "vllm", "--free-disk-gib", "40", "--free-ram-gib", "16",
-                "--free-vram-gib", "16", "--kv-gib", "1",
-            ], cwd=directory, capture_output=True, text=True, check=False)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(json.loads(result.stdout)["assessment"], "candidate_requires_inference_test")
+        for name in ("inferops-deploy", "inferops-setup"):
+            with self.subTest(skill=name), tempfile.TemporaryDirectory() as directory:
+                model = Path(directory) / "model.json"
+                model.write_text(json.dumps(metadata()))
+                skill = Path(directory) / name
+                shutil.copytree(SKILLS / name, skill)
+                result = subprocess.run([
+                    sys.executable, str(skill / "scripts/model_plan.py"), "--metadata", str(model),
+                    "--runtime", "vllm", "--free-disk-gib", "40", "--free-ram-gib", "16",
+                    "--free-vram-gib", "16", "--kv-gib", "1",
+                ], cwd=directory, capture_output=True, text=True, check=False)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(json.loads(result.stdout)["assessment"], "candidate_requires_inference_test")
 
     def test_all_skill_links_remain_inside_individual_bundle(self):
         for entry in SKILLS.glob("*/SKILL.md"):

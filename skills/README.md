@@ -1,6 +1,6 @@
 # InferOps agent skills
 
-Twelve portable Agent Skills for operating InferOps through its existing CLI and
+Thirteen portable Agent Skills for operating InferOps through its existing CLI and
 contracts. Each skill contains its instructions or links to a complete local
 runbook. Each skill can be installed independently; required references and
 helpers are bundled inside it.
@@ -26,6 +26,23 @@ The Skills installer needs its supported Node/npm environment; using the skill
 itself does not require Node. Installation adds instructions and helpers, not a
 running Kubernetes cluster. The agent performs the requested operations using
 its available shell access and the user's authorization.
+
+For the complete prerequisite-to-model workflow, select `inferops-setup`:
+
+~~~sh
+npx skills add ./skills --skill inferops-setup -g -a claude-code codex
+~~~
+
+Invoke it with a request such as: "Use $inferops-setup to install or upgrade
+InferOps, install missing prerequisites, choose a suitable chat model, deploy
+and activate it, and give me a working local gateway without authentication."
+It reuses suitable existing components and verifies real unauthenticated model
+inference. Auth-off is limited to a local gateway without cloud or external/mesh
+exposure; an existing connection is reported as a blocker rather than removed.
+The individual skills remain available for their narrower workflows.
+For general chat, the setup skill also tests two distinct simple answers without
+an Authorization header. HTTP success with unrelated or repetitive output is
+insufficient; these bounded samples do not certify general model quality.
 
 ## Runtime requirements and limits
 
@@ -68,6 +85,7 @@ do not introduce extra skills for individual commands.
 
 | Skill | Workflow | Existing sources |
 | --- | --- | --- |
+| [inferops-setup](inferops-setup/SKILL.md) | Complete setup: bootstrap missing Python/Helm/Kubernetes prerequisites, install or upgrade InferOps, select/deploy/activate a model, and verify an unauthenticated local gateway. | Bundled installation, deployment, auth and gateway procedures below |
 | [inferops-install](inferops-install/SKILL.md) | Install or upgrade SDK/CLI and the Kubernetes platform at the newest published operator tag, with measured RAM and persistent cache sizing. | [Homelab](../docs/homelab.md), [quickstart](../docs/quickstart.md), [CLI](../docs/cli.md), [production](../docs/production.md) |
 | [inferops-deploy](inferops-deploy/SKILL.md) | Select a feasible model and finish deployment, activation and inference tests, including image verification for vision; assessment only when explicitly requested. | [Quickstart](../docs/quickstart.md), [SDK](../docs/sdk.md), [CRDs](../docs/crds.md), [GPU scheduling](../docs/gpu-scheduling.md) |
 | [inferops-status](inferops-status/SKILL.md) | Inspect cluster, model, cache, and connection state and report blockers without repairs. | [CLI](../docs/cli.md), [CRDs](../docs/crds.md), [architecture](../docs/architecture.md), [cloud connection](../docs/cloud-mesh-connect.md) |

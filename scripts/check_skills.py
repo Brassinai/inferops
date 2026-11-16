@@ -18,20 +18,37 @@ BUNDLED_COPIES = {
         f"{name}/references/operations.md" for name in (
             "inferops-deploy", "inferops-status", "inferops-status-fix",
             "inferops-observability", "inferops-gateway", "inferops-cloudconnect",
-            "inferops-deactivate", "inferops-switchdeploy", "inferops-uninstall",
+            "inferops-deactivate", "inferops-switchdeploy", "inferops-uninstall", "inferops-setup",
         )
     ],
     "inferops-install/references/capacity.md": [
         "inferops-deploy/references/capacity.md",
         "inferops-switchdeploy/references/capacity.md",
+        "inferops-setup/references/capacity.md",
     ],
+    "inferops-install/references/runbook.md": ["inferops-setup/references/installation.md"],
+    "inferops-install/references/releases.md": ["inferops-setup/references/releases.md"],
+    "inferops-install/scripts/inspect_system.py": ["inferops-setup/scripts/inspect_system.py"],
+    "inferops-install/scripts/resolve_release.py": ["inferops-setup/scripts/resolve_release.py"],
+    "inferops-auth/references/runbook.md": ["inferops-setup/references/auth.md"],
+    "inferops-gateway/references/runbook.md": ["inferops-setup/references/gateway.md"],
     "inferops-status/references/runbook.md": ["inferops-status-fix/references/status.md"],
-    "inferops-deploy/references/runbook.md": ["inferops-switchdeploy/references/deployment.md"],
-    "inferops-deploy/scripts/model_plan.py": ["inferops-switchdeploy/scripts/model_plan.py"],
-    "inferops-deploy/scripts/create_hf_secret.py": ["inferops-switchdeploy/scripts/create_hf_secret.py"],
+    "inferops-deploy/references/runbook.md": [
+        "inferops-switchdeploy/references/deployment.md",
+        "inferops-setup/references/deployment.md",
+    ],
+    "inferops-deploy/scripts/model_plan.py": [
+        "inferops-switchdeploy/scripts/model_plan.py",
+        "inferops-setup/scripts/model_plan.py",
+    ],
+    "inferops-deploy/scripts/create_hf_secret.py": [
+        "inferops-switchdeploy/scripts/create_hf_secret.py",
+        "inferops-setup/scripts/create_hf_secret.py",
+    ],
     "inferops-deploy/scripts/smoke_inference.py": [
         "inferops-gateway/scripts/smoke_inference.py",
         "inferops-switchdeploy/scripts/smoke_inference.py",
+        "inferops-setup/scripts/smoke_inference.py",
     ],
 }
 
