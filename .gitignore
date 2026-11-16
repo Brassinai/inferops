@@ -47,3 +47,6 @@ tmp/
 temp/
 
 phase.md
+
+# Local temporary files and deployment artifacts
+.tmp/
