@@ -5,6 +5,14 @@ description: Inspect InferOps cluster, model, cache, and connection health and r
 
 # Inspect InferOps status
 
+## Diagnose without changing state
+
+Investigate errors and inconsistent status with available read-only evidence
+before reporting a cause and actionable next steps. This status-only skill does
+not authorize repairs; if the user also requests a fix, use a repair workflow
+and its authorization boundaries.
+
+
 Collect existing resource evidence and report observed health, blockers, impact, and next actions without changing workloads or creating cache probes.
 
 Read [targeting and command behavior](references/operations.md), then follow

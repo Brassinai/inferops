@@ -13,6 +13,25 @@ within measured resource limits is part of deployment. Installing a new platform
 restarting a shared VM, enlarging its allocation, or stopping unrelated workloads
 needs the corresponding scope; do not assume those are model-deployment steps.
 
+## Recover an unavailable runtime image
+
+An image pull failure is a deployment failure to investigate, not a reason to
+abandon setup. Distinguish an unavailable digest from registry authentication,
+network, platform, and local image-store failures using the Pod event and registry
+metadata. Try the authorized registry access and normal recovery path first.
+If an inherited image pin is unavailable and the user did not explicitly require
+it, select a trusted InferOps-compatible image with verified provenance, digest,
+node architecture, model architecture, and required runtime options. A request to
+deploy or set up the model authorizes this scoped runtime repair; report the
+change without asking the user to repeat that request. Do not replace an explicit
+user-selected pin without approval, downgrade blindly, or expose credentials.
+Update only the affected model-specific runtime through its declarative owner,
+retain the old configuration for recovery, preserve the model cache and other
+workloads, then activate and verify readiness and actual inference. A local-only
+image must be reported as such, including its restart/availability limitation.
+If no verified compatible image or permitted registry access exists, explain the
+remaining concrete blocker and request the needed access or decision.
+
 ## Discover the target and model
 
 ~~~sh

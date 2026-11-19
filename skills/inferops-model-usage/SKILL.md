@@ -5,6 +5,13 @@ description: Show commands to list locally deployed InferOps models, inspect the
 
 # Show local model usage commands
 
+## Troubleshooting commands
+
+When relevant, include concise read-only diagnostic commands and scoped recovery
+commands the user can choose to run. This commands-only skill never executes or
+changes the cluster; actual repairs require an authorized action workflow.
+
+
 Return copyable commands only, with short shell comments where needed. Do not
 execute discovery, port-forwarding, inference, or any other commands when this
 skill is invoked. Use model names, context, namespace, ports and capabilities
